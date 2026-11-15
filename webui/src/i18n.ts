@@ -19,17 +19,35 @@ function detectInitialLocale(): Locale {
 
 const en = {
   appSubtitle: "Rust DNS Ad-Blocker · Fjall + SolidJS",
-  navDashboard: "Dashboard",
+  navDashboard: "Overview",
   navLogs: "Query Log",
   navRules: "Filter Rules",
   navSettings: "Settings",
   langToggle: "中文",
+  themeLight: "Light",
+  themeDark: "Dark",
+  statusLive: "Live",
+  statusOffline: "Offline",
 
   statTotalQueries: "Total Queries",
   statBlocked: "Blocked",
   statCacheHits: "Cache Hits",
   statActiveRules: "Active Rules",
+  statCacheEntries: "Cache Entries",
+  statBlockRate: "Block Rate",
+  statHitRate: "Hit Rate",
+  queryDistribution: "Query Distribution",
+  distForwarded: "Forwarded",
+  distCached: "Cached",
+  distBlocked: "Blocked",
+  distRewritten: "Rewritten",
+  distError: "Errors",
+  filterBreakdown: "Filter Ruleset",
+  filterBlockRules: "Block",
+  filterAllowRules: "Allow",
+  filterRewriteRules: "Rewrite",
   topBlockedDomains: "Top Blocked Domains",
+  topQueriedDomains: "Top Queried Domains",
   topClients: "Top Clients",
   noDataRecorded: "No data recorded yet.",
 
@@ -47,6 +65,8 @@ const en = {
   logsColType: "Type",
   logsColStatus: "Status",
   logsColLatency: "Latency",
+  logsEmpty: "No matching query logs found.",
+  logsCountSuffix: "events",
 
   rulesTitle: "Custom Filtering Rules",
   rulesSubtitle:
@@ -56,6 +76,7 @@ const en = {
   rulesSaved: "Rules reloaded",
   rulesFailed: "Failed to save",
   rulesNetworkError: "Network error",
+  rulesLinesSuffix: "lines",
 
   settingsTitle: "Runtime Configuration",
   settingsSubtitle:
@@ -84,12 +105,30 @@ const zhCN: Record<TranslationKey, string> = {
   navRules: "过滤规则",
   navSettings: "配置设置",
   langToggle: "EN",
+  themeLight: "日间",
+  themeDark: "夜间",
+  statusLive: "实时",
+  statusOffline: "离线",
 
   statTotalQueries: "总查询数",
   statBlocked: "已拦截",
   statCacheHits: "缓存命中",
   statActiveRules: "生效规则数",
+  statCacheEntries: "缓存条目",
+  statBlockRate: "拦截率",
+  statHitRate: "命中率",
+  queryDistribution: "查询分布",
+  distForwarded: "已转发",
+  distCached: "缓存命中",
+  distBlocked: "已拦截",
+  distRewritten: "已重写",
+  distError: "错误",
+  filterBreakdown: "规则构成",
+  filterBlockRules: "拦截",
+  filterAllowRules: "放行",
+  filterRewriteRules: "重写",
   topBlockedDomains: "拦截域名排行",
+  topQueriedDomains: "热门查询域名",
   topClients: "活跃客户端排行",
   noDataRecorded: "暂无记录数据。",
 
@@ -107,6 +146,8 @@ const zhCN: Record<TranslationKey, string> = {
   logsColType: "类型",
   logsColStatus: "状态",
   logsColLatency: "耗时",
+  logsEmpty: "暂无匹配的查询日志。",
+  logsCountSuffix: "条记录",
 
   rulesTitle: "自定义过滤规则",
   rulesSubtitle:
@@ -116,6 +157,7 @@ const zhCN: Record<TranslationKey, string> = {
   rulesSaved: "规则已重载",
   rulesFailed: "保存失败",
   rulesNetworkError: "网络错误",
+  rulesLinesSuffix: "行",
 
   settingsTitle: "运行时配置",
   settingsSubtitle:

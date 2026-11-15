@@ -4,7 +4,9 @@ import presetIcons from "@unocss/preset-icons";
 
 export default defineConfig({
   presets: [
-    presetWind3(),
+    presetWind3({
+      dark: "class",
+    }),
     presetIcons({
       scale: 1.2,
       extraProperties: {
@@ -13,4 +15,10 @@ export default defineConfig({
       },
     }),
   ],
+  theme: {
+    fontFamily: {
+      sans: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+      mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    },
+  },
 });
