@@ -31,4 +31,4 @@ cargo +nightly fuzz run fuzz_dns_packet
 
 ## License
 
-Licensed under the [GNU General Public License v3.0](LICENSE).
+Licensed under the [GNU General Public License v3.0 or later](LICENSE).

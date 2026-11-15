@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  webui:
+    name: Web UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: webui
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and build
+        working-directory: webui
+        run: pnpm typecheck && pnpm build
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: webui-dist
+          path: webui/dist
+
+  rust:
+    name: Rust Check & Nextest
+    needs: webui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download Web UI dist
+        uses: actions/download-artifact@v8
+        with:
+          name: webui-dist
+          path: webui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Run nextest
+        run: cargo nextest run -p crabdns-core -p crabdns-storage -p crabdns-web -p crabdns-server --profile ci --no-fail-fast --hide-progress-bar
+
+  fuzz:
+    name: Fuzz Build
+    needs: webui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download Web UI dist
+        uses: actions/download-artifact@v8
+        with:
+          name: webui-dist
+          path: webui/dist
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+      - uses: taiki-e/install-action@cargo-fuzz
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
