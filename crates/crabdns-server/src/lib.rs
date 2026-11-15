@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use crabdns_core::{Config, DnsCache, DnsPipeline, FilterEngine, QueryEvent, UpstreamPool};
 use crabdns_storage::{StorageEngine, spawn_log_sink};
 use crabdns_web::{AppState, build_router};
@@ -36,19 +37,32 @@ impl RunningServer {
     }
 }
 
-pub async fn spawn_server(config: Config) -> anyhow::Result<RunningServer> {
-    let config = Arc::new(config);
+pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let storage = Arc::new(StorageEngine::open(&config.data_dir)?);
 
-    let filter = Arc::new(FilterEngine::new(&config.custom_rules));
+    if let Some(saved_cfg) = storage.load_config()? {
+        config.upstreams = saved_cfg.upstreams;
+        config.cache_size = saved_cfg.cache_size;
+        config.optimistic_cache = saved_cfg.optimistic_cache;
+        config.upstream_timeout_ms = saved_cfg.upstream_timeout_ms;
+        config.log_retention_hours = saved_cfg.log_retention_hours;
+    }
+
+    let config = Arc::new(ArcSwap::from_pointee(config));
+    let current_cfg = config.load();
+
+    let filter = Arc::new(FilterEngine::new(&current_cfg.custom_rules));
     if let Some(saved_rules) = storage.load_custom_rules()? {
         filter.reload_from_text(&saved_rules);
     }
 
-    let cache = Arc::new(DnsCache::new(config.cache_size, config.optimistic_cache));
+    let cache = Arc::new(DnsCache::new(
+        current_cfg.cache_size,
+        current_cfg.optimistic_cache,
+    ));
     let upstream = Arc::new(UpstreamPool::new(
-        &config.upstreams,
-        config.upstream_timeout_ms,
+        &current_cfg.upstreams,
+        current_cfg.upstream_timeout_ms,
     )?);
 
     let (log_tx, log_rx) = mpsc::channel::<QueryEvent>(4096);
@@ -57,11 +71,11 @@ pub async fn spawn_server(config: Config) -> anyhow::Result<RunningServer> {
 
     let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, Some(log_tx)));
 
-    let tcp_listener = TcpListener::bind(config.listen_dns).await?;
+    let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;
     let dns_addr = tcp_listener.local_addr()?;
     let udp_socket = Arc::new(UdpSocket::bind(dns_addr).await?);
 
-    let web_listener = TcpListener::bind(config.listen_web).await?;
+    let web_listener = TcpListener::bind(current_cfg.listen_web).await?;
     let web_addr = web_listener.local_addr()?;
 
     tracing::info!(

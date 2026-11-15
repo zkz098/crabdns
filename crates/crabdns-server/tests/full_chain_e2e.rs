@@ -423,3 +423,96 @@ async fn test_full_chain_upstream_failover_and_servfail() {
 
     dead_server.shutdown().await;
 }
+
+#[tokio::test]
+async fn test_full_chain_config_update_hot_reload_and_restart() {
+    let (udp_upstream, udp_hits) = spawn_mock_udp_upstream().await;
+    let (tcp_upstream, tcp_hits) = spawn_mock_tcp_upstream().await;
+    let data_dir = tempfile::tempdir().expect("tempdir");
+
+    let config = Config {
+        listen_dns: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        listen_web: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        data_dir: data_dir.path().to_path_buf(),
+        upstreams: vec![format!("udp://{udp_upstream}")],
+        cache_size: 128,
+        optimistic_cache: true,
+        upstream_timeout_ms: 1500,
+        custom_rules: vec![],
+        log_retention_hours: 24,
+    };
+
+    let server = spawn_server(config.clone()).await.expect("spawn server");
+    let http = reqwest::Client::new();
+    let base_url = format!("http://{}", server.web_addr);
+
+    // Query goes to UDP upstream initially
+    let r1 = send_udp_query(
+        server.dns_addr,
+        &build_query(0x3001, "cfg-test-1.example.com.", RecordType::A),
+    )
+    .await;
+    assert_eq!(r1.response_code, ResponseCode::NoError);
+    assert_eq!(udp_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(tcp_hits.load(Ordering::SeqCst), 0);
+
+    // Invalid config (empty upstreams) must return 400 Bad Request
+    let bad_resp = put_json(
+        &http,
+        &format!("{base_url}/api/config"),
+        &serde_json::json!({
+            "upstreams": [],
+            "cache_size": 256,
+            "optimistic_cache": false,
+            "upstream_timeout_ms": 1000,
+            "log_retention_hours": 12
+        }),
+    )
+    .await;
+    assert_eq!(bad_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Valid PUT /api/config switches upstream to TCP and updates cache/timeout/retention
+    let ok_resp = put_json(
+        &http,
+        &format!("{base_url}/api/config"),
+        &serde_json::json!({
+            "upstreams": [format!("tcp://{tcp_upstream}")],
+            "cache_size": 512,
+            "optimistic_cache": false,
+            "upstream_timeout_ms": 2500,
+            "log_retention_hours": 48
+        }),
+    )
+    .await;
+    assert_eq!(ok_resp.status(), reqwest::StatusCode::OK);
+
+    // Next query immediately uses the new TCP upstream (hot-reloaded)
+    let r2 = send_udp_query(
+        server.dns_addr,
+        &build_query(0x3002, "cfg-test-2.example.com.", RecordType::A),
+    )
+    .await;
+    assert_eq!(r2.response_code, ResponseCode::NoError);
+    assert_eq!(udp_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(tcp_hits.load(Ordering::SeqCst), 1);
+
+    server.shutdown().await;
+
+    // Restart with original UDP config; Fjall persisted config should override to TCP upstream
+    let restarted = spawn_server(config).await.expect("restart server");
+    let restarted_http = reqwest::Client::new();
+    let cfg_json: Value = get_json(&restarted_http, &format!("http://{}/api/config", restarted.web_addr)).await;
+    assert_eq!(cfg_json["cache_size"].as_u64(), Some(512));
+    assert_eq!(cfg_json["optimistic_cache"].as_bool(), Some(false));
+    assert_eq!(cfg_json["log_retention_hours"].as_u64(), Some(48));
+
+    let r3 = send_udp_query(
+        restarted.dns_addr,
+        &build_query(0x3003, "cfg-test-3.example.com.", RecordType::A),
+    )
+    .await;
+    assert_eq!(r3.response_code, ResponseCode::NoError);
+    assert_eq!(tcp_hits.load(Ordering::SeqCst), 2);
+
+    restarted.shutdown().await;
+}

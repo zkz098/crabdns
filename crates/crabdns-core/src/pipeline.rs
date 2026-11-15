@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
@@ -43,8 +44,8 @@ pub struct QueryEvent {
 
 pub struct DnsPipeline {
     filter: Arc<FilterEngine>,
-    cache: Arc<DnsCache>,
-    upstream: Arc<UpstreamPool>,
+    cache: ArcSwap<DnsCache>,
+    upstream: ArcSwap<UpstreamPool>,
     log_tx: Option<mpsc::Sender<QueryEvent>>,
 }
 
@@ -57,8 +58,8 @@ impl DnsPipeline {
     ) -> Self {
         Self {
             filter,
-            cache,
-            upstream,
+            cache: ArcSwap::from(cache),
+            upstream: ArcSwap::from(upstream),
             log_tx,
         }
     }
@@ -67,8 +68,19 @@ impl DnsPipeline {
         &self.filter
     }
 
-    pub fn cache(&self) -> &Arc<DnsCache> {
-        &self.cache
+    pub fn cache(&self) -> Arc<DnsCache> {
+        self.cache.load_full()
+    }
+
+    pub fn reload_upstream(&self, specs: &[String], timeout_ms: u64) -> Result<()> {
+        let next = UpstreamPool::new(specs, timeout_ms)?;
+        self.upstream.store(Arc::new(next));
+        Ok(())
+    }
+
+    pub fn reload_cache(&self, max_capacity: u64, optimistic: bool) {
+        self.cache
+            .store(Arc::new(DnsCache::new(max_capacity, optimistic)));
     }
 
     pub async fn handle_packet(
@@ -128,7 +140,8 @@ impl DnsPipeline {
             qclass,
         };
 
-        if let Some(hit) = self.cache.get(&cache_key, request.id) {
+        let cache = self.cache.load();
+        if let Some(hit) = cache.get(&cache_key, request.id) {
             if hit.is_stale {
                 self.spawn_background_refresh(raw_query.to_vec(), cache_key.clone());
             }
@@ -170,7 +183,8 @@ impl DnsPipeline {
         matched_rule: Option<String>,
         start: Instant,
     ) -> Result<Vec<u8>> {
-        match self.upstream.exchange(raw_query).await {
+        let upstream = self.upstream.load_full();
+        match upstream.exchange(raw_query).await {
             Ok((resp_bytes, upstream_label)) => {
                 if let Some(blocked) = self.check_cname_cloaking(request, &resp_bytes, qtype)? {
                     self.emit_log(
@@ -186,7 +200,8 @@ impl DnsPipeline {
                     return Ok(blocked.0);
                 }
 
-                let rcode_str = cache_upstream_response(&self.cache, cache_key, &resp_bytes);
+                let cache = self.cache.load();
+                let rcode_str = cache_upstream_response(&cache, cache_key, &resp_bytes);
                 self.emit_log(
                     client_addr,
                     clean_domain,
@@ -243,8 +258,8 @@ impl DnsPipeline {
     }
 
     fn spawn_background_refresh(&self, query_wire: Vec<u8>, key: CacheKey) {
-        let upstream = Arc::clone(&self.upstream);
-        let cache = Arc::clone(&self.cache);
+        let upstream = self.upstream.load_full();
+        let cache = self.cache.load_full();
         tokio::spawn(async move {
             if let Ok((resp_bytes, _)) = upstream.exchange(&query_wire).await {
                 let _ = cache_upstream_response(&cache, key, &resp_bytes);

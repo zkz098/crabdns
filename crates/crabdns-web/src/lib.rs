@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, Uri, header};
@@ -20,7 +21,7 @@ struct WebAssets;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<Config>,
+    pub config: Arc<ArcSwap<Config>>,
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
     pub live_tx: broadcast::Sender<QueryEvent>,
@@ -59,6 +60,50 @@ struct RulesPayload {
     stats: Option<FilterStats>,
 }
 
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConfigResponse {
+    pub listen_dns: String,
+    pub listen_web: String,
+    pub data_dir: String,
+    pub upstreams: Vec<String>,
+    #[ts(type = "number")]
+    pub cache_size: u64,
+    pub optimistic_cache: bool,
+    #[ts(type = "number")]
+    pub upstream_timeout_ms: u64,
+    #[ts(type = "number")]
+    pub log_retention_hours: u64,
+}
+
+impl From<&Config> for ConfigResponse {
+    fn from(cfg: &Config) -> Self {
+        Self {
+            listen_dns: cfg.listen_dns.to_string(),
+            listen_web: cfg.listen_web.to_string(),
+            data_dir: cfg.data_dir.display().to_string(),
+            upstreams: cfg.upstreams.clone(),
+            cache_size: cfg.cache_size,
+            optimistic_cache: cfg.optimistic_cache,
+            upstream_timeout_ms: cfg.upstream_timeout_ms,
+            log_retention_hours: cfg.log_retention_hours,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConfigUpdatePayload {
+    pub upstreams: Vec<String>,
+    #[ts(type = "number")]
+    pub cache_size: u64,
+    pub optimistic_cache: bool,
+    #[ts(type = "number")]
+    pub upstream_timeout_ms: u64,
+    #[ts(type = "number")]
+    pub log_retention_hours: u64,
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
@@ -66,7 +111,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/logs", get(get_logs))
         .route("/api/logs/ws", get(ws_logs))
         .route("/api/rules", get(get_rules).put(update_rules))
-        .route("/api/config", get(get_config))
+        .route("/api/config", get(get_config).put(update_config))
         .fallback(serve_spa)
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -141,8 +186,68 @@ async fn update_rules(
     }))
 }
 
-async fn get_config(State(state): State<AppState>) -> Json<Config> {
-    Json((*state.config).clone())
+async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
+    let cfg = state.config.load();
+    Json(ConfigResponse::from(cfg.as_ref()))
+}
+
+async fn update_config(
+    State(state): State<AppState>,
+    Json(payload): Json<ConfigUpdatePayload>,
+) -> std::result::Result<Json<ConfigResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if payload.cache_size == 0 || payload.upstream_timeout_ms == 0 || payload.log_retention_hours == 0
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cache_size, upstream_timeout_ms, and log_retention_hours must be > 0"
+            })),
+        ));
+    }
+
+    let cleaned_upstreams: Vec<String> = payload
+        .upstreams
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if let Err(err) = state
+        .pipeline
+        .reload_upstream(&cleaned_upstreams, payload.upstream_timeout_ms)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        ));
+    }
+
+    let current = state.config.load_full();
+    let cache_changed = current.cache_size != payload.cache_size
+        || current.optimistic_cache != payload.optimistic_cache;
+    if cache_changed {
+        state
+            .pipeline
+            .reload_cache(payload.cache_size, payload.optimistic_cache);
+    }
+
+    let mut next = (*current).clone();
+    next.upstreams = cleaned_upstreams;
+    next.cache_size = payload.cache_size;
+    next.optimistic_cache = payload.optimistic_cache;
+    next.upstream_timeout_ms = payload.upstream_timeout_ms;
+    next.log_retention_hours = payload.log_retention_hours;
+
+    state.storage.save_config(&next).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+    })?;
+
+    let response = ConfigResponse::from(&next);
+    state.config.store(Arc::new(next));
+    Ok(Json(response))
 }
 
 async fn serve_spa(uri: Uri) -> Response {
@@ -181,7 +286,7 @@ mod tests {
     async fn test_web_api_endpoints_and_spa() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
-        let config = Arc::new(Config::default());
+        let config = Arc::new(ArcSwap::from_pointee(Config::default()));
         let filter = Arc::new(FilterEngine::new(&["||initial.test^".to_string()]));
         let cache = Arc::new(DnsCache::new(64, true));
         let upstream =

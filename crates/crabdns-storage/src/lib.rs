@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crabdns_core::{QueryEvent, QueryOutcome};
+use crabdns_core::{Config, QueryEvent, QueryOutcome};
 use dashmap::DashMap;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,7 @@ pub struct StatsSnapshot {
 
 const KEY_CUSTOM_RULES: &[u8] = b"custom_rules";
 const KEY_COUNTERS: &[u8] = b"counters";
+const KEY_RUNTIME_CONFIG: &[u8] = b"runtime_config";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PersistedCounters {
@@ -206,6 +207,19 @@ impl StorageEngine {
     pub fn load_custom_rules(&self) -> Result<Option<String>> {
         match self.meta.get(KEY_CUSTOM_RULES)? {
             Some(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_config(&self, config: &Config) -> Result<()> {
+        let bytes = serde_json::to_vec(config)?;
+        self.meta.insert(KEY_RUNTIME_CONFIG, bytes)?;
+        Ok(())
+    }
+
+    pub fn load_config(&self) -> Result<Option<Config>> {
+        match self.meta.get(KEY_RUNTIME_CONFIG)? {
+            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
             None => Ok(None),
         }
     }
