@@ -11,9 +11,11 @@ workspace = true
 [dependencies]
 arc-swap.workspace = true
 axum.workspace = true
+chrono.workspace = true
 crabdns-core.workspace = true
 crabdns-storage.workspace = true
 mime_guess.workspace = true
+reqwest.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,5 +25,4 @@ tracing.workspace = true
 ts-rs.workspace = true
 
 [dev-dependencies]
-reqwest.workspace = true
 tempfile.workspace = true

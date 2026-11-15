@@ -9,6 +9,8 @@ import type { TabKey } from "./components/types";
 import { t } from "./i18n";
 import type { ConfigResponse } from "./types/ConfigResponse";
 import type { ConfigUpdatePayload } from "./types/ConfigUpdatePayload";
+import type { CreateSubscriptionPayload } from "./types/CreateSubscriptionPayload";
+import type { FilterSubscription } from "./types/FilterSubscription";
 import type { QueryEvent } from "./types/QueryEvent";
 import type { RulesPayload } from "./types/RulesPayload";
 import type { StatsResponse } from "./types/StatsResponse";
@@ -21,7 +23,15 @@ export default function App() {
   const [search, setSearch] = createSignal("");
   const [outcomeFilter, setOutcomeFilter] = createSignal("");
   const [rulesText, setRulesText] = createSignal("");
+  const [rulesEnabled, setRulesEnabled] = createSignal(true);
   const [saveMessage, setSaveMessage] = createSignal("");
+
+  const [subscriptions, setSubscriptions] = createSignal<FilterSubscription[]>([]);
+  const [subMessage, setSubMessage] = createSignal("");
+  const [subIsError, setSubIsError] = createSignal(false);
+  const [refreshingIds, setRefreshingIds] = createSignal<Record<string, boolean>>({});
+  const [refreshingAll, setRefreshingAll] = createSignal(false);
+  const [addingSub, setAddingSub] = createSignal(false);
 
   const [configData, setConfigData] = createSignal<ConfigResponse | null>(null);
   const [upstreamsText, setUpstreamsText] = createSignal("");
@@ -59,9 +69,135 @@ export default function App() {
       if (res.ok) {
         const data: RulesPayload = await res.json();
         setRulesText(data.rules_text ?? "");
+        setRulesEnabled(data.enabled ?? true);
       }
     } catch {
       // ignore
+    }
+  }
+
+  function showSubToast(msg: string, isError = false) {
+    setSubIsError(isError);
+    setSubMessage(msg);
+    setTimeout(() => setSubMessage(""), 3000);
+  }
+
+  async function fetchSubscriptions() {
+    try {
+      const res = await fetch("/api/subscriptions");
+      if (res.ok) {
+        setSubscriptions(await res.json());
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function addSubscription(payload: CreateSubscriptionPayload): Promise<boolean> {
+    setAddingSub(true);
+    try {
+      const res = await fetch("/api/subscriptions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        const created: FilterSubscription = await res.json();
+        setSubscriptions((prev) => [...prev, created]);
+        await fetchStats();
+        if (created.last_error) {
+          showSubToast(created.last_error, true);
+        } else {
+          showSubToast(t("subsUpdatedToast"));
+        }
+        return true;
+      }
+      const errBody = await res.json().catch(() => null);
+      showSubToast(errBody?.error ?? t("rulesFailed"), true);
+      return false;
+    } catch {
+      showSubToast(t("rulesNetworkError"), true);
+      return false;
+    } finally {
+      setAddingSub(false);
+    }
+  }
+
+  async function toggleSubscription(sub: FilterSubscription) {
+    try {
+      const res = await fetch(`/api/subscriptions/${encodeURIComponent(sub.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !sub.enabled }),
+      });
+      if (res.ok) {
+        const updated: FilterSubscription = await res.json();
+        setSubscriptions((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+        await fetchStats();
+      } else {
+        showSubToast(t("rulesFailed"), true);
+      }
+    } catch {
+      showSubToast(t("rulesNetworkError"), true);
+    }
+  }
+
+  async function refreshSubscription(id: string) {
+    setRefreshingIds((prev) => ({ ...prev, [id]: true }));
+    try {
+      const res = await fetch(`/api/subscriptions/${encodeURIComponent(id)}/refresh`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        const updated: FilterSubscription = await res.json();
+        setSubscriptions((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+        await fetchStats();
+        if (updated.last_error) {
+          showSubToast(updated.last_error, true);
+        } else {
+          showSubToast(t("subsUpdatedToast"));
+        }
+      } else {
+        showSubToast(t("rulesFailed"), true);
+      }
+    } catch {
+      showSubToast(t("rulesNetworkError"), true);
+    } finally {
+      setRefreshingIds((prev) => ({ ...prev, [id]: false }));
+    }
+  }
+
+  async function refreshAllSubscriptions() {
+    setRefreshingAll(true);
+    try {
+      const res = await fetch("/api/subscriptions/refresh", { method: "POST" });
+      if (res.ok) {
+        setSubscriptions(await res.json());
+        await fetchStats();
+        showSubToast(t("subsUpdatedToast"));
+      } else {
+        showSubToast(t("rulesFailed"), true);
+      }
+    } catch {
+      showSubToast(t("rulesNetworkError"), true);
+    } finally {
+      setRefreshingAll(false);
+    }
+  }
+
+  async function deleteSubscription(id: string) {
+    try {
+      const res = await fetch(`/api/subscriptions/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setSubscriptions((prev) => prev.filter((item) => item.id !== id));
+        await fetchStats();
+      } else {
+        showSubToast(t("rulesFailed"), true);
+      }
+    } catch {
+      showSubToast(t("rulesNetworkError"), true);
     }
   }
 
@@ -92,7 +228,7 @@ export default function App() {
       const res = await fetch("/api/rules", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rules_text: rulesText() }),
+        body: JSON.stringify({ rules_text: rulesText(), enabled: rulesEnabled() }),
       });
       if (res.ok) {
         setSaveMessage(t("rulesSaved"));
@@ -148,6 +284,9 @@ export default function App() {
     setTab(next);
     if (next === "logs") {
       fetchLogs();
+    } else if (next === "rules") {
+      fetchRules();
+      fetchSubscriptions();
     } else if (next === "settings") {
       fetchConfig();
     }
@@ -157,6 +296,7 @@ export default function App() {
     fetchStats();
     fetchLogs();
     fetchRules();
+    fetchSubscriptions();
     fetchConfig();
 
     const timer = setInterval(fetchStats, 3000);
@@ -221,9 +361,25 @@ export default function App() {
         <Show when={tab() === "rules"}>
           <RulesView
             rulesText={rulesText()}
+            rulesEnabled={rulesEnabled()}
             onRulesChange={setRulesText}
+            onRulesEnabledChange={(next) => {
+              setRulesEnabled(next);
+              void saveRules();
+            }}
             saveMessage={saveMessage()}
             onSave={saveRules}
+            subscriptions={subscriptions()}
+            subMessage={subMessage()}
+            subIsError={subIsError()}
+            refreshingIds={refreshingIds()}
+            refreshingAll={refreshingAll()}
+            addingSub={addingSub()}
+            onAddSubscription={addSubscription}
+            onToggleSubscription={toggleSubscription}
+            onRefreshSubscription={refreshSubscription}
+            onRefreshAllSubscriptions={refreshAllSubscriptions}
+            onDeleteSubscription={deleteSubscription}
           />
         </Show>
 

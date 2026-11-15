@@ -48,7 +48,21 @@ pub struct StatsSnapshot {
     pub top_clients: Vec<TopItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FilterSubscription {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub enabled: bool,
+    pub rule_count: usize,
+    pub last_updated: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_error: Option<String>,
+}
+
 const KEY_CUSTOM_RULES: &[u8] = b"custom_rules";
+const KEY_CUSTOM_RULES_ENABLED: &[u8] = b"custom_rules_enabled";
+const KEY_SUBSCRIPTIONS: &[u8] = b"subscriptions";
 const KEY_COUNTERS: &[u8] = b"counters";
 const KEY_RUNTIME_CONFIG: &[u8] = b"runtime_config";
 
@@ -65,6 +79,7 @@ pub struct StorageEngine {
     db: Database,
     logs: Keyspace,
     meta: Keyspace,
+    sub_contents: Keyspace,
     seq: AtomicU64,
     total_queries: AtomicU64,
     blocked_queries: AtomicU64,
@@ -81,6 +96,7 @@ impl StorageEngine {
         let db = Database::builder(data_dir.join("fjall")).open()?;
         let logs = db.keyspace("logs", KeyspaceCreateOptions::default)?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
+        let sub_contents = db.keyspace("sub_contents", KeyspaceCreateOptions::default)?;
 
         let persisted = match meta.get(KEY_COUNTERS)? {
             Some(bytes) => serde_json::from_slice::<PersistedCounters>(&bytes).unwrap_or_default(),
@@ -91,6 +107,7 @@ impl StorageEngine {
             db,
             logs,
             meta,
+            sub_contents,
             seq: AtomicU64::new(0),
             total_queries: AtomicU64::new(persisted.total),
             blocked_queries: AtomicU64::new(persisted.blocked),
@@ -209,6 +226,62 @@ impl StorageEngine {
             Some(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
             None => Ok(None),
         }
+    }
+
+    pub fn save_custom_rules_enabled(&self, enabled: bool) -> Result<()> {
+        let byte = [u8::from(enabled)];
+        self.meta.insert(KEY_CUSTOM_RULES_ENABLED, byte)?;
+        Ok(())
+    }
+
+    pub fn load_custom_rules_enabled(&self) -> Result<bool> {
+        match self.meta.get(KEY_CUSTOM_RULES_ENABLED)? {
+            Some(bytes) => Ok(bytes.first().copied().unwrap_or(1) != 0),
+            None => Ok(true),
+        }
+    }
+
+    pub fn list_subscriptions(&self) -> Result<Vec<FilterSubscription>> {
+        match self.meta.get(KEY_SUBSCRIPTIONS)? {
+            Some(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn save_subscriptions(&self, subs: &[FilterSubscription]) -> Result<()> {
+        let bytes = serde_json::to_vec(subs)?;
+        self.meta.insert(KEY_SUBSCRIPTIONS, bytes)?;
+        Ok(())
+    }
+
+    pub fn save_subscription_content(&self, id: &str, content: &str) -> Result<()> {
+        self.sub_contents.insert(id.as_bytes(), content.as_bytes())?;
+        Ok(())
+    }
+
+    pub fn load_subscription_content(&self, id: &str) -> Result<Option<String>> {
+        match self.sub_contents.get(id.as_bytes())? {
+            Some(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            None => Ok(None),
+        }
+    }
+
+    pub fn delete_subscription_content(&self, id: &str) -> Result<()> {
+        self.sub_contents.remove(id.as_bytes())?;
+        Ok(())
+    }
+
+    pub fn load_enabled_subscription_contents(&self) -> Result<Vec<String>> {
+        let subs = self.list_subscriptions()?;
+        let mut contents = Vec::new();
+        for sub in subs {
+            if sub.enabled
+                && let Some(text) = self.load_subscription_content(&sub.id)?
+            {
+                contents.push(text);
+            }
+        }
+        Ok(contents)
     }
 
     pub fn save_config(&self, config: &Config) -> Result<()> {

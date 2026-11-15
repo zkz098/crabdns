@@ -320,6 +320,33 @@ impl FilterEngine {
         stats
     }
 
+    pub fn reload_from_sources(
+        &self,
+        custom_rules: &str,
+        custom_enabled: bool,
+        subscription_texts: &[String],
+    ) -> FilterStats {
+        let mut next_set = RuleSet::default();
+        for text in subscription_texts {
+            for line in text.lines() {
+                next_set.parse_and_insert(line);
+            }
+        }
+        if custom_enabled {
+            for line in custom_rules.lines() {
+                next_set.parse_and_insert(line);
+            }
+        }
+        let stats = next_set.stats.clone();
+        self.ruleset.store(Arc::new(next_set));
+        self.raw_rules.store(Arc::new(custom_rules.to_string()));
+        stats
+    }
+
+    pub fn count_rules_in_text(rules_text: &str) -> FilterStats {
+        RuleSet::from_lines(rules_text.lines()).stats
+    }
+
     pub fn evaluate(&self, domain: &str) -> FilterDecision {
         self.ruleset.load().evaluate(domain)
     }
@@ -399,6 +426,48 @@ mod tests {
         assert_eq!(
             engine.evaluate("new.example.com").action,
             FilterAction::Block
+        );
+    }
+
+    #[test]
+    fn test_reload_from_sources_and_count() {
+        let sub1 = "||ad1.example.com^\n! comment\n0.0.0.0 ad2.example.com\n".to_string();
+        let sub2 = "||ad3.example.com^\n".to_string();
+        assert_eq!(FilterEngine::count_rules_in_text(&sub1).total_rules, 2);
+
+        let engine = FilterEngine::new(&[]);
+        let stats = engine.reload_from_sources(
+            "@@||ad1.example.com^\n||custom.example.com^",
+            true,
+            &[sub1.clone(), sub2.clone()],
+        );
+        assert_eq!(stats.total_rules, 5);
+        assert_eq!(
+            engine.evaluate("ad1.example.com").action,
+            FilterAction::Allow
+        );
+        assert_eq!(
+            engine.evaluate("ad2.example.com").action,
+            FilterAction::Block
+        );
+        assert_eq!(
+            engine.evaluate("custom.example.com").action,
+            FilterAction::Block
+        );
+
+        let stats_disabled = engine.reload_from_sources(
+            "@@||ad1.example.com^\n||custom.example.com^",
+            false,
+            &[sub1],
+        );
+        assert_eq!(stats_disabled.total_rules, 2);
+        assert_eq!(
+            engine.evaluate("ad1.example.com").action,
+            FilterAction::Block
+        );
+        assert_eq!(
+            engine.evaluate("custom.example.com").action,
+            FilterAction::Allow
         );
     }
 }

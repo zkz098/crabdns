@@ -18,6 +18,7 @@ pub struct RunningServer {
     udp_task: JoinHandle<()>,
     tcp_task: JoinHandle<()>,
     web_task: JoinHandle<()>,
+    sub_refresh_task: JoinHandle<()>,
     sink_handle: JoinHandle<()>,
 }
 
@@ -26,10 +27,12 @@ impl RunningServer {
         self.udp_task.abort();
         self.tcp_task.abort();
         self.web_task.abort();
+        self.sub_refresh_task.abort();
 
         let _ = self.udp_task.await;
         let _ = self.tcp_task.await;
         let _ = self.web_task.await;
+        let _ = self.sub_refresh_task.await;
 
         drop(self.pipeline);
         let _ = self.sink_handle.await;
@@ -52,9 +55,12 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let current_cfg = config.load();
 
     let filter = Arc::new(FilterEngine::new(&current_cfg.custom_rules));
-    if let Some(saved_rules) = storage.load_custom_rules()? {
-        filter.reload_from_text(&saved_rules);
-    }
+    let custom_rules_text = storage
+        .load_custom_rules()?
+        .unwrap_or_else(|| current_cfg.custom_rules.join("\n"));
+    let custom_enabled = storage.load_custom_rules_enabled()?;
+    let sub_contents = storage.load_enabled_subscription_contents()?;
+    filter.reload_from_sources(&custom_rules_text, custom_enabled, &sub_contents);
 
     let cache = Arc::new(DnsCache::new(
         current_cfg.cache_size,
@@ -102,6 +108,26 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         }
     });
 
+    let sub_storage = Arc::clone(&storage);
+    let sub_pipeline = Arc::clone(&pipeline);
+    let sub_refresh_task = tokio::spawn(async move {
+        let client = crabdns_web::subscriptions::build_http_client();
+        let mut interval = tokio::time::interval(std::time::Duration::from_hours(24));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(err) = crabdns_web::subscriptions::refresh_enabled_subscriptions_job(
+                &client,
+                &sub_storage,
+                &sub_pipeline,
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "scheduled subscription refresh failed");
+            }
+        }
+    });
+
     Ok(RunningServer {
         dns_addr,
         web_addr,
@@ -110,6 +136,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         udp_task,
         tcp_task,
         web_task,
+        sub_refresh_task,
         sink_handle,
     })
 }
