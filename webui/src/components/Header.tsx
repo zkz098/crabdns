@@ -7,6 +7,8 @@ interface HeaderProps {
   tab: TabKey;
   onSelectTab: (tab: TabKey) => void;
   wsConnected: boolean;
+  authEnabled?: boolean;
+  onLogout?: () => void;
 }
 
 const NAV_ITEMS: Array<{ key: TabKey; label: () => string; icon: string }> = [
@@ -105,6 +107,17 @@ export function Header(props: HeaderProps) {
             <span class="i-ri-translate-2 text-sm text-[#666666] dark:text-[#a1a1aa]" />
             <span>{t("langToggle")}</span>
           </button>
+          <Show when={props.authEnabled && props.onLogout}>
+            <button
+              type="button"
+              onClick={() => props.onLogout?.()}
+              title={t("authLogout")}
+              class="h-8 px-2.5 rounded-lg text-xs font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-all duration-200 active:scale-[0.96]"
+            >
+              <span class="i-ri-logout-box-r-line text-sm" />
+              <span class="hidden sm:inline">{t("authLogout")}</span>
+            </button>
+          </Show>
         </div>
       </div>
     </header>

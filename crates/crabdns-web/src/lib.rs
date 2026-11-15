@@ -4,10 +4,13 @@ use arc_swap::ArcSwap;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, Uri, header};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use crabdns_core::{Config, DnsPipeline, FilterStats, QueryEvent};
+use crabdns_core::{
+    BlockMode, Config, DnsPipeline, FilterStats, QueryEvent, UpstreamStatus, UpstreamStrategy,
+};
 use crabdns_storage::{StatsSnapshot, StorageEngine};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
@@ -15,6 +18,7 @@ use tokio::sync::{Mutex, broadcast};
 use tower_http::cors::CorsLayer;
 use ts_rs::TS;
 
+pub mod auth;
 pub mod subscriptions;
 
 #[derive(Embed)]
@@ -34,6 +38,7 @@ pub struct RouterState {
     pub app: AppState,
     pub sub_lock: Arc<Mutex<()>>,
     pub http_client: reqwest::Client,
+    pub sessions: Arc<auth::SessionStore>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -82,6 +87,7 @@ pub struct ConfigResponse {
     pub listen_web: String,
     pub data_dir: String,
     pub upstreams: Vec<String>,
+    pub upstream_strategy: UpstreamStrategy,
     #[ts(type = "number")]
     pub cache_size: u64,
     pub optimistic_cache: bool,
@@ -89,6 +95,12 @@ pub struct ConfigResponse {
     pub upstream_timeout_ms: u64,
     #[ts(type = "number")]
     pub log_retention_hours: u64,
+    pub block_mode: BlockMode,
+    pub allow_cidrs: Vec<String>,
+    pub deny_cidrs: Vec<String>,
+    pub rate_limit_qps: u32,
+    pub web_auth_enabled: bool,
+    pub web_username: String,
 }
 
 impl From<&Config> for ConfigResponse {
@@ -98,10 +110,17 @@ impl From<&Config> for ConfigResponse {
             listen_web: cfg.listen_web.to_string(),
             data_dir: cfg.data_dir.display().to_string(),
             upstreams: cfg.upstreams.clone(),
+            upstream_strategy: cfg.upstream_strategy,
             cache_size: cfg.cache_size,
             optimistic_cache: cfg.optimistic_cache,
             upstream_timeout_ms: cfg.upstream_timeout_ms,
             log_retention_hours: cfg.log_retention_hours,
+            block_mode: cfg.block_mode,
+            allow_cidrs: cfg.allow_cidrs.clone(),
+            deny_cidrs: cfg.deny_cidrs.clone(),
+            rate_limit_qps: cfg.rate_limit_qps,
+            web_auth_enabled: cfg.web_auth_enabled,
+            web_username: cfg.web_username.clone(),
         }
     }
 }
@@ -110,6 +129,8 @@ impl From<&Config> for ConfigResponse {
 #[ts(export)]
 pub struct ConfigUpdatePayload {
     pub upstreams: Vec<String>,
+    #[serde(default)]
+    pub upstream_strategy: Option<UpstreamStrategy>,
     #[ts(type = "number")]
     pub cache_size: u64,
     pub optimistic_cache: bool,
@@ -117,6 +138,14 @@ pub struct ConfigUpdatePayload {
     pub upstream_timeout_ms: u64,
     #[ts(type = "number")]
     pub log_retention_hours: u64,
+    #[serde(default)]
+    pub block_mode: Option<BlockMode>,
+    #[serde(default)]
+    pub allow_cidrs: Option<Vec<String>>,
+    #[serde(default)]
+    pub deny_cidrs: Option<Vec<String>>,
+    #[serde(default)]
+    pub rate_limit_qps: Option<u32>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -124,9 +153,10 @@ pub fn build_router(state: AppState) -> Router {
         app: state,
         sub_lock: Arc::new(Mutex::new(())),
         http_client: subscriptions::build_http_client(),
+        sessions: Arc::new(auth::SessionStore::default()),
     };
-    Router::new()
-        .route("/api/health", get(health))
+
+    let protected_api = Router::new()
         .route("/api/stats", get(get_stats))
         .route("/api/logs", get(get_logs))
         .route("/api/logs/ws", get(ws_logs))
@@ -148,9 +178,35 @@ pub fn build_router(state: AppState) -> Router {
             post(subscriptions::refresh_subscription),
         )
         .route("/api/config", get(get_config).put(update_config))
+        .route(
+            "/api/upstreams/health",
+            get(get_upstream_health).post(probe_upstreams),
+        )
+        .route("/api/auth/settings", put(auth::update_auth))
+        .layer(middleware::from_fn_with_state(
+            router_state.clone(),
+            auth::require_auth,
+        ));
+
+    Router::new()
+        .route("/api/health", get(health))
+        .route("/api/auth/status", get(auth::auth_status))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .merge(protected_api)
         .fallback(serve_spa)
         .layer(CorsLayer::permissive())
         .with_state(router_state)
+}
+
+async fn get_upstream_health(State(state): State<RouterState>) -> Json<Vec<UpstreamStatus>> {
+    Json(state.app.pipeline.upstream().health_snapshot())
+}
+
+async fn probe_upstreams(State(state): State<RouterState>) -> Json<Vec<UpstreamStatus>> {
+    let pool = state.app.pipeline.upstream();
+    pool.probe_all().await;
+    Json(pool.health_snapshot())
 }
 
 async fn health(State(state): State<RouterState>) -> Json<HealthResponse> {
@@ -242,11 +298,21 @@ async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
     Json(ConfigResponse::from(cfg.as_ref()))
 }
 
+fn clean_string_list(items: Vec<String>) -> Vec<String> {
+    items
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 async fn update_config(
     State(state): State<RouterState>,
     Json(payload): Json<ConfigUpdatePayload>,
 ) -> std::result::Result<Json<ConfigResponse>, (StatusCode, Json<serde_json::Value>)> {
-    if payload.cache_size == 0 || payload.upstream_timeout_ms == 0 || payload.log_retention_hours == 0
+    if payload.cache_size == 0
+        || payload.upstream_timeout_ms == 0
+        || payload.log_retention_hours == 0
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -263,10 +329,27 @@ async fn update_config(
         .filter(|s| !s.is_empty())
         .collect();
 
+    let current = state.app.config.load_full();
+    let strategy = payload
+        .upstream_strategy
+        .unwrap_or(current.upstream_strategy);
+    let block_mode = payload.block_mode.unwrap_or(current.block_mode);
+    let allow_cidrs = clean_string_list(
+        payload
+            .allow_cidrs
+            .unwrap_or_else(|| current.allow_cidrs.clone()),
+    );
+    let deny_cidrs = clean_string_list(
+        payload
+            .deny_cidrs
+            .unwrap_or_else(|| current.deny_cidrs.clone()),
+    );
+    let rate_limit_qps = payload.rate_limit_qps.unwrap_or(current.rate_limit_qps);
+
     if let Err(err) = state
         .app
         .pipeline
-        .reload_upstream(&cleaned_upstreams, payload.upstream_timeout_ms)
+        .reload_acl(&allow_cidrs, &deny_cidrs, rate_limit_qps)
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -274,7 +357,19 @@ async fn update_config(
         ));
     }
 
-    let current = state.app.config.load_full();
+    if let Err(err) = state.app.pipeline.reload_upstream_with_strategy(
+        &cleaned_upstreams,
+        payload.upstream_timeout_ms,
+        strategy,
+    ) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        ));
+    }
+
+    state.app.pipeline.set_block_mode(block_mode);
+
     let cache_changed = current.cache_size != payload.cache_size
         || current.optimistic_cache != payload.optimistic_cache;
     if cache_changed {
@@ -286,10 +381,15 @@ async fn update_config(
 
     let mut next = (*current).clone();
     next.upstreams = cleaned_upstreams;
+    next.upstream_strategy = strategy;
     next.cache_size = payload.cache_size;
     next.optimistic_cache = payload.optimistic_cache;
     next.upstream_timeout_ms = payload.upstream_timeout_ms;
     next.log_retention_hours = payload.log_retention_hours;
+    next.block_mode = block_mode;
+    next.allow_cidrs = allow_cidrs;
+    next.deny_cidrs = deny_cidrs;
+    next.rate_limit_qps = rate_limit_qps;
 
     state.app.storage.save_config(&next).map_err(|err| {
         (
@@ -550,5 +650,109 @@ mod tests {
             .expect("delete sub");
         assert_eq!(del_res.status(), StatusCode::NO_CONTENT);
         assert_eq!(pipeline.filter().stats().total_rules, 1);
+    }
+
+    #[tokio::test]
+    async fn test_web_auth_login_protected_routes_and_logout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+        let config = Arc::new(ArcSwap::from_pointee(Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        }));
+        let filter = Arc::new(FilterEngine::new(&[]));
+        let cache = Arc::new(DnsCache::new(64, false));
+        let upstream =
+            Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
+        let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+        let (live_tx, _) = broadcast::channel(16);
+
+        let app = build_router(AppState {
+            config,
+            pipeline,
+            storage,
+            live_tx,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // Enable auth while currently unauthenticated (auth starts disabled)
+        let enable_res = client
+            .put(format!("{base}/api/auth/settings"))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true,"username":"admin","password":"secret-password"}"#)
+            .send()
+            .await
+            .expect("enable auth");
+        assert_eq!(enable_res.status(), StatusCode::OK);
+
+        // Public health still works; protected endpoints require auth
+        let health_res = client
+            .get(format!("{base}/api/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health_res.status(), StatusCode::OK);
+
+        let unauthed = client
+            .get(format!("{base}/api/config"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthed.status(), StatusCode::UNAUTHORIZED);
+
+        // Wrong password rejected
+        let bad_login = client
+            .post(format!("{base}/api/auth/login"))
+            .header("content-type", "application/json")
+            .body(r#"{"username":"admin","password":"wrong"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_login.status(), StatusCode::UNAUTHORIZED);
+
+        // Valid login returns bearer token
+        let good_login = client
+            .post(format!("{base}/api/auth/login"))
+            .header("content-type", "application/json")
+            .body(r#"{"username":"admin","password":"secret-password"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(good_login.status(), StatusCode::OK);
+        let login_json: auth::LoginResponse =
+            serde_json::from_slice(&good_login.bytes().await.unwrap()).unwrap();
+
+        // Protected endpoint succeeds with Bearer token
+        let authed = client
+            .get(format!("{base}/api/config"))
+            .header("authorization", format!("Bearer {}", login_json.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authed.status(), StatusCode::OK);
+
+        // Logout invalidates token
+        let logout_res = client
+            .post(format!("{base}/api/auth/logout"))
+            .header("authorization", format!("Bearer {}", login_json.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(logout_res.status(), StatusCode::OK);
+
+        let after_logout = client
+            .get(format!("{base}/api/config"))
+            .header("authorization", format!("Bearer {}", login_json.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(after_logout.status(), StatusCode::UNAUTHORIZED);
     }
 }

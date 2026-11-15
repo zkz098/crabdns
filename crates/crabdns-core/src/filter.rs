@@ -7,10 +7,17 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RewriteAction {
+    Ip(IpAddr),
+    Cname(String),
+    Txt(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilterAction {
     Allow,
     Block,
-    Rewrite(IpAddr),
+    Rewrite(RewriteAction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,11 +35,18 @@ pub struct FilterStats {
     pub rewrite_rules: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchScope {
+    Exact,
+    DomainAndSubdomains,
+    SubdomainsOnly,
+}
+
 #[derive(Debug, Clone)]
 struct RuleMeta {
     rule_text: String,
-    exact_only: bool,
-    rewrite_ip: Option<IpAddr>,
+    scope: MatchScope,
+    rewrite: Option<RewriteAction>,
 }
 
 #[derive(Debug, Default)]
@@ -66,7 +80,12 @@ impl TrieNode {
             current = next;
             if let Some(meta) = &current.rule {
                 let is_exact = idx + 1 == labels.len();
-                if !meta.exact_only || is_exact {
+                let matches = match meta.scope {
+                    MatchScope::Exact => is_exact,
+                    MatchScope::DomainAndSubdomains => true,
+                    MatchScope::SubdomainsOnly => !is_exact,
+                };
+                if matches {
                     best = Some(meta);
                 }
             }
@@ -112,11 +131,11 @@ impl RuleSet {
         self.stats.total_rules += 1;
         let meta = RuleMeta {
             rule_text: raw.to_string(),
-            exact_only: parsed.exact_only,
-            rewrite_ip: parsed.rewrite_ip,
+            scope: parsed.scope,
+            rewrite: parsed.rewrite.clone(),
         };
 
-        if parsed.rewrite_ip.is_some() {
+        if parsed.rewrite.is_some() {
             self.stats.rewrite_rules += 1;
             self.rewrites.insert(&parsed.domain, meta);
             return;
@@ -160,23 +179,34 @@ impl RuleSet {
                 self.stats.block_rules += 1;
                 let meta = RuleMeta {
                     rule_text: line.to_string(),
-                    exact_only: is_sinkhole,
-                    rewrite_ip: None,
+                    scope: if is_sinkhole {
+                        MatchScope::Exact
+                    } else {
+                        MatchScope::DomainAndSubdomains
+                    },
+                    rewrite: None,
                 };
                 self.blocks.insert(host, meta);
             }
             return;
         }
 
-        if parts.len() == 1 && is_valid_domain_token(parts[0]) {
-            self.stats.total_rules += 1;
-            self.stats.block_rules += 1;
-            let meta = RuleMeta {
-                rule_text: line.to_string(),
-                exact_only: false,
-                rewrite_ip: None,
+        if parts.len() == 1 {
+            let (scope, token) = if let Some(rest) = parts[0].strip_prefix("*.") {
+                (MatchScope::SubdomainsOnly, rest)
+            } else {
+                (MatchScope::DomainAndSubdomains, parts[0])
             };
-            self.blocks.insert(parts[0], meta);
+            if is_valid_domain_token(token) {
+                self.stats.total_rules += 1;
+                self.stats.block_rules += 1;
+                let meta = RuleMeta {
+                    rule_text: line.to_string(),
+                    scope,
+                    rewrite: None,
+                };
+                self.blocks.insert(token, meta);
+            }
         }
     }
 
@@ -208,10 +238,10 @@ impl RuleSet {
             };
         }
         if let Some(meta) = self.rewrites.match_domain(clean)
-            && let Some(ip) = meta.rewrite_ip
+            && let Some(rewrite) = &meta.rewrite
         {
             return FilterDecision {
-                action: FilterAction::Rewrite(ip),
+                action: FilterAction::Rewrite(rewrite.clone()),
                 matched_rule: Some(meta.rule_text.clone()),
             };
         }
@@ -233,8 +263,8 @@ struct ParsedRule {
     domain: String,
     is_allow: bool,
     is_important: bool,
-    exact_only: bool,
-    rewrite_ip: Option<IpAddr>,
+    scope: MatchScope,
+    rewrite: Option<RewriteAction>,
 }
 
 fn parse_adguard_rule(line: &str) -> Option<ParsedRule> {
@@ -259,22 +289,27 @@ fn parse_adguard_rule(line: &str) -> Option<ParsedRule> {
         return None;
     };
 
-    let domain = domain_raw.trim_end_matches('^').trim_end_matches('.');
+    let trimmed_domain = domain_raw.trim_end_matches('^').trim_end_matches('.');
+    let (scope, domain) = if exact_only {
+        (MatchScope::Exact, trimmed_domain)
+    } else if let Some(d) = trimmed_domain.strip_prefix("*.") {
+        (MatchScope::SubdomainsOnly, d)
+    } else {
+        (MatchScope::DomainAndSubdomains, trimmed_domain)
+    };
     if !is_valid_domain_token(domain) {
         return None;
     }
 
     let mut is_important = false;
-    let mut rewrite_ip = None;
+    let mut rewrite = None;
     if let Some(mods) = modifiers {
         for part in mods.split(',') {
             let trimmed = part.trim();
             if trimmed == "important" {
                 is_important = true;
-            } else if let Some(val) = trimmed.strip_prefix("dnsrewrite=")
-                && let Ok(ip) = val.trim().parse::<IpAddr>()
-            {
-                rewrite_ip = Some(ip);
+            } else if let Some(val) = trimmed.strip_prefix("dnsrewrite=") {
+                rewrite = parse_dnsrewrite_value(val);
             }
         }
     }
@@ -283,9 +318,37 @@ fn parse_adguard_rule(line: &str) -> Option<ParsedRule> {
         domain: domain.to_string(),
         is_allow,
         is_important,
-        exact_only,
-        rewrite_ip,
+        scope,
+        rewrite,
     })
+}
+
+fn parse_dnsrewrite_value(raw: &str) -> Option<RewriteAction> {
+    let val = raw.trim();
+    if val.is_empty() {
+        return None;
+    }
+    if let Ok(ip) = val.parse::<IpAddr>() {
+        return Some(RewriteAction::Ip(ip));
+    }
+    if let Some((rr_type, target)) = val.split_once(';') {
+        let kind = rr_type.trim().to_ascii_uppercase();
+        let target = target.trim();
+        if target.is_empty() {
+            return None;
+        }
+        return match kind.as_str() {
+            "A" | "AAAA" => target.parse::<IpAddr>().ok().map(RewriteAction::Ip),
+            "CNAME" => {
+                let clean = target.trim_end_matches('.');
+                is_valid_domain_token(clean).then(|| RewriteAction::Cname(clean.to_string()))
+            }
+            "TXT" => Some(RewriteAction::Txt(target.to_string())),
+            _ => None,
+        };
+    }
+    let clean = val.trim_end_matches('.');
+    is_valid_domain_token(clean).then(|| RewriteAction::Cname(clean.to_string()))
 }
 
 fn is_valid_domain_token(token: &str) -> bool {
@@ -399,14 +462,27 @@ mod tests {
         let rules = vec![
             "0.0.0.0 tracker.test".to_string(),
             "||nas.local^$dnsrewrite=192.168.1.50".to_string(),
+            "||alias.local^$dnsrewrite=CNAME;nas.local".to_string(),
+            "||info.local^$dnsrewrite=TXT;crabdns-ok".to_string(),
+            "*.wild.test".to_string(),
         ];
         let engine = FilterEngine::new(&rules);
 
         assert_eq!(engine.evaluate("tracker.test").action, FilterAction::Block);
         assert_eq!(
             engine.evaluate("nas.local").action,
-            FilterAction::Rewrite("192.168.1.50".parse().expect("valid ip"))
+            FilterAction::Rewrite(RewriteAction::Ip("192.168.1.50".parse().expect("valid ip")))
         );
+        assert_eq!(
+            engine.evaluate("alias.local").action,
+            FilterAction::Rewrite(RewriteAction::Cname("nas.local".to_string()))
+        );
+        assert_eq!(
+            engine.evaluate("info.local").action,
+            FilterAction::Rewrite(RewriteAction::Txt("crabdns-ok".to_string()))
+        );
+        assert_eq!(engine.evaluate("wild.test").action, FilterAction::Allow);
+        assert_eq!(engine.evaluate("sub.wild.test").action, FilterAction::Block);
     }
 
     #[test]

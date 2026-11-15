@@ -151,7 +151,10 @@ proptest! {
             format!("||{domain}^$dnsrewrite={ip}"),
         ];
         let engine4 = FilterEngine::new(&rules_rewrite);
-        prop_assert_eq!(engine4.evaluate(&domain).action, FilterAction::Rewrite(ip));
+        prop_assert_eq!(
+            engine4.evaluate(&domain).action,
+            FilterAction::Rewrite(crabdns_core::RewriteAction::Ip(ip))
+        );
 
         // 5. Exact rule `|domain^` only matches exact domain, not subdomain
         let exact_engine = FilterEngine::new(&[format!("|{domain}^")]);

@@ -2,8 +2,29 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::error::{CoreError, Result};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum BlockMode {
+    #[default]
+    ZeroIp,
+    NxDomain,
+    NoData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum UpstreamStrategy {
+    #[default]
+    Failover,
+    Parallel,
+    LeastLatency,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -15,6 +36,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(default = "default_upstreams")]
     pub upstreams: Vec<String>,
+    #[serde(default)]
+    pub upstream_strategy: UpstreamStrategy,
     #[serde(default = "default_cache_size")]
     pub cache_size: u64,
     #[serde(default = "default_true")]
@@ -25,6 +48,20 @@ pub struct Config {
     pub custom_rules: Vec<String>,
     #[serde(default = "default_log_retention_hours")]
     pub log_retention_hours: u64,
+    #[serde(default)]
+    pub block_mode: BlockMode,
+    #[serde(default)]
+    pub allow_cidrs: Vec<String>,
+    #[serde(default)]
+    pub deny_cidrs: Vec<String>,
+    #[serde(default)]
+    pub rate_limit_qps: u32,
+    #[serde(default)]
+    pub web_auth_enabled: bool,
+    #[serde(default = "default_web_username")]
+    pub web_username: String,
+    #[serde(default)]
+    pub web_password_hash: String,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -62,6 +99,10 @@ fn default_log_retention_hours() -> u64 {
     24
 }
 
+fn default_web_username() -> String {
+    "admin".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -69,11 +110,19 @@ impl Default for Config {
             listen_web: default_listen_web(),
             data_dir: default_data_dir(),
             upstreams: default_upstreams(),
+            upstream_strategy: UpstreamStrategy::default(),
             cache_size: default_cache_size(),
             optimistic_cache: default_true(),
             upstream_timeout_ms: default_upstream_timeout_ms(),
             custom_rules: Vec::new(),
             log_retention_hours: default_log_retention_hours(),
+            block_mode: BlockMode::default(),
+            allow_cidrs: Vec::new(),
+            deny_cidrs: Vec::new(),
+            rate_limit_qps: 0,
+            web_auth_enabled: false,
+            web_username: default_web_username(),
+            web_password_hash: String::new(),
         }
     }
 }

@@ -1,12 +1,15 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { DashboardView } from "./components/DashboardView";
 import { Header } from "./components/Header";
+import { LoginView } from "./components/LoginView";
 import { LogsView } from "./components/LogsView";
 import { MobileNav } from "./components/MobileNav";
 import { RulesView } from "./components/RulesView";
 import { SettingsView } from "./components/SettingsView";
 import type { TabKey } from "./components/types";
 import { t } from "./i18n";
+import type { AuthStatusResponse } from "./types/AuthStatusResponse";
+import type { BlockMode } from "./types/BlockMode";
 import type { ConfigResponse } from "./types/ConfigResponse";
 import type { ConfigUpdatePayload } from "./types/ConfigUpdatePayload";
 import type { CreateSubscriptionPayload } from "./types/CreateSubscriptionPayload";
@@ -14,6 +17,8 @@ import type { FilterSubscription } from "./types/FilterSubscription";
 import type { QueryEvent } from "./types/QueryEvent";
 import type { RulesPayload } from "./types/RulesPayload";
 import type { StatsResponse } from "./types/StatsResponse";
+import type { UpstreamStatus } from "./types/UpstreamStatus";
+import type { UpstreamStrategy } from "./types/UpstreamStrategy";
 
 export default function App() {
   const [tab, setTab] = createSignal<TabKey>("dashboard");
@@ -35,12 +40,27 @@ export default function App() {
 
   const [configData, setConfigData] = createSignal<ConfigResponse | null>(null);
   const [upstreamsText, setUpstreamsText] = createSignal("");
+  const [upstreamStrategy, setUpstreamStrategy] = createSignal<UpstreamStrategy>("failover");
+  const [upstreamHealth, setUpstreamHealth] = createSignal<UpstreamStatus[]>([]);
+  const [probingUpstreams, setProbingUpstreams] = createSignal(false);
+  const [blockMode, setBlockMode] = createSignal<BlockMode>("zero_ip");
+  const [allowCidrsText, setAllowCidrsText] = createSignal("");
+  const [denyCidrsText, setDenyCidrsText] = createSignal("");
+  const [rateLimitQps, setRateLimitQps] = createSignal(0);
   const [cacheSize, setCacheSize] = createSignal(65536);
   const [optimisticCache, setOptimisticCache] = createSignal(true);
   const [upstreamTimeoutMs, setUpstreamTimeoutMs] = createSignal(3000);
   const [logRetentionHours, setLogRetentionHours] = createSignal(24);
   const [configMessage, setConfigMessage] = createSignal("");
   const [configIsError, setConfigIsError] = createSignal(false);
+
+  const [authChecked, setAuthChecked] = createSignal(false);
+  const [authEnabled, setAuthEnabled] = createSignal(false);
+  const [authenticated, setAuthenticated] = createSignal(true);
+  const [authUsername, setAuthUsername] = createSignal("admin");
+  const [authPassword, setAuthPassword] = createSignal("");
+  const [authMessage, setAuthMessage] = createSignal("");
+  const [authIsError, setAuthIsError] = createSignal(false);
 
   async function fetchStats() {
     try {
@@ -204,10 +224,119 @@ export default function App() {
   function applyConfigToForm(data: ConfigResponse) {
     setConfigData(data);
     setUpstreamsText(data.upstreams.join("\n"));
+    setUpstreamStrategy(data.upstream_strategy);
+    setBlockMode(data.block_mode);
+    setAllowCidrsText(data.allow_cidrs.join("\n"));
+    setDenyCidrsText(data.deny_cidrs.join("\n"));
+    setRateLimitQps(data.rate_limit_qps);
     setCacheSize(data.cache_size);
     setOptimisticCache(data.optimistic_cache);
     setUpstreamTimeoutMs(data.upstream_timeout_ms);
     setLogRetentionHours(data.log_retention_hours);
+    setAuthEnabled(data.web_auth_enabled);
+    setAuthUsername(data.web_username || "admin");
+  }
+
+  async function fetchUpstreamHealth() {
+    try {
+      const res = await fetch("/api/upstreams/health");
+      if (res.ok) setUpstreamHealth(await res.json());
+    } catch {
+      // ignore
+    }
+  }
+
+  async function probeUpstreams() {
+    setProbingUpstreams(true);
+    try {
+      const res = await fetch("/api/upstreams/health", { method: "POST" });
+      if (res.ok) setUpstreamHealth(await res.json());
+    } catch {
+      // ignore
+    } finally {
+      setProbingUpstreams(false);
+    }
+  }
+
+  async function fetchAuthStatus(): Promise<boolean> {
+    try {
+      const res = await fetch("/api/auth/status");
+      if (res.ok) {
+        const data: AuthStatusResponse = await res.json();
+        setAuthEnabled(data.auth_enabled);
+        setAuthenticated(data.authenticated);
+        if (data.username) setAuthUsername(data.username);
+        setAuthChecked(true);
+        return data.authenticated || !data.auth_enabled;
+      }
+    } catch {
+      // ignore
+    }
+    setAuthChecked(true);
+    return true;
+  }
+
+  async function handleLogin(username: string, password: string): Promise<string | null> {
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (res.ok) {
+        setAuthenticated(true);
+        await Promise.all([
+          fetchStats(),
+          fetchLogs(),
+          fetchRules(),
+          fetchSubscriptions(),
+          fetchConfig(),
+          fetchUpstreamHealth(),
+        ]);
+        return null;
+      }
+      const errBody = await res.json().catch(() => null);
+      return errBody?.error ?? "Login failed";
+    } catch {
+      return t("rulesNetworkError");
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // ignore
+    }
+    setAuthenticated(false);
+  }
+
+  async function saveAuth() {
+    setAuthIsError(false);
+    setAuthMessage("");
+    try {
+      const res = await fetch("/api/auth/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: authEnabled(),
+          username: authUsername(),
+          password: authPassword() || null,
+        }),
+      });
+      if (res.ok) {
+        setAuthPassword("");
+        setAuthMessage(t("settingsAuthSaved"));
+        setTimeout(() => setAuthMessage(""), 3000);
+      } else {
+        setAuthIsError(true);
+        const errBody = await res.json().catch(() => null);
+        setAuthMessage(errBody?.error ?? t("rulesFailed"));
+      }
+    } catch {
+      setAuthIsError(true);
+      setAuthMessage(t("rulesNetworkError"));
+    }
   }
 
   async function fetchConfig() {
@@ -245,15 +374,22 @@ export default function App() {
   async function saveConfig() {
     setConfigIsError(false);
     setConfigMessage(t("settingsSaving"));
-    const payload: ConfigUpdatePayload = {
-      upstreams: upstreamsText()
+    const parseLines = (text: string) =>
+      text
         .split("\n")
         .map((s) => s.trim())
-        .filter((s) => s.length > 0),
+        .filter((s) => s.length > 0);
+    const payload: ConfigUpdatePayload = {
+      upstreams: parseLines(upstreamsText()),
+      upstream_strategy: upstreamStrategy(),
       cache_size: Number(cacheSize()),
       optimistic_cache: optimisticCache(),
       upstream_timeout_ms: Number(upstreamTimeoutMs()),
       log_retention_hours: Number(logRetentionHours()),
+      block_mode: blockMode(),
+      allow_cidrs: parseLines(allowCidrsText()),
+      deny_cidrs: parseLines(denyCidrsText()),
+      rate_limit_qps: Number(rateLimitQps()),
     };
 
     try {
@@ -289,17 +425,27 @@ export default function App() {
       fetchSubscriptions();
     } else if (next === "settings") {
       fetchConfig();
+      fetchUpstreamHealth();
     }
   }
 
   onMount(() => {
-    fetchStats();
-    fetchLogs();
-    fetchRules();
-    fetchSubscriptions();
-    fetchConfig();
+    void fetchAuthStatus().then((ok) => {
+      if (ok) {
+        fetchStats();
+        fetchLogs();
+        fetchRules();
+        fetchSubscriptions();
+        fetchConfig();
+        fetchUpstreamHealth();
+      }
+    });
 
-    const timer = setInterval(fetchStats, 3000);
+    const timer = setInterval(() => {
+      if (authenticated() || !authEnabled()) {
+        fetchStats();
+      }
+    }, 3000);
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
@@ -339,8 +485,18 @@ export default function App() {
   });
 
   return (
-    <div class="min-h-screen flex flex-col bg-[#fafafa] dark:bg-[#000000] text-[#171717] dark:text-[#ededed] font-sans vercel-grid-bg">
-      <Header tab={tab()} onSelectTab={handleSelectTab} wsConnected={wsConnected()} />
+    <Show
+      when={!authChecked() || !authEnabled() || authenticated()}
+      fallback={<LoginView onLogin={handleLogin} />}
+    >
+      <div class="min-h-screen flex flex-col bg-[#fafafa] dark:bg-[#000000] text-[#171717] dark:text-[#ededed] font-sans vercel-grid-bg">
+        <Header
+          tab={tab()}
+          onSelectTab={handleSelectTab}
+          wsConnected={wsConnected()}
+          authEnabled={authEnabled()}
+          onLogout={handleLogout}
+        />
 
       <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 sm:pt-7 pb-24 md:pb-10">
         <Show when={tab() === "dashboard"}>
@@ -388,6 +544,19 @@ export default function App() {
             configData={configData()}
             upstreamsText={upstreamsText()}
             onUpstreamsChange={setUpstreamsText}
+            upstreamStrategy={upstreamStrategy()}
+            onUpstreamStrategyChange={setUpstreamStrategy}
+            upstreamHealth={upstreamHealth()}
+            probingUpstreams={probingUpstreams()}
+            onProbeUpstreams={probeUpstreams}
+            blockMode={blockMode()}
+            onBlockModeChange={setBlockMode}
+            allowCidrsText={allowCidrsText()}
+            onAllowCidrsChange={setAllowCidrsText}
+            denyCidrsText={denyCidrsText()}
+            onDenyCidrsChange={setDenyCidrsText}
+            rateLimitQps={rateLimitQps()}
+            onRateLimitChange={setRateLimitQps}
             cacheSize={cacheSize()}
             onCacheSizeChange={setCacheSize}
             upstreamTimeoutMs={upstreamTimeoutMs()}
@@ -399,11 +568,21 @@ export default function App() {
             configMessage={configMessage()}
             configIsError={configIsError()}
             onSave={saveConfig}
+            authEnabled={authEnabled()}
+            onAuthEnabledChange={setAuthEnabled}
+            authUsername={authUsername()}
+            onAuthUsernameChange={setAuthUsername}
+            authPassword={authPassword()}
+            onAuthPasswordChange={setAuthPassword}
+            authMessage={authMessage()}
+            authIsError={authIsError()}
+            onSaveAuth={saveAuth}
           />
         </Show>
       </main>
 
       <MobileNav tab={tab()} onSelectTab={handleSelectTab} />
-    </div>
+      </div>
+    </Show>
   );
 }

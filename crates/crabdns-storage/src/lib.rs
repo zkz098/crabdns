@@ -255,7 +255,8 @@ impl StorageEngine {
     }
 
     pub fn save_subscription_content(&self, id: &str, content: &str) -> Result<()> {
-        self.sub_contents.insert(id.as_bytes(), content.as_bytes())?;
+        self.sub_contents
+            .insert(id.as_bytes(), content.as_bytes())?;
         Ok(())
     }
 

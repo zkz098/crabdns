@@ -29,17 +29,19 @@ fn arb_event() -> impl Strategy<Value = QueryEvent> {
         arb_outcome(),
         any::<u64>(),
     )
-        .prop_map(|(client_ip, domain, qtype, outcome, elapsed_us)| QueryEvent {
-            timestamp: Utc::now(),
-            client_ip,
-            domain,
-            qtype,
-            outcome,
-            matched_rule: None,
-            upstream: None,
-            elapsed_us,
-            rcode: "NOERROR".to_string(),
-        })
+        .prop_map(
+            |(client_ip, domain, qtype, outcome, elapsed_us)| QueryEvent {
+                timestamp: Utc::now(),
+                client_ip,
+                domain,
+                qtype,
+                outcome,
+                matched_rule: None,
+                upstream: None,
+                elapsed_us,
+                rcode: "NOERROR".to_string(),
+            },
+        )
 }
 
 proptest! {

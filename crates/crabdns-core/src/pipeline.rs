@@ -1,19 +1,22 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use hickory_proto::op::{Message, MessageType, ResponseCode};
-use hickory_proto::rr::rdata::{A, AAAA};
-use hickory_proto::rr::{RData, Record, RecordType};
+use hickory_proto::rr::rdata::{A, AAAA, CNAME, TXT};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use ts_rs::TS;
 
+use crate::acl::{AccessController, AclDecision};
 use crate::cache::{CacheKey, DnsCache};
+use crate::config::{BlockMode, UpstreamStrategy};
 use crate::error::{CoreError, Result};
-use crate::filter::{FilterAction, FilterEngine};
+use crate::filter::{FilterAction, FilterEngine, RewriteAction};
 use crate::upstream::UpstreamPool;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -46,7 +49,25 @@ pub struct DnsPipeline {
     filter: Arc<FilterEngine>,
     cache: ArcSwap<DnsCache>,
     upstream: ArcSwap<UpstreamPool>,
+    acl: ArcSwap<AccessController>,
+    block_mode: AtomicU8,
     log_tx: Option<mpsc::Sender<QueryEvent>>,
+}
+
+fn block_mode_to_u8(mode: BlockMode) -> u8 {
+    match mode {
+        BlockMode::ZeroIp => 0,
+        BlockMode::NxDomain => 1,
+        BlockMode::NoData => 2,
+    }
+}
+
+fn u8_to_block_mode(val: u8) -> BlockMode {
+    match val {
+        1 => BlockMode::NxDomain,
+        2 => BlockMode::NoData,
+        _ => BlockMode::ZeroIp,
+    }
 }
 
 impl DnsPipeline {
@@ -56,10 +77,13 @@ impl DnsPipeline {
         upstream: Arc<UpstreamPool>,
         log_tx: Option<mpsc::Sender<QueryEvent>>,
     ) -> Self {
+        let default_acl = AccessController::new(&[], &[], 0).expect("empty acl is valid");
         Self {
             filter,
             cache: ArcSwap::from(cache),
             upstream: ArcSwap::from(upstream),
+            acl: ArcSwap::from_pointee(default_acl),
+            block_mode: AtomicU8::new(block_mode_to_u8(BlockMode::ZeroIp)),
             log_tx,
         }
     }
@@ -72,8 +96,42 @@ impl DnsPipeline {
         self.cache.load_full()
     }
 
+    pub fn upstream(&self) -> Arc<UpstreamPool> {
+        self.upstream.load_full()
+    }
+
+    pub fn block_mode(&self) -> BlockMode {
+        u8_to_block_mode(self.block_mode.load(Ordering::Relaxed))
+    }
+
+    pub fn set_block_mode(&self, mode: BlockMode) {
+        self.block_mode
+            .store(block_mode_to_u8(mode), Ordering::Relaxed);
+    }
+
+    pub fn reload_acl(
+        &self,
+        allow_cidrs: &[String],
+        deny_cidrs: &[String],
+        rate_limit_qps: u32,
+    ) -> Result<()> {
+        let next = AccessController::new(allow_cidrs, deny_cidrs, rate_limit_qps)?;
+        self.acl.store(Arc::new(next));
+        Ok(())
+    }
+
     pub fn reload_upstream(&self, specs: &[String], timeout_ms: u64) -> Result<()> {
-        let next = UpstreamPool::new(specs, timeout_ms)?;
+        let strategy = self.upstream.load().strategy();
+        self.reload_upstream_with_strategy(specs, timeout_ms, strategy)
+    }
+
+    pub fn reload_upstream_with_strategy(
+        &self,
+        specs: &[String],
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+    ) -> Result<()> {
+        let next = UpstreamPool::new_with_strategy(specs, timeout_ms, strategy)?;
         self.upstream.store(Arc::new(next));
         Ok(())
     }
@@ -101,10 +159,17 @@ impl DnsPipeline {
         let qtype = question.query_type();
         let qclass = u16::from(question.query_class());
 
+        if let Some(refused) =
+            self.enforce_acl(&request, client_addr, &clean_domain, qtype, start)?
+        {
+            return Ok(refused);
+        }
+
+        let mode = self.block_mode();
         let decision = self.filter.evaluate(&clean_domain);
         match decision.action {
             FilterAction::Block => {
-                let resp = build_blocked_response(&request, qtype)?;
+                let (resp, rcode) = build_blocked_response(&request, qtype, mode)?;
                 self.emit_log(
                     client_addr,
                     clean_domain,
@@ -113,12 +178,12 @@ impl DnsPipeline {
                     decision.matched_rule,
                     None,
                     start,
-                    "NOERROR",
+                    rcode,
                 );
                 return Ok(resp);
             }
-            FilterAction::Rewrite(ip) => {
-                let resp = build_rewrite_response(&request, qtype, ip)?;
+            FilterAction::Rewrite(ref rewrite) => {
+                let resp = build_rewrite_response(&request, qtype, rewrite)?;
                 self.emit_log(
                     client_addr,
                     clean_domain,
@@ -169,6 +234,32 @@ impl DnsPipeline {
             start,
         )
         .await
+    }
+
+    fn enforce_acl(
+        &self,
+        request: &Message,
+        client_addr: SocketAddr,
+        clean_domain: &str,
+        qtype: RecordType,
+        start: Instant,
+    ) -> Result<Option<Vec<u8>>> {
+        let rule = match self.acl.load().check(client_addr.ip()) {
+            AclDecision::Allow => return Ok(None),
+            AclDecision::DeniedAcl => "acl:denied",
+            AclDecision::RateLimited => "acl:ratelimit",
+        };
+        self.emit_log(
+            client_addr,
+            clean_domain.to_string(),
+            qtype,
+            QueryOutcome::Blocked,
+            Some(rule.to_string()),
+            None,
+            start,
+            "REFUSED",
+        );
+        build_error_response(request, ResponseCode::Refused).map(Some)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -246,7 +337,8 @@ impl DnsPipeline {
                 let target_clean = target.trim_end_matches('.');
                 let decision = self.filter.evaluate(target_clean);
                 if decision.action == FilterAction::Block {
-                    let blocked_bytes = build_blocked_response(request, qtype)?;
+                    let (blocked_bytes, _) =
+                        build_blocked_response(request, qtype, self.block_mode())?;
                     let rule = decision
                         .matched_rule
                         .unwrap_or_else(|| format!("cname:{target_clean}"));
@@ -325,8 +417,24 @@ fn build_error_response(request: &Message, rcode: ResponseCode) -> Result<Vec<u8
         .map_err(|e| CoreError::Protocol(e.to_string()))
 }
 
-fn build_blocked_response(request: &Message, qtype: RecordType) -> Result<Vec<u8>> {
-    let mut resp = base_response(request, ResponseCode::NoError);
+fn build_blocked_response(
+    request: &Message,
+    qtype: RecordType,
+    mode: BlockMode,
+) -> Result<(Vec<u8>, &'static str)> {
+    let mut resp = match mode {
+        BlockMode::NxDomain => {
+            let bytes = build_error_response(request, ResponseCode::NXDomain)?;
+            return Ok((bytes, "NXDOMAIN"));
+        }
+        BlockMode::NoData => {
+            let bytes = build_error_response(request, ResponseCode::NoError)?;
+            return Ok((bytes, "NOERROR"));
+        }
+        BlockMode::ZeroIp => base_response(request, ResponseCode::NoError),
+    };
+
+    let mut rcode = "NOERROR";
     if let Some(q) = request.queries.first() {
         let name = q.name().clone();
         match qtype {
@@ -346,23 +454,47 @@ fn build_blocked_response(request: &Message, qtype: RecordType) -> Result<Vec<u8
             }
             _ => {
                 resp.metadata.response_code = ResponseCode::NXDomain;
+                rcode = "NXDOMAIN";
             }
         }
     }
-    resp.to_vec()
-        .map_err(|e| CoreError::Protocol(e.to_string()))
+    let bytes = resp
+        .to_vec()
+        .map_err(|e| CoreError::Protocol(e.to_string()))?;
+    Ok((bytes, rcode))
 }
 
-fn build_rewrite_response(request: &Message, qtype: RecordType, ip: IpAddr) -> Result<Vec<u8>> {
+fn build_rewrite_response(
+    request: &Message,
+    qtype: RecordType,
+    rewrite: &RewriteAction,
+) -> Result<Vec<u8>> {
     let mut resp = base_response(request, ResponseCode::NoError);
     if let Some(q) = request.queries.first() {
         let name = q.name().clone();
-        match (qtype, ip) {
-            (RecordType::A, IpAddr::V4(v4)) => {
-                resp.add_answer(Record::from_rdata(name, 60, RData::A(A(v4))));
+        match (qtype, rewrite) {
+            (RecordType::A, RewriteAction::Ip(IpAddr::V4(v4))) => {
+                resp.add_answer(Record::from_rdata(name, 60, RData::A(A(*v4))));
             }
-            (RecordType::AAAA, IpAddr::V6(v6)) => {
-                resp.add_answer(Record::from_rdata(name, 60, RData::AAAA(AAAA(v6))));
+            (RecordType::AAAA, RewriteAction::Ip(IpAddr::V6(v6))) => {
+                resp.add_answer(Record::from_rdata(name, 60, RData::AAAA(AAAA(*v6))));
+            }
+            (_, RewriteAction::Cname(target)) => {
+                let fqdn = format!("{}.", target.trim_end_matches('.'));
+                if let Ok(cname_name) = Name::from_ascii(&fqdn) {
+                    resp.add_answer(Record::from_rdata(
+                        name,
+                        60,
+                        RData::CNAME(CNAME(cname_name)),
+                    ));
+                }
+            }
+            (RecordType::TXT, RewriteAction::Txt(text)) => {
+                resp.add_answer(Record::from_rdata(
+                    name,
+                    60,
+                    RData::TXT(TXT::new(vec![text.clone()])),
+                ));
             }
             _ => {}
         }
@@ -501,5 +633,98 @@ mod tests {
         let q = build_query(0x4001, "unreachable.example.", RecordType::A);
         let resp = Message::from_vec(&pipeline.handle_packet(&q, client).await.unwrap()).unwrap();
         assert_eq!(resp.response_code, ResponseCode::ServFail);
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_block_modes_rewrites_and_acl() {
+        let filter = Arc::new(FilterEngine::new(&[
+            "||blocked.test^".to_string(),
+            "||alias.test^$dnsrewrite=CNAME;target.test".to_string(),
+            "||txt.test^$dnsrewrite=TXT;hello-crabdns".to_string(),
+        ]));
+        let cache = Arc::new(DnsCache::new(64, false));
+        let upstream = Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 50).unwrap());
+        let pipeline = DnsPipeline::new(filter, cache, upstream, None);
+        let allowed_client: SocketAddr = "127.0.0.1:5000".parse().expect("addr");
+
+        // BlockMode::NxDomain
+        pipeline.set_block_mode(BlockMode::NxDomain);
+        let q_blk = build_query(0x5001, "blocked.test.", RecordType::A);
+        let nx_resp = Message::from_vec(
+            &pipeline
+                .handle_packet(&q_blk, allowed_client)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(nx_resp.response_code, ResponseCode::NXDomain);
+        assert_eq!(nx_resp.answers.len(), 0);
+
+        // BlockMode::NoData
+        pipeline.set_block_mode(BlockMode::NoData);
+        let nodata_resp = Message::from_vec(
+            &pipeline
+                .handle_packet(&q_blk, allowed_client)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(nodata_resp.response_code, ResponseCode::NoError);
+        assert_eq!(nodata_resp.answers.len(), 0);
+
+        // CNAME and TXT rewrites
+        let q_cname = build_query(0x5002, "alias.test.", RecordType::A);
+        let r_cname = Message::from_vec(
+            &pipeline
+                .handle_packet(&q_cname, allowed_client)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            r_cname.answers.first().map(|r| &r.data),
+            Some(RData::CNAME(_))
+        ));
+
+        let q_txt = build_query(0x5003, "txt.test.", RecordType::TXT);
+        let r_txt = Message::from_vec(
+            &pipeline
+                .handle_packet(&q_txt, allowed_client)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            r_txt.answers.first().map(|r| &r.data),
+            Some(RData::TXT(_))
+        ));
+
+        // ACL deny & rate limit
+        pipeline
+            .reload_acl(&["127.0.0.0/8".to_string()], &["127.0.0.99".to_string()], 1)
+            .expect("acl");
+        let denied_client: SocketAddr = "127.0.0.99:5000".parse().expect("addr");
+        let r_denied =
+            Message::from_vec(&pipeline.handle_packet(&q_blk, denied_client).await.unwrap())
+                .unwrap();
+        assert_eq!(r_denied.response_code, ResponseCode::Refused);
+
+        // First query within rate limit succeeds, second is refused
+        let r_ok = Message::from_vec(
+            &pipeline
+                .handle_packet(&q_blk, allowed_client)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(r_ok.response_code, ResponseCode::NoError);
+        let r_rl = Message::from_vec(
+            &pipeline
+                .handle_packet(&q_blk, allowed_client)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(r_rl.response_code, ResponseCode::Refused);
     }
 }

@@ -61,11 +61,16 @@ pub fn validate_subscription_url(raw: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(trimmed).map_err(|e| format!("Invalid URL: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => Ok(trimmed.to_string()),
-        other => Err(format!("Unsupported URL scheme '{other}'; use http or https")),
+        other => Err(format!(
+            "Unsupported URL scheme '{other}'; use http or https"
+        )),
     }
 }
 
-pub async fn fetch_subscription_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
+pub async fn fetch_subscription_text(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<String, String> {
     let resp = client
         .get(url)
         .send()
@@ -94,7 +99,10 @@ pub async fn fetch_subscription_text(client: &reqwest::Client, url: &str) -> Res
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-pub fn rebuild_filter_engine(storage: &StorageEngine, pipeline: &DnsPipeline) -> Result<(), String> {
+pub fn rebuild_filter_engine(
+    storage: &StorageEngine,
+    pipeline: &DnsPipeline,
+) -> Result<(), String> {
     let custom_rules = storage
         .load_custom_rules()
         .map_err(|e| e.to_string())?
@@ -113,7 +121,10 @@ pub fn rebuild_filter_engine(storage: &StorageEngine, pipeline: &DnsPipeline) ->
 }
 
 fn generate_sub_id() -> String {
-    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).cast_unsigned();
+    let nanos = Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or(0)
+        .cast_unsigned();
     format!("sub-{nanos:x}")
 }
 
@@ -150,12 +161,16 @@ pub async fn refresh_enabled_subscriptions_job(
             fetch_and_store_subscription(client, storage, sub).await;
         }
     }
-    storage.save_subscriptions(&subs).map_err(|e| e.to_string())?;
+    storage
+        .save_subscriptions(&subs)
+        .map_err(|e| e.to_string())?;
     rebuild_filter_engine(storage, pipeline)?;
     Ok(subs)
 }
 
-pub async fn list_subscriptions(State(state): State<RouterState>) -> ApiResult<Json<Vec<FilterSubscription>>> {
+pub async fn list_subscriptions(
+    State(state): State<RouterState>,
+) -> ApiResult<Json<Vec<FilterSubscription>>> {
     let subs = state
         .app
         .storage
@@ -170,7 +185,10 @@ pub async fn create_subscription(
 ) -> ApiResult<(StatusCode, Json<FilterSubscription>)> {
     let name = payload.name.trim().to_string();
     if name.is_empty() {
-        return Err(err_response(StatusCode::BAD_REQUEST, "Name cannot be empty"));
+        return Err(err_response(
+            StatusCode::BAD_REQUEST,
+            "Name cannot be empty",
+        ));
     }
     let url = validate_subscription_url(&payload.url)
         .map_err(|e| err_response(StatusCode::BAD_REQUEST, e))?;
@@ -217,8 +235,7 @@ pub async fn update_subscription(
 ) -> ApiResult<Json<FilterSubscription>> {
     let next_url = match payload.url {
         Some(ref raw) => Some(
-            validate_subscription_url(raw)
-                .map_err(|e| err_response(StatusCode::BAD_REQUEST, e))?,
+            validate_subscription_url(raw).map_err(|e| err_response(StatusCode::BAD_REQUEST, e))?,
         ),
         None => None,
     };
@@ -232,13 +249,19 @@ pub async fn update_subscription(
             .list_subscriptions()
             .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let Some(sub) = subs.iter_mut().find(|s| s.id == id) else {
-            return Err(err_response(StatusCode::NOT_FOUND, "Subscription not found"));
+            return Err(err_response(
+                StatusCode::NOT_FOUND,
+                "Subscription not found",
+            ));
         };
 
         if let Some(name) = payload.name {
             let trimmed = name.trim().to_string();
             if trimmed.is_empty() {
-                return Err(err_response(StatusCode::BAD_REQUEST, "Name cannot be empty"));
+                return Err(err_response(
+                    StatusCode::BAD_REQUEST,
+                    "Name cannot be empty",
+                ));
             }
             sub.name = trimmed;
         }
@@ -265,7 +288,8 @@ pub async fn update_subscription(
     };
 
     if should_fetch {
-        fetch_and_store_subscription(&state.http_client, &state.app.storage, &mut updated_sub).await;
+        fetch_and_store_subscription(&state.http_client, &state.app.storage, &mut updated_sub)
+            .await;
         let _guard = state.sub_lock.lock().await;
         let mut subs = state
             .app
@@ -304,7 +328,10 @@ pub async fn delete_subscription(
         let before = subs.len();
         subs.retain(|s| s.id != id);
         if subs.len() == before {
-            return Err(err_response(StatusCode::NOT_FOUND, "Subscription not found"));
+            return Err(err_response(
+                StatusCode::NOT_FOUND,
+                "Subscription not found",
+            ));
         }
         state
             .app

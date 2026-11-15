@@ -40,15 +40,27 @@ impl RunningServer {
     }
 }
 
+fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
+    config.upstreams = saved_cfg.upstreams;
+    config.upstream_strategy = saved_cfg.upstream_strategy;
+    config.cache_size = saved_cfg.cache_size;
+    config.optimistic_cache = saved_cfg.optimistic_cache;
+    config.upstream_timeout_ms = saved_cfg.upstream_timeout_ms;
+    config.log_retention_hours = saved_cfg.log_retention_hours;
+    config.block_mode = saved_cfg.block_mode;
+    config.allow_cidrs = saved_cfg.allow_cidrs;
+    config.deny_cidrs = saved_cfg.deny_cidrs;
+    config.rate_limit_qps = saved_cfg.rate_limit_qps;
+    config.web_auth_enabled = saved_cfg.web_auth_enabled;
+    config.web_username = saved_cfg.web_username;
+    config.web_password_hash = saved_cfg.web_password_hash;
+}
+
 pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let storage = Arc::new(StorageEngine::open(&config.data_dir)?);
 
     if let Some(saved_cfg) = storage.load_config()? {
-        config.upstreams = saved_cfg.upstreams;
-        config.cache_size = saved_cfg.cache_size;
-        config.optimistic_cache = saved_cfg.optimistic_cache;
-        config.upstream_timeout_ms = saved_cfg.upstream_timeout_ms;
-        config.log_retention_hours = saved_cfg.log_retention_hours;
+        merge_saved_config(&mut config, saved_cfg);
     }
 
     let config = Arc::new(ArcSwap::from_pointee(config));
@@ -66,9 +78,10 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         current_cfg.cache_size,
         current_cfg.optimistic_cache,
     ));
-    let upstream = Arc::new(UpstreamPool::new(
+    let upstream = Arc::new(UpstreamPool::new_with_strategy(
         &current_cfg.upstreams,
         current_cfg.upstream_timeout_ms,
+        current_cfg.upstream_strategy,
     )?);
 
     let (log_tx, log_rx) = mpsc::channel::<QueryEvent>(4096);
@@ -76,6 +89,12 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let sink_handle = spawn_log_sink(Arc::clone(&storage), log_rx, live_tx.clone());
 
     let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, Some(log_tx)));
+    pipeline.set_block_mode(current_cfg.block_mode);
+    pipeline.reload_acl(
+        &current_cfg.allow_cidrs,
+        &current_cfg.deny_cidrs,
+        current_cfg.rate_limit_qps,
+    )?;
 
     let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;
     let dns_addr = tcp_listener.local_addr()?;

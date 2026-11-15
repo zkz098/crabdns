@@ -114,7 +114,9 @@ async fn spawn_mock_tcp_upstream() -> (SocketAddr, Arc<AtomicUsize>) {
 }
 
 async fn send_udp_query(server_addr: SocketAddr, query: &[u8]) -> Message {
-    let sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind client udp");
+    let sock = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind client udp");
     sock.send_to(query, server_addr).await.expect("send udp");
     let mut buf = [0_u8; 4096];
     let (len, _) = tokio::time::timeout(Duration::from_secs(3), sock.recv_from(&mut buf))
@@ -224,6 +226,7 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
             "||nas.local^$dnsrewrite=192.168.1.50".to_string(),
         ],
         log_retention_hours: 24,
+        ..Config::default()
     };
 
     let server = spawn_server(config.clone())
@@ -239,47 +242,78 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
         .expect("connect ws");
 
     // 1. Forwarded UDP A query
-    let r1 = send_udp_query(dns_addr, &build_query(0x1001, "allowed.example.com.", RecordType::A)).await;
+    let r1 = send_udp_query(
+        dns_addr,
+        &build_query(0x1001, "allowed.example.com.", RecordType::A),
+    )
+    .await;
     assert_eq!(r1.id, 0x1001);
     assert_eq!(r1.response_code, ResponseCode::NoError);
     assert_eq!(r1.answers[0].data, RData::A(A(Ipv4Addr::new(1, 2, 3, 4))));
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
 
     // 2. Cached UDP A query (same domain, new TX ID, upstream hit count stays 1)
-    let r2 = send_udp_query(dns_addr, &build_query(0x1002, "allowed.example.com.", RecordType::A)).await;
+    let r2 = send_udp_query(
+        dns_addr,
+        &build_query(0x1002, "allowed.example.com.", RecordType::A),
+    )
+    .await;
     assert_eq!(r2.id, 0x1002);
     assert_eq!(r2.answers[0].data, RData::A(A(Ipv4Addr::new(1, 2, 3, 4))));
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
 
     // 3. Cached TCP A query
-    let r3 = send_tcp_query(dns_addr, &build_query(0x1003, "allowed.example.com.", RecordType::A)).await;
+    let r3 = send_tcp_query(
+        dns_addr,
+        &build_query(0x1003, "allowed.example.com.", RecordType::A),
+    )
+    .await;
     assert_eq!(r3.id, 0x1003);
     assert_eq!(r3.answers[0].data, RData::A(A(Ipv4Addr::new(1, 2, 3, 4))));
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
 
     // 4. Blocked UDP A query -> 0.0.0.0
-    let r4 = send_udp_query(dns_addr, &build_query(0x1004, "ads.example.com.", RecordType::A)).await;
+    let r4 = send_udp_query(
+        dns_addr,
+        &build_query(0x1004, "ads.example.com.", RecordType::A),
+    )
+    .await;
     assert_eq!(r4.id, 0x1004);
     assert_eq!(r4.answers[0].data, RData::A(A(Ipv4Addr::UNSPECIFIED)));
 
     // 5. Blocked UDP AAAA query -> ::
-    let r5 = send_udp_query(dns_addr, &build_query(0x1005, "ads.example.com.", RecordType::AAAA)).await;
+    let r5 = send_udp_query(
+        dns_addr,
+        &build_query(0x1005, "ads.example.com.", RecordType::AAAA),
+    )
+    .await;
     assert_eq!(r5.id, 0x1005);
     assert_eq!(r5.answers[0].data, RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED)));
 
     // 6. Rewritten UDP A query -> 192.168.1.50
     let r6 = send_udp_query(dns_addr, &build_query(0x1006, "nas.local.", RecordType::A)).await;
     assert_eq!(r6.id, 0x1006);
-    assert_eq!(r6.answers[0].data, RData::A(A(Ipv4Addr::new(192, 168, 1, 50))));
+    assert_eq!(
+        r6.answers[0].data,
+        RData::A(A(Ipv4Addr::new(192, 168, 1, 50)))
+    );
 
     // 7. CNAME cloaking blocked -> upstream queried (hits = 2), response is 0.0.0.0
-    let r7 = send_udp_query(dns_addr, &build_query(0x1007, "cloaked.example.com.", RecordType::A)).await;
+    let r7 = send_udp_query(
+        dns_addr,
+        &build_query(0x1007, "cloaked.example.com.", RecordType::A),
+    )
+    .await;
     assert_eq!(r7.id, 0x1007);
     assert_eq!(r7.answers[0].data, RData::A(A(Ipv4Addr::UNSPECIFIED)));
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 2);
 
     // 8. Forwarded TCP A query
-    let r8 = send_tcp_query(dns_addr, &build_query(0x1008, "tcp-live.example.com.", RecordType::A)).await;
+    let r8 = send_tcp_query(
+        dns_addr,
+        &build_query(0x1008, "tcp-live.example.com.", RecordType::A),
+    )
+    .await;
     assert_eq!(r8.id, 0x1008);
     assert_eq!(r8.answers[0].data, RData::A(A(Ipv4Addr::new(1, 2, 3, 4))));
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 3);
@@ -287,9 +321,21 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
     // Verify all 8 QueryEvents arrive over WebSocket /api/logs/ws
     let ws_events = collect_ws_events(&mut ws_stream, 8).await;
     assert_eq!(ws_events.len(), 8);
-    assert!(ws_events.iter().any(|e| e.domain == "nas.local" && e.outcome == QueryOutcome::Rewritten));
-    assert!(ws_events.iter().any(|e| e.domain == "cloaked.example.com" && e.outcome == QueryOutcome::Blocked));
-    assert!(ws_events.iter().any(|e| e.domain == "tcp-live.example.com" && e.outcome == QueryOutcome::Forwarded));
+    assert!(
+        ws_events
+            .iter()
+            .any(|e| e.domain == "nas.local" && e.outcome == QueryOutcome::Rewritten)
+    );
+    assert!(
+        ws_events
+            .iter()
+            .any(|e| e.domain == "cloaked.example.com" && e.outcome == QueryOutcome::Blocked)
+    );
+    assert!(
+        ws_events
+            .iter()
+            .any(|e| e.domain == "tcp-live.example.com" && e.outcome == QueryOutcome::Forwarded)
+    );
 
     // Verify HTTP APIs after log sink flushes to Fjall
     let http = reqwest::Client::new();
@@ -303,8 +349,11 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
     assert_eq!(health["status"].as_str(), Some("ok"));
     assert_eq!(health["filter_rules"].as_u64(), Some(3));
 
-    let blocked_logs: Vec<QueryEvent> =
-        get_json(&http, &format!("{base_url}/api/logs?outcome=blocked&limit=20")).await;
+    let blocked_logs: Vec<QueryEvent> = get_json(
+        &http,
+        &format!("{base_url}/api/logs?outcome=blocked&limit=20"),
+    )
+    .await;
     assert_eq!(blocked_logs.len(), 3);
 
     let search_logs: Vec<QueryEvent> =
@@ -324,10 +373,18 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
     assert_eq!(put_resp.status(), reqwest::StatusCode::OK);
 
     // Verify new rule blocks `dynamic-block.test` and old rule no longer blocks `ads.example.com`
-    let r9 = send_udp_query(dns_addr, &build_query(0x1009, "dynamic-block.test.", RecordType::A)).await;
+    let r9 = send_udp_query(
+        dns_addr,
+        &build_query(0x1009, "dynamic-block.test.", RecordType::A),
+    )
+    .await;
     assert_eq!(r9.answers[0].data, RData::A(A(Ipv4Addr::UNSPECIFIED)));
 
-    let r10 = send_udp_query(dns_addr, &build_query(0x100A, "ads.example.com.", RecordType::A)).await;
+    let r10 = send_udp_query(
+        dns_addr,
+        &build_query(0x100A, "ads.example.com.", RecordType::A),
+    )
+    .await;
     assert_eq!(r10.answers[0].data, RData::A(A(Ipv4Addr::new(1, 2, 3, 4))));
 
     let _ = wait_for_total_queries(&http, &base_url, 10).await;
@@ -339,9 +396,7 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
         custom_rules: vec![],
         ..config
     };
-    let restarted = spawn_server(restart_config)
-        .await
-        .expect("restart server");
+    let restarted = spawn_server(restart_config).await.expect("restart server");
     let restarted_base = format!("http://{}", restarted.web_addr);
 
     // Persisted custom rules from Fjall must still block `dynamic-block.test`
@@ -353,7 +408,10 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
     assert_eq!(r11.answers[0].data, RData::A(A(Ipv4Addr::UNSPECIFIED)));
 
     let persisted_stats = wait_for_total_queries(&http, &restarted_base, 11).await;
-    assert_eq!(persisted_stats["stats"]["blocked_queries"].as_u64(), Some(5));
+    assert_eq!(
+        persisted_stats["stats"]["blocked_queries"].as_u64(),
+        Some(5)
+    );
 
     restarted.shutdown().await;
 }
@@ -377,6 +435,7 @@ async fn test_full_chain_upstream_failover_and_servfail() {
         upstream_timeout_ms: 500,
         custom_rules: vec![],
         log_retention_hours: 24,
+        ..Config::default()
     };
 
     let server = spawn_server(failover_cfg)
@@ -405,6 +464,7 @@ async fn test_full_chain_upstream_failover_and_servfail() {
         upstream_timeout_ms: 200,
         custom_rules: vec![],
         log_retention_hours: 24,
+        ..Config::default()
     };
 
     let dead_server = spawn_server(dead_cfg).await.expect("spawn dead server");
@@ -440,6 +500,7 @@ async fn test_full_chain_config_update_hot_reload_and_restart() {
         upstream_timeout_ms: 1500,
         custom_rules: vec![],
         log_retention_hours: 24,
+        ..Config::default()
     };
 
     let server = spawn_server(config.clone()).await.expect("spawn server");
@@ -501,7 +562,11 @@ async fn test_full_chain_config_update_hot_reload_and_restart() {
     // Restart with original UDP config; Fjall persisted config should override to TCP upstream
     let restarted = spawn_server(config).await.expect("restart server");
     let restarted_http = reqwest::Client::new();
-    let cfg_json: Value = get_json(&restarted_http, &format!("http://{}/api/config", restarted.web_addr)).await;
+    let cfg_json: Value = get_json(
+        &restarted_http,
+        &format!("http://{}/api/config", restarted.web_addr),
+    )
+    .await;
     assert_eq!(cfg_json["cache_size"].as_u64(), Some(512));
     assert_eq!(cfg_json["optimistic_cache"].as_bool(), Some(false));
     assert_eq!(cfg_json["log_retention_hours"].as_u64(), Some(48));
