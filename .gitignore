@@ -1,0 +1,10 @@
+/target
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/data
+/webui/node_modules
+/webui/dist
+*.db
+*.log
+.DS_Store

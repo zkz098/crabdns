@@ -1,0 +1,27 @@
+[package]
+name = "crabdns-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+crabdns-core = { path = "../crates/crabdns-core" }
+hickory-proto = "0.26"
+
+[[bin]]
+name = "fuzz_filter_parser"
+path = "fuzz_targets/fuzz_filter_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dns_packet"
+path = "fuzz_targets/fuzz_dns_packet.rs"
+test = false
+doc = false
+bench = false

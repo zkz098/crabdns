@@ -1,0 +1,25 @@
+[package]
+name = "crabdns-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arc-swap.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+hickory-proto.workspace = true
+moka.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+toml.workspace = true
+tracing.workspace = true
+webpki-roots.workspace = true
