@@ -12,6 +12,7 @@ use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
+use ts_rs::TS;
 
 #[derive(Embed)]
 #[folder = "../../webui/dist"]
@@ -25,17 +26,21 @@ pub struct AppState {
     pub live_tx: broadcast::Sender<QueryEvent>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 struct HealthResponse {
     status: &'static str,
+    #[ts(type = "number")]
     cache_entries: u64,
     filter_rules: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 struct StatsResponse {
     stats: StatsSnapshot,
     filter: FilterStats,
+    #[ts(type = "number")]
     cache_entries: u64,
 }
 
@@ -46,7 +51,8 @@ struct LogsQuery {
     outcome: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
 struct RulesPayload {
     rules_text: String,
     #[serde(default)]

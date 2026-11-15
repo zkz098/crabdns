@@ -9,6 +9,7 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
+use ts_rs::TS;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -21,18 +22,26 @@ pub enum StorageError {
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct TopItem {
     pub name: String,
+    #[ts(type = "number")]
     pub count: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct StatsSnapshot {
+    #[ts(type = "number")]
     pub total_queries: u64,
+    #[ts(type = "number")]
     pub blocked_queries: u64,
+    #[ts(type = "number")]
     pub cached_queries: u64,
+    #[ts(type = "number")]
     pub rewritten_queries: u64,
+    #[ts(type = "number")]
     pub error_queries: u64,
     pub top_domains: Vec<TopItem>,
     pub top_blocked: Vec<TopItem>,

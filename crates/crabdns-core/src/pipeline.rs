@@ -8,14 +8,16 @@ use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{RData, Record, RecordType};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use ts_rs::TS;
 
 use crate::cache::{CacheKey, DnsCache};
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterEngine};
 use crate::upstream::UpstreamPool;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum QueryOutcome {
     Forwarded,
     Cached,
@@ -24,7 +26,8 @@ pub enum QueryOutcome {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct QueryEvent {
     pub timestamp: DateTime<Utc>,
     pub client_ip: String,
@@ -33,6 +36,7 @@ pub struct QueryEvent {
     pub outcome: QueryOutcome,
     pub matched_rule: Option<String>,
     pub upstream: Option<String>,
+    #[ts(type = "number")]
     pub elapsed_us: u64,
     pub rcode: String,
 }

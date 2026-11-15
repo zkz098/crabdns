@@ -1,43 +1,9 @@
 import { createSignal, onCleanup, onMount, For, Show } from "solid-js";
-
-type QueryOutcome = "forwarded" | "cached" | "blocked" | "rewritten" | "error";
-
-interface QueryEvent {
-  timestamp: string;
-  client_ip: string;
-  domain: string;
-  qtype: string;
-  outcome: QueryOutcome;
-  matched_rule: string | null;
-  upstream: string | null;
-  elapsed_us: number;
-  rcode: string;
-}
-
-interface TopItem {
-  name: string;
-  count: number;
-}
-
-interface StatsResponse {
-  stats: {
-    total_queries: number;
-    blocked_queries: number;
-    cached_queries: number;
-    rewritten_queries: number;
-    error_queries: number;
-    top_domains: TopItem[];
-    top_blocked: TopItem[];
-    top_clients: TopItem[];
-  };
-  filter: {
-    total_rules: number;
-    block_rules: number;
-    allow_rules: number;
-    rewrite_rules: number;
-  };
-  cache_entries: number;
-}
+import type { QueryEvent } from "./types/QueryEvent";
+import type { QueryOutcome } from "./types/QueryOutcome";
+import type { RulesPayload } from "./types/RulesPayload";
+import type { StatsResponse } from "./types/StatsResponse";
+import type { TopItem } from "./types/TopItem";
 
 export default function App() {
   const [tab, setTab] = createSignal<"dashboard" | "logs" | "rules">("dashboard");
@@ -73,7 +39,7 @@ export default function App() {
     try {
       const res = await fetch("/api/rules");
       if (res.ok) {
-        const data = await res.json();
+        const data: RulesPayload = await res.json();
         setRulesText(data.rules_text ?? "");
       }
     } catch {
