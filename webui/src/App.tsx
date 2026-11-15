@@ -614,105 +614,105 @@ export default function App() {
           onLogout={handleLogout}
         />
 
-      <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 sm:pt-7 pb-24 md:pb-10">
-        <Show when={tab() === "dashboard"}>
-          <DashboardView
-            stats={stats()}
-            onFlushCache={flushCache}
-            cacheFlushedMsg={cacheFlushedMsg()}
-          />
-        </Show>
+        <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 sm:pt-7 pb-24 md:pb-10">
+          <Show when={tab() === "dashboard"}>
+            <DashboardView
+              stats={stats()}
+              onFlushCache={flushCache}
+              cacheFlushedMsg={cacheFlushedMsg()}
+            />
+          </Show>
 
-        <Show when={tab() === "logs"}>
-          <LogsView
-            logs={logs()}
-            search={search()}
-            onSearchChange={setSearch}
-            outcomeFilter={outcomeFilter()}
-            onOutcomeChange={setOutcomeFilter}
-            onRefresh={fetchLogs}
-            onQuickRule={quickRule}
-            quickRuleMsg={quickRuleMsg()}
-          />
-        </Show>
+          <Show when={tab() === "logs"}>
+            <LogsView
+              logs={logs()}
+              search={search()}
+              onSearchChange={setSearch}
+              outcomeFilter={outcomeFilter()}
+              onOutcomeChange={setOutcomeFilter}
+              onRefresh={fetchLogs}
+              onQuickRule={quickRule}
+              quickRuleMsg={quickRuleMsg()}
+            />
+          </Show>
 
-        <Show when={tab() === "rules"}>
-          <RulesView
-            rulesText={rulesText()}
-            rulesEnabled={rulesEnabled()}
-            onRulesChange={setRulesText}
-            onRulesEnabledChange={(next) => {
-              setRulesEnabled(next);
-              void saveRules();
-            }}
-            saveMessage={saveMessage()}
-            onSave={saveRules}
-            subscriptions={subscriptions()}
-            subMessage={subMessage()}
-            subIsError={subIsError()}
-            refreshingIds={refreshingIds()}
-            refreshingAll={refreshingAll()}
-            addingSub={addingSub()}
-            onAddSubscription={addSubscription}
-            onToggleSubscription={toggleSubscription}
-            onRefreshSubscription={refreshSubscription}
-            onRefreshAllSubscriptions={refreshAllSubscriptions}
-            onDeleteSubscription={deleteSubscription}
-            onTestRule={testRule}
-          />
-        </Show>
+          <Show when={tab() === "rules"}>
+            <RulesView
+              rulesText={rulesText()}
+              rulesEnabled={rulesEnabled()}
+              onRulesChange={setRulesText}
+              onRulesEnabledChange={(next) => {
+                setRulesEnabled(next);
+                void saveRules();
+              }}
+              saveMessage={saveMessage()}
+              onSave={saveRules}
+              subscriptions={subscriptions()}
+              subMessage={subMessage()}
+              subIsError={subIsError()}
+              refreshingIds={refreshingIds()}
+              refreshingAll={refreshingAll()}
+              addingSub={addingSub()}
+              onAddSubscription={addSubscription}
+              onToggleSubscription={toggleSubscription}
+              onRefreshSubscription={refreshSubscription}
+              onRefreshAllSubscriptions={refreshAllSubscriptions}
+              onDeleteSubscription={deleteSubscription}
+              onTestRule={testRule}
+            />
+          </Show>
 
-        <Show when={tab() === "settings"}>
-          <SettingsView
-            configData={configData()}
-            upstreamsText={upstreamsText()}
-            onUpstreamsChange={setUpstreamsText}
-            upstreamStrategy={upstreamStrategy()}
-            onUpstreamStrategyChange={setUpstreamStrategy}
-            upstreamHealth={upstreamHealth()}
-            probingUpstreams={probingUpstreams()}
-            onProbeUpstreams={probeUpstreams}
-            blockMode={blockMode()}
-            onBlockModeChange={setBlockMode}
-            allowCidrsText={allowCidrsText()}
-            onAllowCidrsChange={setAllowCidrsText}
-            denyCidrsText={denyCidrsText()}
-            onDenyCidrsChange={setDenyCidrsText}
-            rateLimitQps={rateLimitQps()}
-            onRateLimitChange={setRateLimitQps}
-            cacheSize={cacheSize()}
-            onCacheSizeChange={setCacheSize}
-            upstreamTimeoutMs={upstreamTimeoutMs()}
-            onUpstreamTimeoutChange={setUpstreamTimeoutMs}
-            logRetentionHours={logRetentionHours()}
-            onLogRetentionChange={setLogRetentionHours}
-            optimisticCache={optimisticCache()}
-            onOptimisticCacheChange={setOptimisticCache}
-            splitDnsText={splitDnsText()}
-            onSplitDnsChange={setSplitDnsText}
-            cnameCloakingBlocking={cnameCloakingBlocking()}
-            onCnameCloakingChange={setCnameCloakingBlocking}
-            dohEnabled={dohEnabled()}
-            onDohEnabledChange={setDohEnabled}
-            allowPrivateSubscriptions={allowPrivateSubscriptions()}
-            onAllowPrivateSubscriptionsChange={setAllowPrivateSubscriptions}
-            configMessage={configMessage()}
-            configIsError={configIsError()}
-            onSave={saveConfig}
-            authEnabled={authEnabled()}
-            onAuthEnabledChange={setAuthEnabled}
-            authUsername={authUsername()}
-            onAuthUsernameChange={setAuthUsername}
-            authPassword={authPassword()}
-            onAuthPasswordChange={setAuthPassword}
-            authMessage={authMessage()}
-            authIsError={authIsError()}
-            onSaveAuth={saveAuth}
-          />
-        </Show>
-      </main>
+          <Show when={tab() === "settings"}>
+            <SettingsView
+              configData={configData()}
+              upstreamsText={upstreamsText()}
+              onUpstreamsChange={setUpstreamsText}
+              upstreamStrategy={upstreamStrategy()}
+              onUpstreamStrategyChange={setUpstreamStrategy}
+              upstreamHealth={upstreamHealth()}
+              probingUpstreams={probingUpstreams()}
+              onProbeUpstreams={probeUpstreams}
+              blockMode={blockMode()}
+              onBlockModeChange={setBlockMode}
+              allowCidrsText={allowCidrsText()}
+              onAllowCidrsChange={setAllowCidrsText}
+              denyCidrsText={denyCidrsText()}
+              onDenyCidrsChange={setDenyCidrsText}
+              rateLimitQps={rateLimitQps()}
+              onRateLimitChange={setRateLimitQps}
+              cacheSize={cacheSize()}
+              onCacheSizeChange={setCacheSize}
+              upstreamTimeoutMs={upstreamTimeoutMs()}
+              onUpstreamTimeoutChange={setUpstreamTimeoutMs}
+              logRetentionHours={logRetentionHours()}
+              onLogRetentionChange={setLogRetentionHours}
+              optimisticCache={optimisticCache()}
+              onOptimisticCacheChange={setOptimisticCache}
+              splitDnsText={splitDnsText()}
+              onSplitDnsChange={setSplitDnsText}
+              cnameCloakingBlocking={cnameCloakingBlocking()}
+              onCnameCloakingChange={setCnameCloakingBlocking}
+              dohEnabled={dohEnabled()}
+              onDohEnabledChange={setDohEnabled}
+              allowPrivateSubscriptions={allowPrivateSubscriptions()}
+              onAllowPrivateSubscriptionsChange={setAllowPrivateSubscriptions}
+              configMessage={configMessage()}
+              configIsError={configIsError()}
+              onSave={saveConfig}
+              authEnabled={authEnabled()}
+              onAuthEnabledChange={setAuthEnabled}
+              authUsername={authUsername()}
+              onAuthUsernameChange={setAuthUsername}
+              authPassword={authPassword()}
+              onAuthPasswordChange={setAuthPassword}
+              authMessage={authMessage()}
+              authIsError={authIsError()}
+              onSaveAuth={saveAuth}
+            />
+          </Show>
+        </main>
 
-      <MobileNav tab={tab()} onSelectTab={handleSelectTab} />
+        <MobileNav tab={tab()} onSelectTab={handleSelectTab} />
       </div>
     </Show>
   );

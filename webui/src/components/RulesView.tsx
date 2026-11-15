@@ -140,7 +140,9 @@ export function RulesView(props: RulesViewProps) {
                 <Show
                   when={res().matched_rule}
                   fallback={
-                    <span class="text-[#666666] dark:text-[#a1a1aa]">{t("rulesTesterNoMatch")}</span>
+                    <span class="text-[#666666] dark:text-[#a1a1aa]">
+                      {t("rulesTesterNoMatch")}
+                    </span>
                   }
                 >
                   <span class="text-[#666666] dark:text-[#a1a1aa]">
