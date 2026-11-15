@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crabdns_core::{Config, QueryEvent, QueryOutcome};
 use dashmap::DashMap;
+use foldhash::fast::RandomState;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -86,9 +87,9 @@ pub struct StorageEngine {
     cached_queries: AtomicU64,
     rewritten_queries: AtomicU64,
     error_queries: AtomicU64,
-    domain_counts: DashMap<String, u64>,
-    blocked_counts: DashMap<String, u64>,
-    client_counts: DashMap<String, u64>,
+    domain_counts: DashMap<String, u64, RandomState>,
+    blocked_counts: DashMap<String, u64, RandomState>,
+    client_counts: DashMap<String, u64, RandomState>,
 }
 
 impl StorageEngine {
@@ -114,9 +115,9 @@ impl StorageEngine {
             cached_queries: AtomicU64::new(persisted.cached),
             rewritten_queries: AtomicU64::new(persisted.rewritten),
             error_queries: AtomicU64::new(persisted.error),
-            domain_counts: DashMap::new(),
-            blocked_counts: DashMap::new(),
-            client_counts: DashMap::new(),
+            domain_counts: DashMap::with_hasher(RandomState::default()),
+            blocked_counts: DashMap::with_hasher(RandomState::default()),
+            client_counts: DashMap::with_hasher(RandomState::default()),
         })
     }
 
@@ -321,7 +322,7 @@ fn encode_log_key(ts_ms: u64, seq: u64) -> [u8; 16] {
     key
 }
 
-fn increment_map(map: &DashMap<String, u64>, key: &str) {
+fn increment_map(map: &DashMap<String, u64, RandomState>, key: &str) {
     if let Some(mut entry) = map.get_mut(key) {
         *entry += 1;
     } else if map.len() < 10_000 {
@@ -329,7 +330,7 @@ fn increment_map(map: &DashMap<String, u64>, key: &str) {
     }
 }
 
-fn top_n(map: &DashMap<String, u64>, limit: usize) -> Vec<TopItem> {
+fn top_n(map: &DashMap<String, u64, RandomState>, limit: usize) -> Vec<TopItem> {
     let mut items: Vec<TopItem> = map
         .iter()
         .map(|entry| TopItem {

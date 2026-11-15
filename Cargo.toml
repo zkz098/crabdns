@@ -62,3 +62,5 @@ ts-rs = { version = "12", features = ["chrono-impl"] }
 proptest = "1"
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
+foldhash = "0.2"
+mimalloc = "0.1"

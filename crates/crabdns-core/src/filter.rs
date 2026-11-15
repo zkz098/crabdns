@@ -49,9 +49,27 @@ struct RuleMeta {
     rewrite: Option<RewriteAction>,
 }
 
+type TrieMap<K, V> = HashMap<K, V, foldhash::fast::RandomState>;
+
+fn lookup_child<'a>(children: &'a TrieMap<String, TrieNode>, label: &str) -> Option<&'a TrieNode> {
+    if !label.bytes().any(|b| b.is_ascii_uppercase()) {
+        return children.get(label);
+    }
+    if label.len() <= 128 {
+        let mut buf = [0u8; 128];
+        let slice = &mut buf[..label.len()];
+        slice.copy_from_slice(label.as_bytes());
+        slice.make_ascii_lowercase();
+        if let Ok(lower) = std::str::from_utf8(slice) {
+            return children.get(lower);
+        }
+    }
+    children.get(&label.to_ascii_lowercase())
+}
+
 #[derive(Debug, Default)]
 struct TrieNode {
-    children: HashMap<String, TrieNode>,
+    children: TrieMap<String, TrieNode>,
     rule: Option<RuleMeta>,
 }
 
@@ -68,18 +86,17 @@ impl TrieNode {
     }
 
     fn match_domain(&self, domain: &str) -> Option<&RuleMeta> {
-        let labels: Vec<&str> = domain.rsplit('.').filter(|s| !s.is_empty()).collect();
+        let mut labels = domain.rsplit('.').filter(|s| !s.is_empty()).peekable();
         let mut current = self;
         let mut best: Option<&RuleMeta> = None;
 
-        for (idx, label) in labels.iter().enumerate() {
-            let lower = label.to_ascii_lowercase();
-            let Some(next) = current.children.get(&lower) else {
+        while let Some(label) = labels.next() {
+            let Some(next) = lookup_child(&current.children, label) else {
                 break;
             };
             current = next;
             if let Some(meta) = &current.rule {
-                let is_exact = idx + 1 == labels.len();
+                let is_exact = labels.peek().is_none();
                 let matches = match meta.scope {
                     MatchScope::Exact => is_exact,
                     MatchScope::DomainAndSubdomains => true,

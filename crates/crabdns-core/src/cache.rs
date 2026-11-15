@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use foldhash::fast::RandomState;
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -40,7 +41,7 @@ pub struct CacheStats {
 }
 
 pub struct DnsCache {
-    inner: Cache<CacheKey, CachedEntry>,
+    inner: Cache<CacheKey, CachedEntry, RandomState>,
     optimistic: bool,
     stale_grace: Duration,
     hits: AtomicU64,
@@ -59,7 +60,7 @@ impl DnsCache {
         let inner = Cache::builder()
             .max_capacity(max_capacity)
             .time_to_live(ttl_window)
-            .build();
+            .build_with_hasher(RandomState::default());
 
         Self {
             inner,

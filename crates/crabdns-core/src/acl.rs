@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
 use dashmap::DashMap;
+use foldhash::fast::RandomState;
 
 use crate::error::{CoreError, Result};
 
@@ -106,7 +107,7 @@ pub struct AccessController {
     allow_cidrs: Vec<IpNet>,
     deny_cidrs: Vec<IpNet>,
     rate_limit_qps: u32,
-    buckets: DashMap<IpAddr, TokenBucket>,
+    buckets: DashMap<IpAddr, TokenBucket, RandomState>,
 }
 
 impl AccessController {
@@ -117,7 +118,7 @@ impl AccessController {
             allow_cidrs,
             deny_cidrs,
             rate_limit_qps,
-            buckets: DashMap::new(),
+            buckets: DashMap::with_hasher(RandomState::default()),
         })
     }
 

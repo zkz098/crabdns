@@ -4,7 +4,11 @@ use std::path::PathBuf;
 use clap::Parser;
 use crabdns_core::Config;
 use crabdns_server::spawn_server;
+use mimalloc::MiMalloc;
 use tracing_subscriber::EnvFilter;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Debug, Parser)]
 #[command(name = "crabdns", about = "High-performance Rust DNS ad-blocker")]

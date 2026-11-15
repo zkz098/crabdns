@@ -13,6 +13,7 @@ chrono.workspace = true
 crabdns-core.workspace = true
 dashmap.workspace = true
 fjall.workspace = true
+foldhash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
