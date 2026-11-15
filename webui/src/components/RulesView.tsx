@@ -2,6 +2,7 @@ import { createSignal, For, Show } from "solid-js";
 import { t } from "../i18n";
 import type { CreateSubscriptionPayload } from "../types/CreateSubscriptionPayload";
 import type { FilterSubscription } from "../types/FilterSubscription";
+import type { TestRuleResponse } from "../types/TestRuleResponse";
 
 interface RulesViewProps {
   rulesText: string;
@@ -21,6 +22,7 @@ interface RulesViewProps {
   onRefreshSubscription: (id: string) => void;
   onRefreshAllSubscriptions: () => void;
   onDeleteSubscription: (id: string) => void;
+  onTestRule?: (domain: string) => Promise<TestRuleResponse | null>;
 }
 
 const PRESETS = [
@@ -57,6 +59,21 @@ export function RulesView(props: RulesViewProps) {
   const [newUrl, setNewUrl] = createSignal("");
   const [newEnabled, setNewEnabled] = createSignal(true);
   const [formError, setFormError] = createSignal("");
+  const [testDomain, setTestDomain] = createSignal("");
+  const [testResult, setTestResult] = createSignal<TestRuleResponse | null>(null);
+  const [testing, setTesting] = createSignal(false);
+
+  async function handleTestRule(e: Event) {
+    e.preventDefault();
+    const d = testDomain().trim();
+    if (!d || !props.onTestRule) return;
+    setTesting(true);
+    try {
+      setTestResult(await props.onTestRule(d));
+    } finally {
+      setTesting(false);
+    }
+  }
 
   const lineCount = () => {
     const text = props.rulesText.trim();
@@ -92,6 +109,51 @@ export function RulesView(props: RulesViewProps) {
 
   return (
     <div class="animate-view-enter space-y-5">
+      {/* Rule Tester Card */}
+      <Show when={props.onTestRule}>
+        <div class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-4 sm:p-5 space-y-3">
+          <h2 class="text-sm font-semibold tracking-tight text-[#171717] dark:text-[#ededed]">
+            {t("rulesTesterTitle")}
+          </h2>
+          <form onSubmit={handleTestRule} class="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={testDomain()}
+              onInput={(e) => setTestDomain(e.currentTarget.value)}
+              placeholder={t("rulesTesterPlaceholder")}
+              class="flex-1 h-9 bg-white dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none focus:border-[#171717] dark:focus:border-[#ededed]"
+            />
+            <button
+              type="submit"
+              disabled={testing()}
+              class="h-9 px-4 rounded-lg text-xs font-medium bg-[#171717] hover:bg-[#383838] dark:bg-[#ededed] dark:hover:bg-[#d4d4d8] text-white dark:text-[#0a0a0a] border-0 cursor-pointer disabled:opacity-50"
+            >
+              {t("rulesTesterBtn")}
+            </button>
+          </form>
+          <Show when={testResult()}>
+            {(res) => (
+              <div class="text-xs font-mono px-3 py-2 rounded-lg bg-[#fafafa] dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] flex flex-wrap items-center gap-2">
+                <span class="font-semibold uppercase text-[#171717] dark:text-[#ededed]">
+                  {res().action}
+                </span>
+                <Show
+                  when={res().matched_rule}
+                  fallback={
+                    <span class="text-[#666666] dark:text-[#a1a1aa]">{t("rulesTesterNoMatch")}</span>
+                  }
+                >
+                  <span class="text-[#666666] dark:text-[#a1a1aa]">
+                    {t("rulesTesterMatched")}: {res().matched_rule}
+                    {res().rewrite ? ` (${res().rewrite})` : ""}
+                  </span>
+                </Show>
+              </div>
+            )}
+          </Show>
+        </div>
+      </Show>
+
       {/* Subscriptions Card */}
       <div class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-4 sm:p-6 space-y-4">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">

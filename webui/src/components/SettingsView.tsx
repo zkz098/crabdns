@@ -30,6 +30,14 @@ interface SettingsViewProps {
   onLogRetentionChange: (val: number) => void;
   optimisticCache: boolean;
   onOptimisticCacheChange: (val: boolean) => void;
+  splitDnsText: string;
+  onSplitDnsChange: (val: string) => void;
+  cnameCloakingBlocking: boolean;
+  onCnameCloakingChange: (val: boolean) => void;
+  dohEnabled: boolean;
+  onDohEnabledChange: (val: boolean) => void;
+  allowPrivateSubscriptions: boolean;
+  onAllowPrivateSubscriptionsChange: (val: boolean) => void;
   configMessage: string;
   configIsError: boolean;
   onSave: () => void;
@@ -194,6 +202,54 @@ export function SettingsView(props: SettingsViewProps) {
               <option value="nx_domain">{t("settingsBlockNxDomain")}</option>
               <option value="no_data">{t("settingsBlockNoData")}</option>
             </select>
+          </div>
+        </div>
+
+        {/* Split DNS & Feature Toggles */}
+        <div class="space-y-3">
+          <div>
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+              <label class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                {t("settingsSplitDnsLabel")}
+              </label>
+              <span class="text-[11px] text-[#8f8f8f] dark:text-[#71717a]">
+                {t("settingsSplitDnsHint")}
+              </span>
+            </div>
+            <textarea
+              value={props.splitDnsText}
+              onInput={(e) => props.onSplitDnsChange(e.currentTarget.value)}
+              rows={3}
+              spellcheck={false}
+              class="w-full font-mono text-xs bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3 text-[#171717] dark:text-[#ededed] outline-none resize-y"
+            />
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.cnameCloakingBlocking}
+                onChange={(e) => props.onCnameCloakingChange(e.currentTarget.checked)}
+              />
+              <span>{t("settingsCnameCloakingLabel")}</span>
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.dohEnabled}
+                onChange={(e) => props.onDohEnabledChange(e.currentTarget.checked)}
+              />
+              <span>{t("settingsDohEnabledLabel")}</span>
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.allowPrivateSubscriptions}
+                onChange={(e) => props.onAllowPrivateSubscriptionsChange(e.currentTarget.checked)}
+              />
+              <span>{t("settingsAllowPrivateSubsLabel")}</span>
+            </label>
           </div>
         </div>
 

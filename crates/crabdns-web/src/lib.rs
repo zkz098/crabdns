@@ -8,9 +8,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use crabdns_core::{
-    BlockMode, Config, DnsPipeline, FilterStats, QueryEvent, UpstreamStatus, UpstreamStrategy,
-};
+use crabdns_core::{CacheStats, Config, DnsPipeline, FilterStats, QueryEvent, UpstreamStatus};
 use crabdns_storage::{StatsSnapshot, StorageEngine};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
@@ -19,6 +17,10 @@ use tower_http::cors::CorsLayer;
 use ts_rs::TS;
 
 pub mod auth;
+pub mod config_api;
+pub mod controls;
+pub mod doh;
+pub mod metrics;
 pub mod subscriptions;
 
 #[derive(Embed)]
@@ -39,6 +41,7 @@ pub struct RouterState {
     pub sub_lock: Arc<Mutex<()>>,
     pub http_client: reqwest::Client,
     pub sessions: Arc<auth::SessionStore>,
+    pub login_limiter: Arc<auth::LoginRateLimiter>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -57,6 +60,7 @@ struct StatsResponse {
     filter: FilterStats,
     #[ts(type = "number")]
     cache_entries: u64,
+    cache_stats: CacheStats,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,73 +84,7 @@ struct RulesPayload {
     stats: Option<FilterStats>,
 }
 
-#[derive(Debug, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct ConfigResponse {
-    pub listen_dns: String,
-    pub listen_web: String,
-    pub data_dir: String,
-    pub upstreams: Vec<String>,
-    pub upstream_strategy: UpstreamStrategy,
-    #[ts(type = "number")]
-    pub cache_size: u64,
-    pub optimistic_cache: bool,
-    #[ts(type = "number")]
-    pub upstream_timeout_ms: u64,
-    #[ts(type = "number")]
-    pub log_retention_hours: u64,
-    pub block_mode: BlockMode,
-    pub allow_cidrs: Vec<String>,
-    pub deny_cidrs: Vec<String>,
-    pub rate_limit_qps: u32,
-    pub web_auth_enabled: bool,
-    pub web_username: String,
-}
-
-impl From<&Config> for ConfigResponse {
-    fn from(cfg: &Config) -> Self {
-        Self {
-            listen_dns: cfg.listen_dns.to_string(),
-            listen_web: cfg.listen_web.to_string(),
-            data_dir: cfg.data_dir.display().to_string(),
-            upstreams: cfg.upstreams.clone(),
-            upstream_strategy: cfg.upstream_strategy,
-            cache_size: cfg.cache_size,
-            optimistic_cache: cfg.optimistic_cache,
-            upstream_timeout_ms: cfg.upstream_timeout_ms,
-            log_retention_hours: cfg.log_retention_hours,
-            block_mode: cfg.block_mode,
-            allow_cidrs: cfg.allow_cidrs.clone(),
-            deny_cidrs: cfg.deny_cidrs.clone(),
-            rate_limit_qps: cfg.rate_limit_qps,
-            web_auth_enabled: cfg.web_auth_enabled,
-            web_username: cfg.web_username.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct ConfigUpdatePayload {
-    pub upstreams: Vec<String>,
-    #[serde(default)]
-    pub upstream_strategy: Option<UpstreamStrategy>,
-    #[ts(type = "number")]
-    pub cache_size: u64,
-    pub optimistic_cache: bool,
-    #[ts(type = "number")]
-    pub upstream_timeout_ms: u64,
-    #[ts(type = "number")]
-    pub log_retention_hours: u64,
-    #[serde(default)]
-    pub block_mode: Option<BlockMode>,
-    #[serde(default)]
-    pub allow_cidrs: Option<Vec<String>>,
-    #[serde(default)]
-    pub deny_cidrs: Option<Vec<String>>,
-    #[serde(default)]
-    pub rate_limit_qps: Option<u32>,
-}
+pub use config_api::{ConfigResponse, ConfigUpdatePayload};
 
 pub fn build_router(state: AppState) -> Router {
     let router_state = RouterState {
@@ -154,6 +92,7 @@ pub fn build_router(state: AppState) -> Router {
         sub_lock: Arc::new(Mutex::new(())),
         http_client: subscriptions::build_http_client(),
         sessions: Arc::new(auth::SessionStore::default()),
+        login_limiter: Arc::new(auth::LoginRateLimiter::default()),
     };
 
     let protected_api = Router::new()
@@ -161,6 +100,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/logs", get(get_logs))
         .route("/api/logs/ws", get(ws_logs))
         .route("/api/rules", get(get_rules).put(update_rules))
+        .route("/api/rules/quick", post(controls::quick_rule))
+        .route("/api/rules/test", post(controls::test_rule))
+        .route("/api/cache/flush", post(controls::flush_cache))
+        .route("/api/blocking/status", get(controls::get_blocking_status))
+        .route("/api/blocking/pause", post(controls::pause_blocking))
+        .route("/api/blocking/resume", post(controls::resume_blocking))
         .route(
             "/api/subscriptions",
             get(subscriptions::list_subscriptions).post(subscriptions::create_subscription),
@@ -177,7 +122,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/subscriptions/{id}/refresh",
             post(subscriptions::refresh_subscription),
         )
-        .route("/api/config", get(get_config).put(update_config))
+        .route(
+            "/api/config",
+            get(config_api::get_config).put(config_api::update_config),
+        )
         .route(
             "/api/upstreams/health",
             get(get_upstream_health).post(probe_upstreams),
@@ -190,6 +138,8 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/api/health", get(health))
+        .route("/metrics", get(metrics::prometheus_metrics))
+        .route("/dns-query", get(doh::doh_get).post(doh::doh_post))
         .route("/api/auth/status", get(auth::auth_status))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
@@ -219,10 +169,12 @@ async fn health(State(state): State<RouterState>) -> Json<HealthResponse> {
 }
 
 async fn get_stats(State(state): State<RouterState>) -> Json<StatsResponse> {
+    let cache_stats = state.app.pipeline.cache().stats();
     Json(StatsResponse {
         stats: state.app.storage.stats_snapshot(),
         filter: state.app.pipeline.filter().stats(),
-        cache_entries: state.app.pipeline.cache().entry_count(),
+        cache_entries: cache_stats.entries,
+        cache_stats,
     })
 }
 
@@ -293,116 +245,6 @@ async fn update_rules(
     }))
 }
 
-async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
-    let cfg = state.app.config.load();
-    Json(ConfigResponse::from(cfg.as_ref()))
-}
-
-fn clean_string_list(items: Vec<String>) -> Vec<String> {
-    items
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-async fn update_config(
-    State(state): State<RouterState>,
-    Json(payload): Json<ConfigUpdatePayload>,
-) -> std::result::Result<Json<ConfigResponse>, (StatusCode, Json<serde_json::Value>)> {
-    if payload.cache_size == 0
-        || payload.upstream_timeout_ms == 0
-        || payload.log_retention_hours == 0
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "cache_size, upstream_timeout_ms, and log_retention_hours must be > 0"
-            })),
-        ));
-    }
-
-    let cleaned_upstreams: Vec<String> = payload
-        .upstreams
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let current = state.app.config.load_full();
-    let strategy = payload
-        .upstream_strategy
-        .unwrap_or(current.upstream_strategy);
-    let block_mode = payload.block_mode.unwrap_or(current.block_mode);
-    let allow_cidrs = clean_string_list(
-        payload
-            .allow_cidrs
-            .unwrap_or_else(|| current.allow_cidrs.clone()),
-    );
-    let deny_cidrs = clean_string_list(
-        payload
-            .deny_cidrs
-            .unwrap_or_else(|| current.deny_cidrs.clone()),
-    );
-    let rate_limit_qps = payload.rate_limit_qps.unwrap_or(current.rate_limit_qps);
-
-    if let Err(err) = state
-        .app
-        .pipeline
-        .reload_acl(&allow_cidrs, &deny_cidrs, rate_limit_qps)
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        ));
-    }
-
-    if let Err(err) = state.app.pipeline.reload_upstream_with_strategy(
-        &cleaned_upstreams,
-        payload.upstream_timeout_ms,
-        strategy,
-    ) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        ));
-    }
-
-    state.app.pipeline.set_block_mode(block_mode);
-
-    let cache_changed = current.cache_size != payload.cache_size
-        || current.optimistic_cache != payload.optimistic_cache;
-    if cache_changed {
-        state
-            .app
-            .pipeline
-            .reload_cache(payload.cache_size, payload.optimistic_cache);
-    }
-
-    let mut next = (*current).clone();
-    next.upstreams = cleaned_upstreams;
-    next.upstream_strategy = strategy;
-    next.cache_size = payload.cache_size;
-    next.optimistic_cache = payload.optimistic_cache;
-    next.upstream_timeout_ms = payload.upstream_timeout_ms;
-    next.log_retention_hours = payload.log_retention_hours;
-    next.block_mode = block_mode;
-    next.allow_cidrs = allow_cidrs;
-    next.deny_cidrs = deny_cidrs;
-    next.rate_limit_qps = rate_limit_qps;
-
-    state.app.storage.save_config(&next).map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        )
-    })?;
-
-    let response = ConfigResponse::from(&next);
-    state.app.config.store(Arc::new(next));
-    Ok(Json(response))
-}
-
 async fn serve_spa(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let target = if path.is_empty() { "index.html" } else { path };
@@ -439,7 +281,11 @@ mod tests {
     async fn test_web_api_endpoints_and_spa() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
-        let config = Arc::new(ArcSwap::from_pointee(Config::default()));
+        let cfg = Config {
+            allow_private_subscriptions: true,
+            ..Config::default()
+        };
+        let config = Arc::new(ArcSwap::from_pointee(cfg));
         let filter = Arc::new(FilterEngine::new(&["||initial.test^".to_string()]));
         let cache = Arc::new(DnsCache::new(64, true));
         let upstream =
@@ -552,7 +398,11 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
-        let config = Arc::new(ArcSwap::from_pointee(Config::default()));
+        let cfg = Config {
+            allow_private_subscriptions: true,
+            ..Config::default()
+        };
+        let config = Arc::new(ArcSwap::from_pointee(cfg));
         let filter = Arc::new(FilterEngine::new(&["||custom.test^".to_string()]));
         storage
             .save_custom_rules("||custom.test^\n")

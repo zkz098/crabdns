@@ -11,6 +11,8 @@ interface LogsViewProps {
   outcomeFilter: string;
   onOutcomeChange: (val: string) => void;
   onRefresh: () => Promise<void> | void;
+  onQuickRule?: (domain: string, action: "allow" | "block") => Promise<void> | void;
+  quickRuleMsg?: string;
 }
 
 const OUTCOME_OPTIONS: SelectOption[] = [
@@ -85,6 +87,12 @@ export function LogsView(props: LogsViewProps) {
         </div>
       </div>
 
+      <Show when={props.quickRuleMsg}>
+        <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+          {props.quickRuleMsg}
+        </div>
+      </Show>
+
       {/* Empty State */}
       <Show
         when={props.logs.length > 0}
@@ -107,6 +115,9 @@ export function LogsView(props: LogsViewProps) {
                   <th class="px-4 py-2.5">{t("logsColType")}</th>
                   <th class="px-4 py-2.5">{t("logsColStatus")}</th>
                   <th class="px-4 py-2.5 text-right">{t("logsColLatency")}</th>
+                  <Show when={props.onQuickRule}>
+                    <th class="px-4 py-2.5 text-right" />
+                  </Show>
                 </tr>
               </thead>
               <tbody class="divide-y divide-[#f0f0f0] dark:divide-[#1a1a1a]">
@@ -134,6 +145,26 @@ export function LogsView(props: LogsViewProps) {
                       <td class="px-4 py-2.5 text-right font-mono text-xs text-[#666666] dark:text-[#a1a1aa] whitespace-nowrap tabular-nums">
                         {(entry.elapsed_us / 1000).toFixed(2)} ms
                       </td>
+                      <Show when={props.onQuickRule}>
+                        <td class="px-4 py-2.5 text-right whitespace-nowrap">
+                          <div class="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => props.onQuickRule?.(entry.domain, "allow")}
+                              class="px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 cursor-pointer"
+                            >
+                              {t("logsQuickAllow")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => props.onQuickRule?.(entry.domain, "block")}
+                              class="px-2 py-0.5 rounded text-[11px] font-medium bg-rose-500/10 hover:bg-rose-500/20 text-rose-700 dark:text-rose-400 border border-rose-500/20 cursor-pointer"
+                            >
+                              {t("logsQuickBlock")}
+                            </button>
+                          </div>
+                        </td>
+                      </Show>
                     </tr>
                   )}
                 </For>

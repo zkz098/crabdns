@@ -1,12 +1,16 @@
-import { For, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 import { t, toggleLocale } from "../i18n";
 import { theme, toggleTheme } from "../theme";
+import type { BlockingStatusResponse } from "../types/BlockingStatusResponse";
 import type { TabKey } from "./types";
 
 interface HeaderProps {
   tab: TabKey;
   onSelectTab: (tab: TabKey) => void;
   wsConnected: boolean;
+  blockingStatus?: BlockingStatusResponse | null;
+  onPauseBlocking?: (durationSecs: number | null) => void;
+  onResumeBlocking?: () => void;
   authEnabled?: boolean;
   onLogout?: () => void;
 }
@@ -19,6 +23,15 @@ const NAV_ITEMS: Array<{ key: TabKey; label: () => string; icon: string }> = [
 ];
 
 export function Header(props: HeaderProps) {
+  const [pauseMenuOpen, setPauseMenuOpen] = createSignal(false);
+
+  const formatRemaining = (secs: number | null | undefined) => {
+    if (secs === null || secs === undefined) return "";
+    const mins = Math.floor(secs / 60);
+    const rem = secs % 60;
+    return mins > 0 ? `${mins}m ${rem}s` : `${rem}s`;
+  };
+
   return (
     <header class="sticky top-0 z-40 border-b border-[#eaeaea] dark:border-[#262626] bg-white/80 dark:bg-black/80 backdrop-blur-xl transition-colors">
       <div class="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
@@ -78,8 +91,74 @@ export function Header(props: HeaderProps) {
           </For>
         </nav>
 
-        {/* Right Controls: Theme + Language */}
+        {/* Right Controls: Pause Blocking + Theme + Language */}
         <div class="flex items-center gap-2 shrink-0">
+          <Show when={props.onPauseBlocking && props.onResumeBlocking}>
+            <Show
+              when={props.blockingStatus?.paused}
+              fallback={
+                <div class="relative">
+                  <button
+                    type="button"
+                    onClick={() => setPauseMenuOpen((v) => !v)}
+                    class="h-8 px-2.5 rounded-lg text-xs font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-all duration-200 active:scale-[0.96]"
+                  >
+                    <span class="i-ri-pause-circle-line text-sm text-amber-500" />
+                    <span class="hidden sm:inline">{t("blockingPauseBtn")}</span>
+                  </button>
+                  <Show when={pauseMenuOpen()}>
+                    <div class="absolute right-0 mt-1.5 w-40 rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#111111] shadow-lg p-1 z-50">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPauseMenuOpen(false);
+                          props.onPauseBlocking?.(300);
+                        }}
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] bg-transparent border-0 cursor-pointer"
+                      >
+                        {t("blockingPause5m")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPauseMenuOpen(false);
+                          props.onPauseBlocking?.(1800);
+                        }}
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] bg-transparent border-0 cursor-pointer"
+                      >
+                        {t("blockingPause30m")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPauseMenuOpen(false);
+                          props.onPauseBlocking?.(null);
+                        }}
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 bg-transparent border-0 cursor-pointer"
+                      >
+                        {t("blockingPauseForever")}
+                      </button>
+                    </div>
+                  </Show>
+                </div>
+              }
+            >
+              <button
+                type="button"
+                onClick={() => props.onResumeBlocking?.()}
+                class="h-8 px-2.5 rounded-lg text-xs font-medium bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 border border-amber-500/30 flex items-center gap-1.5 cursor-pointer transition-all duration-200 active:scale-[0.96]"
+              >
+                <span class="i-ri-play-circle-line text-sm" />
+                <span>
+                  {t("blockingResume")}
+                  {props.blockingStatus?.remaining_secs !== null &&
+                  props.blockingStatus?.remaining_secs !== undefined
+                    ? ` (${formatRemaining(props.blockingStatus.remaining_secs)})`
+                    : ""}
+                </span>
+              </button>
+            </Show>
+          </Show>
           <button
             type="button"
             onClick={toggleTheme}

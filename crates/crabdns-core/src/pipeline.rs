@@ -1,23 +1,24 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
-use hickory_proto::op::{Message, MessageType, ResponseCode};
-use hickory_proto::rr::rdata::{A, AAAA, CNAME, TXT};
-use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::op::{Message, ResponseCode};
+use hickory_proto::rr::{RData, RecordType};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use ts_rs::TS;
 
 use crate::acl::{AccessController, AclDecision};
 use crate::cache::{CacheKey, DnsCache};
-use crate::config::{BlockMode, UpstreamStrategy};
+use crate::config::{BlockMode, SplitDnsRule, UpstreamStrategy};
 use crate::error::{CoreError, Result};
-use crate::filter::{FilterAction, FilterEngine, RewriteAction};
+use crate::filter::{FilterAction, FilterEngine};
+use crate::split_dns::SplitUpstreamRouter;
 use crate::upstream::UpstreamPool;
+use crate::wire::{build_blocked_response, build_error_response, build_rewrite_response};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -49,8 +50,11 @@ pub struct DnsPipeline {
     filter: Arc<FilterEngine>,
     cache: ArcSwap<DnsCache>,
     upstream: ArcSwap<UpstreamPool>,
+    split_router: ArcSwap<SplitUpstreamRouter>,
     acl: ArcSwap<AccessController>,
     block_mode: AtomicU8,
+    cname_cloaking: AtomicBool,
+    pause_until_ms: AtomicU64,
     log_tx: Option<mpsc::Sender<QueryEvent>>,
 }
 
@@ -82,8 +86,11 @@ impl DnsPipeline {
             filter,
             cache: ArcSwap::from(cache),
             upstream: ArcSwap::from(upstream),
+            split_router: ArcSwap::from_pointee(SplitUpstreamRouter::empty()),
             acl: ArcSwap::from_pointee(default_acl),
             block_mode: AtomicU8::new(block_mode_to_u8(BlockMode::ZeroIp)),
+            cname_cloaking: AtomicBool::new(true),
+            pause_until_ms: AtomicU64::new(0),
             log_tx,
         }
     }
@@ -141,6 +148,64 @@ impl DnsPipeline {
             .store(Arc::new(DnsCache::new(max_capacity, optimistic)));
     }
 
+    pub fn reload_split_dns(
+        &self,
+        rules: &[SplitDnsRule],
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+    ) -> Result<()> {
+        let router = SplitUpstreamRouter::new(rules, timeout_ms, strategy)?;
+        self.split_router.store(Arc::new(router));
+        Ok(())
+    }
+
+    pub fn set_cname_cloaking(&self, enabled: bool) {
+        self.cname_cloaking.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn cname_cloaking(&self) -> bool {
+        self.cname_cloaking.load(Ordering::Relaxed)
+    }
+
+    pub fn pause_blocking(&self, duration_secs: Option<u64>) {
+        let until = match duration_secs {
+            Some(secs) => now_epoch_ms().saturating_add(secs.saturating_mul(1000)),
+            None => u64::MAX,
+        };
+        self.pause_until_ms.store(until, Ordering::Relaxed);
+    }
+
+    pub fn resume_blocking(&self) {
+        self.pause_until_ms.store(0, Ordering::Relaxed);
+    }
+
+    pub fn blocking_status(&self) -> (bool, Option<u64>) {
+        let until = self.pause_until_ms.load(Ordering::Relaxed);
+        if until == 0 {
+            return (false, None);
+        }
+        if until == u64::MAX {
+            return (true, None);
+        }
+        let now = now_epoch_ms();
+        if now >= until {
+            self.pause_until_ms.store(0, Ordering::Relaxed);
+            return (false, None);
+        }
+        (true, Some((until - now).div_ceil(1000)))
+    }
+
+    fn is_blocking_paused(&self) -> bool {
+        self.blocking_status().0
+    }
+
+    fn resolve_upstream(&self, domain: &str) -> Arc<UpstreamPool> {
+        self.split_router
+            .load()
+            .resolve(domain)
+            .unwrap_or_else(|| self.upstream.load_full())
+    }
+
     pub async fn handle_packet(
         &self,
         raw_query: &[u8],
@@ -166,9 +231,12 @@ impl DnsPipeline {
         }
 
         let mode = self.block_mode();
+        let paused = self.is_blocking_paused();
         let decision = self.filter.evaluate(&clean_domain);
+        let explicitly_allowed =
+            decision.action == FilterAction::Allow && decision.matched_rule.is_some();
         match decision.action {
-            FilterAction::Block => {
+            FilterAction::Block if !paused => {
                 let (resp, rcode) = build_blocked_response(&request, qtype, mode)?;
                 self.emit_log(
                     client_addr,
@@ -196,7 +264,7 @@ impl DnsPipeline {
                 );
                 return Ok(resp);
             }
-            FilterAction::Allow => {}
+            FilterAction::Block | FilterAction::Allow => {}
         }
 
         let cache_key = CacheKey {
@@ -231,6 +299,8 @@ impl DnsPipeline {
             qtype,
             cache_key,
             decision.matched_rule,
+            paused,
+            explicitly_allowed,
             start,
         )
         .await
@@ -272,23 +342,30 @@ impl DnsPipeline {
         qtype: RecordType,
         cache_key: CacheKey,
         matched_rule: Option<String>,
+        paused: bool,
+        explicitly_allowed: bool,
         start: Instant,
     ) -> Result<Vec<u8>> {
-        let upstream = self.upstream.load_full();
+        let upstream = self.resolve_upstream(&clean_domain);
         match upstream.exchange(raw_query).await {
             Ok((resp_bytes, upstream_label)) => {
-                if let Some(blocked) = self.check_cname_cloaking(request, &resp_bytes, qtype)? {
+                if !paused
+                    && !explicitly_allowed
+                    && self.cname_cloaking()
+                    && let Some((blocked_bytes, rule, rcode)) =
+                        self.check_cname_cloaking(request, &resp_bytes, qtype)?
+                {
                     self.emit_log(
                         client_addr,
                         clean_domain,
                         qtype,
                         QueryOutcome::Blocked,
-                        Some(blocked.1),
+                        Some(rule),
                         Some(upstream_label),
                         start,
-                        "NOERROR",
+                        rcode,
                     );
-                    return Ok(blocked.0);
+                    return Ok(blocked_bytes);
                 }
 
                 let cache = self.cache.load();
@@ -327,7 +404,7 @@ impl DnsPipeline {
         request: &Message,
         resp_bytes: &[u8],
         qtype: RecordType,
-    ) -> Result<Option<(Vec<u8>, String)>> {
+    ) -> Result<Option<(Vec<u8>, String, &'static str)>> {
         let Ok(resp_msg) = Message::from_vec(resp_bytes) else {
             return Ok(None);
         };
@@ -337,12 +414,12 @@ impl DnsPipeline {
                 let target_clean = target.trim_end_matches('.');
                 let decision = self.filter.evaluate(target_clean);
                 if decision.action == FilterAction::Block {
-                    let (blocked_bytes, _) =
+                    let (blocked_bytes, rcode) =
                         build_blocked_response(request, qtype, self.block_mode())?;
                     let rule = decision
                         .matched_rule
                         .unwrap_or_else(|| format!("cname:{target_clean}"));
-                    return Ok(Some((blocked_bytes, rule)));
+                    return Ok(Some((blocked_bytes, rule, rcode)));
                 }
             }
         }
@@ -350,7 +427,7 @@ impl DnsPipeline {
     }
 
     fn spawn_background_refresh(&self, query_wire: Vec<u8>, key: CacheKey) {
-        let upstream = self.upstream.load_full();
+        let upstream = self.resolve_upstream(&key.qname);
         let cache = self.cache.load_full();
         tokio::spawn(async move {
             if let Ok((resp_bytes, _)) = upstream.exchange(&query_wire).await {
@@ -390,6 +467,16 @@ impl DnsPipeline {
     }
 }
 
+fn now_epoch_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 fn cache_upstream_response(cache: &DnsCache, key: CacheKey, resp_bytes: &[u8]) -> String {
     let Ok(msg) = Message::from_vec(resp_bytes) else {
         return "UNKNOWN".to_string();
@@ -402,113 +489,14 @@ fn cache_upstream_response(cache: &DnsCache, key: CacheKey, resp_bytes: &[u8]) -
     rcode.to_string()
 }
 
-fn base_response(request: &Message, rcode: ResponseCode) -> Message {
-    let mut resp = Message::new(request.id, MessageType::Response, request.op_code);
-    resp.metadata.recursion_desired = request.recursion_desired;
-    resp.metadata.recursion_available = true;
-    resp.metadata.response_code = rcode;
-    resp.queries.clone_from(&request.queries);
-    resp
-}
-
-fn build_error_response(request: &Message, rcode: ResponseCode) -> Result<Vec<u8>> {
-    base_response(request, rcode)
-        .to_vec()
-        .map_err(|e| CoreError::Protocol(e.to_string()))
-}
-
-fn build_blocked_response(
-    request: &Message,
-    qtype: RecordType,
-    mode: BlockMode,
-) -> Result<(Vec<u8>, &'static str)> {
-    let mut resp = match mode {
-        BlockMode::NxDomain => {
-            let bytes = build_error_response(request, ResponseCode::NXDomain)?;
-            return Ok((bytes, "NXDOMAIN"));
-        }
-        BlockMode::NoData => {
-            let bytes = build_error_response(request, ResponseCode::NoError)?;
-            return Ok((bytes, "NOERROR"));
-        }
-        BlockMode::ZeroIp => base_response(request, ResponseCode::NoError),
-    };
-
-    let mut rcode = "NOERROR";
-    if let Some(q) = request.queries.first() {
-        let name = q.name().clone();
-        match qtype {
-            RecordType::A => {
-                resp.add_answer(Record::from_rdata(
-                    name,
-                    60,
-                    RData::A(A(Ipv4Addr::UNSPECIFIED)),
-                ));
-            }
-            RecordType::AAAA => {
-                resp.add_answer(Record::from_rdata(
-                    name,
-                    60,
-                    RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED)),
-                ));
-            }
-            _ => {
-                resp.metadata.response_code = ResponseCode::NXDomain;
-                rcode = "NXDOMAIN";
-            }
-        }
-    }
-    let bytes = resp
-        .to_vec()
-        .map_err(|e| CoreError::Protocol(e.to_string()))?;
-    Ok((bytes, rcode))
-}
-
-fn build_rewrite_response(
-    request: &Message,
-    qtype: RecordType,
-    rewrite: &RewriteAction,
-) -> Result<Vec<u8>> {
-    let mut resp = base_response(request, ResponseCode::NoError);
-    if let Some(q) = request.queries.first() {
-        let name = q.name().clone();
-        match (qtype, rewrite) {
-            (RecordType::A, RewriteAction::Ip(IpAddr::V4(v4))) => {
-                resp.add_answer(Record::from_rdata(name, 60, RData::A(A(*v4))));
-            }
-            (RecordType::AAAA, RewriteAction::Ip(IpAddr::V6(v6))) => {
-                resp.add_answer(Record::from_rdata(name, 60, RData::AAAA(AAAA(*v6))));
-            }
-            (_, RewriteAction::Cname(target)) => {
-                let fqdn = format!("{}.", target.trim_end_matches('.'));
-                if let Ok(cname_name) = Name::from_ascii(&fqdn) {
-                    resp.add_answer(Record::from_rdata(
-                        name,
-                        60,
-                        RData::CNAME(CNAME(cname_name)),
-                    ));
-                }
-            }
-            (RecordType::TXT, RewriteAction::Txt(text)) => {
-                resp.add_answer(Record::from_rdata(
-                    name,
-                    60,
-                    RData::TXT(TXT::new(vec![text.clone()])),
-                ));
-            }
-            _ => {}
-        }
-    }
-    resp.to_vec()
-        .map_err(|e| CoreError::Protocol(e.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
-    use hickory_proto::op::{OpCode, Query};
-    use hickory_proto::rr::Name;
-    use hickory_proto::rr::rdata::CNAME;
+    use hickory_proto::op::{MessageType, OpCode, Query};
+    use hickory_proto::rr::rdata::{A, CNAME};
+    use hickory_proto::rr::{Name, Record};
     use tokio::net::UdpSocket;
 
     fn build_query(id: u16, domain: &str, qtype: RecordType) -> Vec<u8> {

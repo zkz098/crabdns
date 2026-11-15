@@ -1,22 +1,27 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use crabdns_core::{Config, DnsCache, DnsPipeline, FilterEngine, QueryEvent, UpstreamPool};
 use crabdns_storage::{StorageEngine, spawn_log_sink};
 use crabdns_web::{AppState, build_router};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{broadcast, mpsc};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
+use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio::task::JoinHandle;
+
+mod dot;
 
 pub struct RunningServer {
     pub dns_addr: SocketAddr,
     pub web_addr: SocketAddr,
+    pub dot_addr: Option<SocketAddr>,
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
     udp_task: JoinHandle<()>,
     tcp_task: JoinHandle<()>,
+    dot_task: Option<JoinHandle<()>>,
     web_task: JoinHandle<()>,
     sub_refresh_task: JoinHandle<()>,
     sink_handle: JoinHandle<()>,
@@ -26,11 +31,17 @@ impl RunningServer {
     pub async fn shutdown(self) {
         self.udp_task.abort();
         self.tcp_task.abort();
+        if let Some(dot_task) = &self.dot_task {
+            dot_task.abort();
+        }
         self.web_task.abort();
         self.sub_refresh_task.abort();
 
         let _ = self.udp_task.await;
         let _ = self.tcp_task.await;
+        if let Some(dot_task) = self.dot_task {
+            let _ = dot_task.await;
+        }
         let _ = self.web_task.await;
         let _ = self.sub_refresh_task.await;
 
@@ -54,8 +65,13 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.web_auth_enabled = saved_cfg.web_auth_enabled;
     config.web_username = saved_cfg.web_username;
     config.web_password_hash = saved_cfg.web_password_hash;
+    config.split_dns = saved_cfg.split_dns;
+    config.cname_cloaking_blocking = saved_cfg.cname_cloaking_blocking;
+    config.doh_enabled = saved_cfg.doh_enabled;
+    config.allow_private_subscriptions = saved_cfg.allow_private_subscriptions;
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let storage = Arc::new(StorageEngine::open(&config.data_dir)?);
 
@@ -90,21 +106,55 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
 
     let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, Some(log_tx)));
     pipeline.set_block_mode(current_cfg.block_mode);
+    pipeline.set_cname_cloaking(current_cfg.cname_cloaking_blocking);
     pipeline.reload_acl(
         &current_cfg.allow_cidrs,
         &current_cfg.deny_cidrs,
         current_cfg.rate_limit_qps,
+    )?;
+    pipeline.reload_split_dns(
+        &current_cfg.split_dns,
+        current_cfg.upstream_timeout_ms,
+        current_cfg.upstream_strategy,
     )?;
 
     let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;
     let dns_addr = tcp_listener.local_addr()?;
     let udp_socket = Arc::new(UdpSocket::bind(dns_addr).await?);
 
+    let tcp_max_connections = current_cfg.tcp_max_connections.max(1);
+    let tcp_idle_timeout = Duration::from_secs(current_cfg.tcp_idle_timeout_secs.max(1));
+
+    let (dot_addr, dot_task) = match current_cfg.listen_dot {
+        Some(addr) => {
+            let cert_path = current_cfg.tls_cert_path.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("listen_dot requires tls_cert_path to be configured")
+            })?;
+            let key_path = current_cfg.tls_key_path.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("listen_dot requires tls_key_path to be configured")
+            })?;
+            let acceptor = dot::build_tls_acceptor(cert_path, key_path)?;
+            let dot_listener = dot::bind_dot_listener(addr).await?;
+            let bound_dot = dot_listener.local_addr()?;
+            let dot_pipe = Arc::clone(&pipeline);
+            let task = tokio::spawn(dot::run_dot_server(
+                dot_listener,
+                acceptor,
+                dot_pipe,
+                tcp_max_connections,
+                tcp_idle_timeout,
+            ));
+            (Some(bound_dot), Some(task))
+        }
+        None => (None, None),
+    };
+
     let web_listener = TcpListener::bind(current_cfg.listen_web).await?;
     let web_addr = web_listener.local_addr()?;
 
     tracing::info!(
         dns = %dns_addr,
+        dot = ?dot_addr,
         web = %web_addr,
         "crabdns started"
     );
@@ -113,7 +163,12 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let udp_task = tokio::spawn(run_udp_server(udp_socket, udp_pipeline));
 
     let tcp_pipeline = Arc::clone(&pipeline);
-    let tcp_task = tokio::spawn(run_tcp_server(tcp_listener, tcp_pipeline));
+    let tcp_task = tokio::spawn(run_tcp_server(
+        tcp_listener,
+        tcp_pipeline,
+        tcp_max_connections,
+        tcp_idle_timeout,
+    ));
 
     let app = build_router(AppState {
         config: Arc::clone(&config),
@@ -122,25 +177,34 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         live_tx,
     });
     let web_task = tokio::spawn(async move {
-        if let Err(err) = axum::serve(web_listener, app).await {
+        if let Err(err) = axum::serve(
+            web_listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             tracing::error!(error = %err, "web server error");
         }
     });
 
     let sub_storage = Arc::clone(&storage);
     let sub_pipeline = Arc::clone(&pipeline);
+    let sub_config = Arc::clone(&config);
     let sub_refresh_task = tokio::spawn(async move {
         let client = crabdns_web::subscriptions::build_http_client();
         let mut interval = tokio::time::interval(std::time::Duration::from_hours(24));
         interval.tick().await;
         loop {
             interval.tick().await;
-            if let Err(err) = crabdns_web::subscriptions::refresh_enabled_subscriptions_job(
-                &client,
-                &sub_storage,
-                &sub_pipeline,
-            )
-            .await
+            let allow_private = sub_config.load().allow_private_subscriptions;
+            if let Err(err) =
+                crabdns_web::subscriptions::refresh_enabled_subscriptions_job_with_policy(
+                    &client,
+                    &sub_storage,
+                    &sub_pipeline,
+                    allow_private,
+                )
+                .await
             {
                 tracing::warn!(error = %err, "scheduled subscription refresh failed");
             }
@@ -150,10 +214,12 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     Ok(RunningServer {
         dns_addr,
         web_addr,
+        dot_addr,
         pipeline,
         storage,
         udp_task,
         tcp_task,
+        dot_task,
         web_task,
         sub_refresh_task,
         sink_handle,
@@ -182,38 +248,58 @@ async fn run_udp_server(socket: Arc<UdpSocket>, pipeline: Arc<DnsPipeline>) {
     }
 }
 
-async fn run_tcp_server(listener: TcpListener, pipeline: Arc<DnsPipeline>) {
+async fn run_tcp_server(
+    listener: TcpListener,
+    pipeline: Arc<DnsPipeline>,
+    max_connections: usize,
+    idle_timeout: Duration,
+) {
+    let limiter = Arc::new(Semaphore::new(max_connections.max(1)));
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
+        let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
+            tracing::warn!(peer = %peer, "TCP DNS connection rejected: max connections reached");
+            drop(stream);
+            continue;
+        };
         let pipe = Arc::clone(&pipeline);
         tokio::spawn(async move {
-            if let Err(err) = handle_tcp_conn(stream, peer, pipe).await {
+            let _permit = permit;
+            if let Err(err) = handle_dns_stream(stream, peer, pipe, idle_timeout).await {
                 tracing::debug!(peer = %peer, error = %err, "TCP DNS connection closed");
             }
         });
     }
 }
 
-async fn handle_tcp_conn(
-    mut stream: TcpStream,
+pub(crate) async fn handle_dns_stream<S>(
+    mut stream: S,
     peer: SocketAddr,
     pipeline: Arc<DnsPipeline>,
-) -> anyhow::Result<()> {
+    idle_timeout: Duration,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut len_buf = [0_u8; 2];
-    while stream.read_exact(&mut len_buf).await.is_ok() {
+    while let Ok(Ok(_)) = tokio::time::timeout(idle_timeout, stream.read_exact(&mut len_buf)).await
+    {
         let len = usize::from(u16::from_be_bytes(len_buf));
         if len == 0 || len > 65_535 {
             break;
         }
         let mut query = vec![0_u8; len];
-        stream.read_exact(&mut query).await?;
+        tokio::time::timeout(idle_timeout, stream.read_exact(&mut query)).await??;
         let resp = pipeline.handle_packet(&query, peer).await?;
         let resp_len = u16::try_from(resp.len())?;
-        stream.write_all(&resp_len.to_be_bytes()).await?;
-        stream.write_all(&resp).await?;
-        stream.flush().await?;
+        tokio::time::timeout(idle_timeout, async {
+            stream.write_all(&resp_len.to_be_bytes()).await?;
+            stream.write_all(&resp).await?;
+            stream.flush().await
+        })
+        .await??;
     }
     Ok(())
 }

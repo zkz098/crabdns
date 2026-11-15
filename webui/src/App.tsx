@@ -10,13 +10,17 @@ import type { TabKey } from "./components/types";
 import { t } from "./i18n";
 import type { AuthStatusResponse } from "./types/AuthStatusResponse";
 import type { BlockMode } from "./types/BlockMode";
+import type { BlockingStatusResponse } from "./types/BlockingStatusResponse";
 import type { ConfigResponse } from "./types/ConfigResponse";
 import type { ConfigUpdatePayload } from "./types/ConfigUpdatePayload";
 import type { CreateSubscriptionPayload } from "./types/CreateSubscriptionPayload";
 import type { FilterSubscription } from "./types/FilterSubscription";
 import type { QueryEvent } from "./types/QueryEvent";
+import type { QuickRuleResponse } from "./types/QuickRuleResponse";
 import type { RulesPayload } from "./types/RulesPayload";
+import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { StatsResponse } from "./types/StatsResponse";
+import type { TestRuleResponse } from "./types/TestRuleResponse";
 import type { UpstreamStatus } from "./types/UpstreamStatus";
 import type { UpstreamStrategy } from "./types/UpstreamStrategy";
 
@@ -53,6 +57,13 @@ export default function App() {
   const [logRetentionHours, setLogRetentionHours] = createSignal(24);
   const [configMessage, setConfigMessage] = createSignal("");
   const [configIsError, setConfigIsError] = createSignal(false);
+  const [splitDnsText, setSplitDnsText] = createSignal("");
+  const [cnameCloakingBlocking, setCnameCloakingBlocking] = createSignal(true);
+  const [dohEnabled, setDohEnabled] = createSignal(true);
+  const [allowPrivateSubscriptions, setAllowPrivateSubscriptions] = createSignal(false);
+  const [blockingStatus, setBlockingStatus] = createSignal<BlockingStatusResponse | null>(null);
+  const [cacheFlushedMsg, setCacheFlushedMsg] = createSignal("");
+  const [quickRuleMsg, setQuickRuleMsg] = createSignal("");
 
   const [authChecked, setAuthChecked] = createSignal(false);
   const [authEnabled, setAuthEnabled] = createSignal(false);
@@ -235,6 +246,88 @@ export default function App() {
     setLogRetentionHours(data.log_retention_hours);
     setAuthEnabled(data.web_auth_enabled);
     setAuthUsername(data.web_username || "admin");
+    setSplitDnsText(
+      (data.split_dns ?? []).map((r) => `${r.domain}=${r.upstreams.join(",")}`).join("\n"),
+    );
+    setCnameCloakingBlocking(data.cname_cloaking_blocking);
+    setDohEnabled(data.doh_enabled);
+    setAllowPrivateSubscriptions(data.allow_private_subscriptions);
+  }
+
+  async function fetchBlockingStatus() {
+    try {
+      const res = await fetch("/api/blocking/status");
+      if (res.ok) setBlockingStatus(await res.json());
+    } catch {
+      // ignore
+    }
+  }
+
+  async function pauseBlocking(durationSecs: number | null) {
+    try {
+      const res = await fetch("/api/blocking/pause", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ duration_secs: durationSecs }),
+      });
+      if (res.ok) setBlockingStatus(await res.json());
+    } catch {
+      // ignore
+    }
+  }
+
+  async function resumeBlocking() {
+    try {
+      const res = await fetch("/api/blocking/resume", { method: "POST" });
+      if (res.ok) setBlockingStatus(await res.json());
+    } catch {
+      // ignore
+    }
+  }
+
+  async function flushCache() {
+    try {
+      const res = await fetch("/api/cache/flush", { method: "POST" });
+      if (res.ok) {
+        setCacheFlushedMsg(t("cacheFlushed"));
+        setTimeout(() => setCacheFlushedMsg(""), 2500);
+        await fetchStats();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function quickRule(domain: string, action: "allow" | "block") {
+    try {
+      const res = await fetch("/api/rules/quick", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain, action }),
+      });
+      if (res.ok) {
+        const data: QuickRuleResponse = await res.json();
+        setQuickRuleMsg(`${t("logsQuickRuleAdded")}: ${data.rule}`);
+        setTimeout(() => setQuickRuleMsg(""), 3000);
+        await Promise.all([fetchRules(), fetchStats()]);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function testRule(domain: string): Promise<TestRuleResponse | null> {
+    try {
+      const res = await fetch("/api/rules/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain }),
+      });
+      if (res.ok) return await res.json();
+    } catch {
+      // ignore
+    }
+    return null;
   }
 
   async function fetchUpstreamHealth() {
@@ -379,6 +472,20 @@ export default function App() {
         .split("\n")
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
+    const parseSplitDns = (text: string): SplitDnsRule[] =>
+      parseLines(text)
+        .map((line) => {
+          const eq = line.indexOf("=");
+          if (eq <= 0) return null;
+          const domain = line.slice(0, eq).trim();
+          const upstreams = line
+            .slice(eq + 1)
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+          return domain && upstreams.length > 0 ? { domain, upstreams } : null;
+        })
+        .filter((item): item is SplitDnsRule => item !== null);
     const payload: ConfigUpdatePayload = {
       upstreams: parseLines(upstreamsText()),
       upstream_strategy: upstreamStrategy(),
@@ -390,6 +497,10 @@ export default function App() {
       allow_cidrs: parseLines(allowCidrsText()),
       deny_cidrs: parseLines(denyCidrsText()),
       rate_limit_qps: Number(rateLimitQps()),
+      split_dns: parseSplitDns(splitDnsText()),
+      cname_cloaking_blocking: cnameCloakingBlocking(),
+      doh_enabled: dohEnabled(),
+      allow_private_subscriptions: allowPrivateSubscriptions(),
     };
 
     try {
@@ -438,12 +549,14 @@ export default function App() {
         fetchSubscriptions();
         fetchConfig();
         fetchUpstreamHealth();
+        fetchBlockingStatus();
       }
     });
 
     const timer = setInterval(() => {
       if (authenticated() || !authEnabled()) {
         fetchStats();
+        fetchBlockingStatus();
       }
     }, 3000);
     let ws: WebSocket | null = null;
@@ -494,13 +607,20 @@ export default function App() {
           tab={tab()}
           onSelectTab={handleSelectTab}
           wsConnected={wsConnected()}
+          blockingStatus={blockingStatus()}
+          onPauseBlocking={pauseBlocking}
+          onResumeBlocking={resumeBlocking}
           authEnabled={authEnabled()}
           onLogout={handleLogout}
         />
 
       <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 sm:pt-7 pb-24 md:pb-10">
         <Show when={tab() === "dashboard"}>
-          <DashboardView stats={stats()} />
+          <DashboardView
+            stats={stats()}
+            onFlushCache={flushCache}
+            cacheFlushedMsg={cacheFlushedMsg()}
+          />
         </Show>
 
         <Show when={tab() === "logs"}>
@@ -511,6 +631,8 @@ export default function App() {
             outcomeFilter={outcomeFilter()}
             onOutcomeChange={setOutcomeFilter}
             onRefresh={fetchLogs}
+            onQuickRule={quickRule}
+            quickRuleMsg={quickRuleMsg()}
           />
         </Show>
 
@@ -536,6 +658,7 @@ export default function App() {
             onRefreshSubscription={refreshSubscription}
             onRefreshAllSubscriptions={refreshAllSubscriptions}
             onDeleteSubscription={deleteSubscription}
+            onTestRule={testRule}
           />
         </Show>
 
@@ -565,6 +688,14 @@ export default function App() {
             onLogRetentionChange={setLogRetentionHours}
             optimisticCache={optimisticCache()}
             onOptimisticCacheChange={setOptimisticCache}
+            splitDnsText={splitDnsText()}
+            onSplitDnsChange={setSplitDnsText}
+            cnameCloakingBlocking={cnameCloakingBlocking()}
+            onCnameCloakingChange={setCnameCloakingBlocking}
+            dohEnabled={dohEnabled()}
+            onDohEnabledChange={setDohEnabled}
+            allowPrivateSubscriptions={allowPrivateSubscriptions()}
+            onAllowPrivateSubscriptionsChange={setAllowPrivateSubscriptions}
             configMessage={configMessage()}
             configIsError={configIsError()}
             onSave={saveConfig}

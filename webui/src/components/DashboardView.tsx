@@ -5,12 +5,15 @@ import type { TopItem } from "../types/TopItem";
 
 interface DashboardViewProps {
   stats: StatsResponse | null;
+  onFlushCache?: () => Promise<void> | void;
+  cacheFlushedMsg?: string;
 }
 
 export function DashboardView(props: DashboardViewProps) {
   const s = () => props.stats?.stats;
   const filter = () => props.stats?.filter;
   const cacheEntries = () => props.stats?.cache_entries ?? 0;
+  const cacheStats = () => props.stats?.cache_stats;
 
   const total = () => s()?.total_queries ?? 0;
   const blocked = () => s()?.blocked_queries ?? 0;
@@ -26,7 +29,13 @@ export function DashboardView(props: DashboardViewProps) {
   };
 
   const blockRate = () => `${pct(blocked()).toFixed(1)}%`;
-  const hitRate = () => `${pct(cached()).toFixed(1)}%`;
+  const hitRate = () => {
+    const cs = cacheStats();
+    if (cs && cs.hits + cs.misses > 0) {
+      return `${(cs.hit_rate * 100).toFixed(1)}%`;
+    }
+    return `${pct(cached()).toFixed(1)}%`;
+  };
 
   return (
     <div class="space-y-5 sm:space-y-6 animate-view-enter">
@@ -75,9 +84,26 @@ export function DashboardView(props: DashboardViewProps) {
           <h2 class="text-sm font-medium text-[#171717] dark:text-[#ededed]">
             {t("queryDistribution")}
           </h2>
-          <span class="text-xs text-[#666666] dark:text-[#a1a1aa] tabular-nums">
-            {total().toLocaleString()} {t("logsCountSuffix")}
-          </span>
+          <div class="flex items-center gap-2.5">
+            <Show when={props.cacheFlushedMsg}>
+              <span class="text-xs text-emerald-600 dark:text-emerald-400">
+                {props.cacheFlushedMsg}
+              </span>
+            </Show>
+            <Show when={props.onFlushCache}>
+              <button
+                type="button"
+                onClick={() => props.onFlushCache?.()}
+                class="h-7 px-2.5 rounded-lg text-xs font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-all duration-150"
+              >
+                <span class="i-ri-delete-bin-6-line text-xs" />
+                <span>{t("cacheFlushBtn")}</span>
+              </button>
+            </Show>
+            <span class="text-xs text-[#666666] dark:text-[#a1a1aa] tabular-nums">
+              {total().toLocaleString()} {t("logsCountSuffix")}
+            </span>
+          </div>
         </div>
 
         <div class="h-2.5 w-full rounded-full overflow-hidden bg-[#f4f4f5] dark:bg-[#171717] flex">

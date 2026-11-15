@@ -1,9 +1,10 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Json;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Extension, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -18,6 +19,56 @@ use crate::RouterState;
 const PBKDF2_ITERATIONS: u32 = 100_000;
 const SESSION_COOKIE_NAME: &str = "crabdns_session";
 const SESSION_TTL: Duration = Duration::from_hours(24);
+const MAX_LOGIN_FAILURES: u32 = 5;
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+const LOGIN_LOCKOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone)]
+struct LoginAttempt {
+    failures: u32,
+    window_start: Instant,
+    locked_until: Option<Instant>,
+}
+
+#[derive(Default)]
+pub struct LoginRateLimiter {
+    attempts: DashMap<IpAddr, LoginAttempt>,
+}
+
+impl LoginRateLimiter {
+    pub fn check_locked(&self, ip: IpAddr) -> Option<u64> {
+        let entry = self.attempts.get(&ip)?;
+        if let Some(until) = entry.locked_until {
+            let now = Instant::now();
+            if now < until {
+                return Some((until - now).as_secs().max(1));
+            }
+        }
+        None
+    }
+
+    pub fn record_failure(&self, ip: IpAddr) {
+        let now = Instant::now();
+        let mut entry = self.attempts.entry(ip).or_insert(LoginAttempt {
+            failures: 0,
+            window_start: now,
+            locked_until: None,
+        });
+        if now.duration_since(entry.window_start) > LOGIN_WINDOW {
+            entry.failures = 0;
+            entry.window_start = now;
+            entry.locked_until = None;
+        }
+        entry.failures = entry.failures.saturating_add(1);
+        if entry.failures >= MAX_LOGIN_FAILURES {
+            entry.locked_until = Some(now + LOGIN_LOCKOUT);
+        }
+    }
+
+    pub fn clear(&self, ip: IpAddr) {
+        self.attempts.remove(&ip);
+    }
+}
 
 #[derive(Debug, Clone)]
 struct SessionEntry {
@@ -185,8 +236,25 @@ pub async fn auth_status(
     })
 }
 
+fn login_client_ip(
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+) -> IpAddr {
+    if let Some(ip) = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| raw.split(',').next())
+        .and_then(|first| first.trim().parse::<IpAddr>().ok())
+    {
+        return ip;
+    }
+    connect_info.map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |Extension(ci)| ci.0.ip())
+}
+
 pub async fn login(
     State(state): State<RouterState>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Json(payload): Json<LoginPayload>,
 ) -> Response {
     let cfg = state.app.config.load();
@@ -198,15 +266,28 @@ pub async fn login(
             .into_response();
     }
 
+    let client_ip = login_client_ip(connect_info, &headers);
+    if let Some(retry_after) = state.login_limiter.check_locked(client_ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": format!("Too many failed login attempts; retry in {retry_after}s")
+            })),
+        )
+            .into_response();
+    }
+
     let user_ok = payload.username.trim() == cfg.web_username;
     let pass_ok = verify_password(&payload.password, &cfg.web_password_hash);
     if !user_ok || !pass_ok {
+        state.login_limiter.record_failure(client_ip);
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "Invalid username or password" })),
         )
             .into_response();
     }
+    state.login_limiter.clear(client_ip);
 
     let Some(token) = state.sessions.create_session(&cfg.web_username) else {
         return (

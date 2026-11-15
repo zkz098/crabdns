@@ -1,6 +1,9 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use moka::sync::Cache;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CacheKey {
@@ -22,10 +25,27 @@ pub struct CacheHit {
     pub is_stale: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CacheStats {
+    #[ts(type = "number")]
+    pub entries: u64,
+    #[ts(type = "number")]
+    pub hits: u64,
+    #[ts(type = "number")]
+    pub optimistic_hits: u64,
+    #[ts(type = "number")]
+    pub misses: u64,
+    pub hit_rate: f64,
+}
+
 pub struct DnsCache {
     inner: Cache<CacheKey, CachedEntry>,
     optimistic: bool,
     stale_grace: Duration,
+    hits: AtomicU64,
+    optimistic_hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 impl DnsCache {
@@ -45,14 +65,21 @@ impl DnsCache {
             inner,
             optimistic,
             stale_grace: Duration::from_hours(24),
+            hits: AtomicU64::new(0),
+            optimistic_hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
     pub fn get(&self, key: &CacheKey, query_id: u16) -> Option<CacheHit> {
-        let entry = self.inner.get(key)?;
+        let Some(entry) = self.inner.get(key) else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
         let elapsed = entry.inserted_at.elapsed();
 
         if elapsed <= entry.ttl {
+            self.hits.fetch_add(1, Ordering::Relaxed);
             let mut bytes = entry.wire_bytes;
             patch_tx_id(&mut bytes, query_id);
             return Some(CacheHit {
@@ -62,6 +89,8 @@ impl DnsCache {
         }
 
         if self.optimistic && elapsed <= entry.ttl.saturating_add(self.stale_grace) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.optimistic_hits.fetch_add(1, Ordering::Relaxed);
             let mut bytes = entry.wire_bytes;
             patch_tx_id(&mut bytes, query_id);
             return Some(CacheHit {
@@ -71,6 +100,7 @@ impl DnsCache {
         }
 
         self.inner.invalidate(key);
+        self.misses.fetch_add(1, Ordering::Relaxed);
         None
     }
 
@@ -86,8 +116,33 @@ impl DnsCache {
         );
     }
 
+    pub fn flush(&self) {
+        self.inner.invalidate_all();
+        self.inner.run_pending_tasks();
+    }
+
     pub fn entry_count(&self) -> u64 {
         self.inner.entry_count()
+    }
+
+    pub fn stats(&self) -> CacheStats {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let optimistic_hits = self.optimistic_hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        #[allow(clippy::cast_precision_loss)]
+        let hit_rate = if total == 0 {
+            0.0
+        } else {
+            hits as f64 / total as f64
+        };
+        CacheStats {
+            entries: self.entry_count(),
+            hits,
+            optimistic_hits,
+            misses,
+            hit_rate,
+        }
     }
 }
 

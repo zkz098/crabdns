@@ -26,7 +26,15 @@ pub enum UpstreamStrategy {
     LeastLatency,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SplitDnsRule {
+    pub domain: String,
+    pub upstreams: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     #[serde(default = "default_listen_dns")]
     pub listen_dns: SocketAddr,
@@ -62,6 +70,24 @@ pub struct Config {
     pub web_username: String,
     #[serde(default)]
     pub web_password_hash: String,
+    #[serde(default)]
+    pub split_dns: Vec<SplitDnsRule>,
+    #[serde(default = "default_true")]
+    pub cname_cloaking_blocking: bool,
+    #[serde(default = "default_true")]
+    pub doh_enabled: bool,
+    #[serde(default)]
+    pub listen_dot: Option<SocketAddr>,
+    #[serde(default)]
+    pub tls_cert_path: Option<PathBuf>,
+    #[serde(default)]
+    pub tls_key_path: Option<PathBuf>,
+    #[serde(default = "default_tcp_max_connections")]
+    pub tcp_max_connections: usize,
+    #[serde(default = "default_tcp_idle_timeout_secs")]
+    pub tcp_idle_timeout_secs: u64,
+    #[serde(default)]
+    pub allow_private_subscriptions: bool,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -103,6 +129,14 @@ fn default_web_username() -> String {
     "admin".to_string()
 }
 
+fn default_tcp_max_connections() -> usize {
+    256
+}
+
+fn default_tcp_idle_timeout_secs() -> u64 {
+    10
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -123,6 +157,15 @@ impl Default for Config {
             web_auth_enabled: false,
             web_username: default_web_username(),
             web_password_hash: String::new(),
+            split_dns: Vec::new(),
+            cname_cloaking_blocking: true,
+            doh_enabled: true,
+            listen_dot: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            tcp_max_connections: default_tcp_max_connections(),
+            tcp_idle_timeout_secs: default_tcp_idle_timeout_secs(),
+            allow_private_subscriptions: false,
         }
     }
 }
