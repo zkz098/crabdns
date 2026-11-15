@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings src",
+    "fmt": "oxfmt src",
+    "fmt:check": "oxfmt --check src"
   },
   "dependencies": {
     "solid-js": "^1.9.19"
@@ -15,6 +18,8 @@
     "@iconify-json/ri": "^1.2.10",
     "@unocss/preset-icons": "^66.13.0",
     "@unocss/preset-wind3": "^66.13.0",
+    "oxfmt": "^0.78.0",
+    "oxlint": "^1.93.0",
     "typescript": "^7.0.2",
     "unocss": "^66.13.0",
     "vite": "^8.3.8",

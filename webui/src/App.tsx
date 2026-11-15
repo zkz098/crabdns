@@ -255,7 +255,8 @@ export default function App() {
               <div>
                 <h2 class="text-base font-semibold">Custom Filtering Rules</h2>
                 <p class="text-xs text-slate-400">
-                  Supports AdGuard syntax (||ads.com^, @@||ok.com^, $important, $dnsrewrite=1.2.3.4) and hosts lines.
+                  Supports AdGuard syntax (||ads.com^, @@||ok.com^, $important, $dnsrewrite=1.2.3.4)
+                  and hosts lines.
                 </p>
               </div>
               <div class="flex items-center gap-3">

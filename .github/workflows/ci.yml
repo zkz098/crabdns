@@ -26,9 +26,9 @@ jobs:
       - name: Install dependencies
         working-directory: webui
         run: pnpm install --frozen-lockfile
-      - name: Typecheck and build
+      - name: Format, lint, typecheck and build
         working-directory: webui
-        run: pnpm typecheck && pnpm build
+        run: pnpm fmt:check && pnpm lint && pnpm typecheck && pnpm build
       - name: Upload dist artifact
         uses: actions/upload-artifact@v7
         with:
