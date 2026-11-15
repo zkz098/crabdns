@@ -77,6 +77,7 @@ pub struct UpstreamPool {
 
 impl UpstreamPool {
     pub fn new(specs: &[String], timeout_ms: u64) -> Result<Self> {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
         let mut endpoints = Vec::with_capacity(specs.len());
         for spec in specs {
             endpoints.push(UpstreamEndpoint::parse(spec)?);

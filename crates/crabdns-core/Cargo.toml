@@ -23,3 +23,6 @@ tokio-rustls.workspace = true
 toml.workspace = true
 tracing.workspace = true
 webpki-roots.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

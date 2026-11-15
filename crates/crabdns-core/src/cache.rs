@@ -116,5 +116,32 @@ mod tests {
         let hit = cache.get(&key, 0xABCD).expect("cache hit");
         assert!(!hit.is_stale);
         assert_eq!(&hit.wire_bytes[0..2], &[0xAB, 0xCD]);
+        assert!(cache.entry_count() <= 1);
+    }
+
+    #[test]
+    fn test_cache_stale_optimistic_vs_strict() {
+        let key = CacheKey {
+            qname: "stale.example.".to_string(),
+            qtype: 1,
+            qclass: 1,
+        };
+        let expired = CachedEntry {
+            wire_bytes: vec![0x00, 0x01, 0x81, 0x80],
+            inserted_at: Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("valid instant"),
+            ttl: Duration::from_secs(30),
+        };
+
+        let opt_cache = DnsCache::new(10, true);
+        opt_cache.inner.insert(key.clone(), expired.clone());
+        let hit = opt_cache.get(&key, 0x1122).expect("optimistic stale hit");
+        assert!(hit.is_stale);
+        assert_eq!(&hit.wire_bytes[0..2], &[0x11, 0x22]);
+
+        let strict_cache = DnsCache::new(10, false);
+        strict_cache.inner.insert(key.clone(), expired);
+        assert!(strict_cache.get(&key, 0x1122).is_none());
     }
 }

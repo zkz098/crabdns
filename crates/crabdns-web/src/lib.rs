@@ -164,3 +164,92 @@ async fn serve_spa(uri: Uri) -> Response {
 
     (StatusCode::NOT_FOUND, "Web UI assets not built").into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabdns_core::{DnsCache, FilterEngine, UpstreamPool};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_web_api_endpoints_and_spa() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
+        let config = Arc::new(Config::default());
+        let filter = Arc::new(FilterEngine::new(&["||initial.test^".to_string()]));
+        let cache = Arc::new(DnsCache::new(64, true));
+        let upstream =
+            Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 200).expect("pool"));
+        let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+        let (live_tx, _) = broadcast::channel(16);
+
+        let app = build_router(AppState {
+            config,
+            pipeline: Arc::clone(&pipeline),
+            storage,
+            live_tx,
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        let health_res = client
+            .get(format!("{base}/api/health"))
+            .send()
+            .await
+            .expect("health");
+        assert_eq!(health_res.status(), StatusCode::OK);
+
+        let stats_res = client
+            .get(format!("{base}/api/stats"))
+            .send()
+            .await
+            .expect("stats");
+        assert_eq!(stats_res.status(), StatusCode::OK);
+
+        let logs_res = client
+            .get(format!("{base}/api/logs?limit=10"))
+            .send()
+            .await
+            .expect("logs");
+        assert_eq!(logs_res.status(), StatusCode::OK);
+
+        let cfg_res = client
+            .get(format!("{base}/api/config"))
+            .send()
+            .await
+            .expect("config");
+        assert_eq!(cfg_res.status(), StatusCode::OK);
+
+        let rules_get = client
+            .get(format!("{base}/api/rules"))
+            .send()
+            .await
+            .expect("get rules");
+        assert_eq!(rules_get.status(), StatusCode::OK);
+
+        let body = serde_json::to_vec(&RulesPayload {
+            rules_text: "||updated.test^\n".to_string(),
+            stats: None,
+        })
+        .expect("json");
+        let rules_put = client
+            .put(format!("{base}/api/rules"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .expect("put rules");
+        assert_eq!(rules_put.status(), StatusCode::OK);
+        assert_eq!(pipeline.filter().stats().block_rules, 1);
+
+        let spa_res = client.get(format!("{base}/")).send().await.expect("spa");
+        assert_eq!(spa_res.status(), StatusCode::OK);
+    }
+}

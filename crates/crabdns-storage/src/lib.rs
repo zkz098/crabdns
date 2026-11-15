@@ -352,5 +352,46 @@ mod tests {
             storage.load_custom_rules().expect("load rules").as_deref(),
             Some("||test.com^\n")
         );
+
+        let future_cutoff = Utc::now().timestamp_millis().cast_unsigned() + 60_000;
+        let pruned = storage.prune_older_than(future_cutoff).expect("prune");
+        assert_eq!(pruned, 2);
+        assert!(
+            storage
+                .query_logs(10, None, None)
+                .expect("empty")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_log_sink_batches_and_broadcasts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
+        let (tx, rx) = mpsc::channel(16);
+        let (live_tx, mut live_rx) = broadcast::channel(16);
+        let handle = spawn_log_sink(Arc::clone(&storage), rx, live_tx);
+
+        tx.send(QueryEvent {
+            timestamp: Utc::now(),
+            client_ip: "10.0.0.5".to_string(),
+            domain: "sink.example.com".to_string(),
+            qtype: "A".to_string(),
+            outcome: QueryOutcome::Cached,
+            matched_rule: None,
+            upstream: Some("cache".to_string()),
+            elapsed_us: 10,
+            rcode: "NOERROR".to_string(),
+        })
+        .await
+        .expect("send");
+
+        let live_ev = live_rx.recv().await.expect("live broadcast");
+        assert_eq!(live_ev.domain, "sink.example.com");
+
+        drop(tx);
+        handle.await.expect("sink join");
+        let logs = storage.query_logs(10, Some("sink"), None).expect("logs");
+        assert_eq!(logs.len(), 1);
     }
 }

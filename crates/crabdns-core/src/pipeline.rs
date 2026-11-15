@@ -351,3 +351,136 @@ fn build_rewrite_response(request: &Message, qtype: RecordType, ip: IpAddr) -> R
     resp.to_vec()
         .map_err(|e| CoreError::Protocol(e.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hickory_proto::op::{OpCode, Query};
+    use hickory_proto::rr::Name;
+    use hickory_proto::rr::rdata::CNAME;
+    use tokio::net::UdpSocket;
+
+    fn build_query(id: u16, domain: &str, qtype: RecordType) -> Vec<u8> {
+        let mut msg = Message::new(id, MessageType::Query, OpCode::Query);
+        msg.metadata.recursion_desired = true;
+        let name = Name::from_ascii(domain).expect("valid domain");
+        msg.add_query(Query::query(name, qtype));
+        msg.to_vec().expect("encode query")
+    }
+
+    async fn spawn_mock_udp_upstream(cname_target: Option<&'static str>) -> SocketAddr {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = socket.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let mut buf = [0_u8; 2048];
+            while let Ok((len, peer)) = socket.recv_from(&mut buf).await {
+                let req = Message::from_vec(&buf[..len]).expect("valid req");
+                let q = req.queries.first().expect("question");
+                let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+                resp.metadata.recursion_available = true;
+                resp.queries.clone_from(&req.queries);
+                if let Some(target) = cname_target {
+                    let cname = Name::from_ascii(target).expect("valid cname");
+                    resp.add_answer(Record::from_rdata(
+                        q.name().clone(),
+                        60,
+                        RData::CNAME(CNAME(cname)),
+                    ));
+                } else {
+                    resp.add_answer(Record::from_rdata(
+                        q.name().clone(),
+                        120,
+                        RData::A(A(Ipv4Addr::new(93, 184, 216, 34))),
+                    ));
+                }
+                let bytes = resp.to_vec().expect("encode resp");
+                let _ = socket.send_to(&bytes, peer).await;
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_block_rewrite_and_invalid() {
+        let filter = Arc::new(FilterEngine::new(&[
+            "||ads.test^".to_string(),
+            "||nas.local^$dnsrewrite=10.0.0.2".to_string(),
+        ]));
+        let cache = Arc::new(DnsCache::new(64, true));
+        let upstream =
+            Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 200).unwrap());
+        let (tx, mut rx) = mpsc::channel(16);
+        let pipeline = DnsPipeline::new(filter, cache, upstream, Some(tx));
+        let client: SocketAddr = "127.0.0.1:12345".parse().expect("addr");
+
+        let blocked_q = build_query(0x1001, "ads.test.", RecordType::A);
+        let resp = Message::from_vec(&pipeline.handle_packet(&blocked_q, client).await.unwrap())
+            .expect("decode");
+        assert_eq!(resp.answers.len(), 1);
+        assert_eq!(rx.recv().await.unwrap().outcome, QueryOutcome::Blocked);
+
+        let blocked_txt = build_query(0x1002, "ads.test.", RecordType::TXT);
+        let resp_txt =
+            Message::from_vec(&pipeline.handle_packet(&blocked_txt, client).await.unwrap())
+                .expect("decode");
+        assert_eq!(resp_txt.response_code, ResponseCode::NXDomain);
+        let _ = rx.recv().await;
+
+        let rewrite_q = build_query(0x1003, "nas.local.", RecordType::A);
+        let resp_rw = Message::from_vec(&pipeline.handle_packet(&rewrite_q, client).await.unwrap())
+            .expect("decode");
+        assert_eq!(resp_rw.answers.len(), 1);
+        assert_eq!(rx.recv().await.unwrap().outcome, QueryOutcome::Rewritten);
+
+        assert!(pipeline.handle_packet(&[0, 1, 2], client).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_forward_cache_and_cname_cloaking() {
+        let mock_addr = spawn_mock_udp_upstream(None).await;
+        let filter = Arc::new(FilterEngine::new(&["||evil-cname.test^".to_string()]));
+        let cache = Arc::new(DnsCache::new(64, true));
+        let upstream =
+            Arc::new(UpstreamPool::new(&[format!("udp://{mock_addr}")], 1000).expect("pool"));
+        let (tx, mut rx) = mpsc::channel(16);
+        let pipeline = DnsPipeline::new(filter, cache, upstream, Some(tx));
+        let client: SocketAddr = "127.0.0.1:54321".parse().expect("addr");
+
+        let q1 = build_query(0x2001, "example.org.", RecordType::A);
+        let r1 = Message::from_vec(&pipeline.handle_packet(&q1, client).await.unwrap()).unwrap();
+        assert_eq!(r1.id, 0x2001);
+        assert_eq!(rx.recv().await.unwrap().outcome, QueryOutcome::Forwarded);
+
+        let q2 = build_query(0x2002, "example.org.", RecordType::A);
+        let r2 = Message::from_vec(&pipeline.handle_packet(&q2, client).await.unwrap()).unwrap();
+        assert_eq!(r2.id, 0x2002);
+        assert_eq!(rx.recv().await.unwrap().outcome, QueryOutcome::Cached);
+
+        let cname_addr = spawn_mock_udp_upstream(Some("evil-cname.test.")).await;
+        let upstream2 =
+            Arc::new(UpstreamPool::new(&[format!("udp://{cname_addr}")], 1000).expect("pool"));
+        let (tx2, mut rx2) = mpsc::channel(16);
+        let pipeline2 = DnsPipeline::new(
+            Arc::clone(pipeline.filter()),
+            Arc::new(DnsCache::new(64, false)),
+            upstream2,
+            Some(tx2),
+        );
+        let q3 = build_query(0x3001, "cloaked.example.", RecordType::A);
+        let _ = pipeline2.handle_packet(&q3, client).await.unwrap();
+        assert_eq!(rx2.recv().await.unwrap().outcome, QueryOutcome::Blocked);
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_upstream_timeout_servfail() {
+        let filter = Arc::new(FilterEngine::new(&[]));
+        let cache = Arc::new(DnsCache::new(64, false));
+        let upstream = Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 50).unwrap());
+        let pipeline = DnsPipeline::new(filter, cache, upstream, None);
+        let client: SocketAddr = "127.0.0.1:9999".parse().expect("addr");
+
+        let q = build_query(0x4001, "unreachable.example.", RecordType::A);
+        let resp = Message::from_vec(&pipeline.handle_packet(&q, client).await.unwrap()).unwrap();
+        assert_eq!(resp.response_code, ResponseCode::ServFail);
+    }
+}

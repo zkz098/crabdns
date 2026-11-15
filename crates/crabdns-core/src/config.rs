@@ -97,3 +97,44 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_and_toml_config() {
+        let def = Config::default();
+        assert_eq!(def.listen_dns.port(), 5353);
+        assert_eq!(def.listen_web.port(), 3000);
+        assert!(def.optimistic_cache);
+
+        let parsed = Config::from_toml_str(
+            r#"
+            listen_dns = "127.0.0.1:15353"
+            cache_size = 1024
+            optimistic_cache = false
+            custom_rules = ["||ads.test^"]
+            "#,
+        )
+        .expect("valid toml");
+        assert_eq!(parsed.listen_dns.port(), 15353);
+        assert_eq!(parsed.cache_size, 1024);
+        assert!(!parsed.optimistic_cache);
+        assert_eq!(parsed.custom_rules, vec!["||ads.test^"]);
+    }
+
+    #[test]
+    fn test_load_or_default_paths() {
+        assert!(Config::load_or_default(None).is_ok());
+
+        let missing = PathBuf::from("/tmp/definitely_missing_crabdns_cfg.toml");
+        assert!(Config::load_or_default(Some(&missing)).is_err());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("crabdns.toml");
+        std::fs::write(&cfg_path, "cache_size = 2048\n").expect("write cfg");
+        let loaded = Config::load_or_default(Some(&cfg_path)).expect("load cfg");
+        assert_eq!(loaded.cache_size, 2048);
+    }
+}
