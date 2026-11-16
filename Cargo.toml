@@ -60,6 +60,7 @@ ring = "0.17"
 webpki-roots = "1"
 ts-rs = { version = "12", features = ["chrono-impl"] }
 proptest = "1"
+criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
 foldhash = "0.2"

@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use crabdns_core::{Config, QueryEvent, QueryOutcome};
 use dashmap::DashMap;
-use foldhash::fast::RandomState;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use foldhash::fast::RandomState;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};

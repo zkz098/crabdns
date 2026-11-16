@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+bench = false
+
 [lints]
 workspace = true
 
@@ -29,5 +32,22 @@ ts-rs.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "filter_bench"
+harness = false
+
+[[bench]]
+name = "cache_bench"
+harness = false
+
+[[bench]]
+name = "routing_bench"
+harness = false
+
+[[bench]]
+name = "pipeline_bench"
+harness = false

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+bench = false
+
 [lints]
 workspace = true
 
@@ -22,5 +25,10 @@ tracing.workspace = true
 ts-rs.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "storage_bench"
+harness = false

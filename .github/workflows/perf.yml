@@ -1,0 +1,56 @@
+name: Performance Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Benchmark mode (quick or full)"
+        required: true
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - full
+  schedule:
+    - cron: "0 3 * * 0"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf:
+    name: Microbenchmarks & E2E Load Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+      - name: Build Web UI dist
+        working-directory: webui
+        run: pnpm install --frozen-lockfile && pnpm build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Criterion microbenchmarks
+        run: |
+          if [ "${{ inputs.mode }}" = "full" ]; then
+            ./scripts/perf.sh micro
+          else
+            ./scripts/perf.sh micro-quick
+          fi
+      - name: Run E2E DNS load test
+        run: |
+          mkdir -p perf-results
+          ./scripts/perf.sh e2e --scenario all --duration-secs 5 --json perf-results/e2e_report.json
+      - name: Upload performance artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-results
+          path: |
+            perf-results/e2e_report.json
+            target/criterion
