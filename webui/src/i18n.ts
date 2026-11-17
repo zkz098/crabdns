@@ -111,6 +111,9 @@ const en = {
   settingsSaved: "Config applied & saved",
   settingsUpstreamsLabel: "Upstream DNS Servers (one per line)",
   settingsUpstreamsHint: "Supports udp://, tcp://, tls://, https://",
+  settingsBootstrapDnsLabel: "Bootstrap DNS Servers (one per line)",
+  settingsBootstrapDnsHint:
+    "Optional IP-only DNS servers (e.g. 1.1.1.1, tcp://8.8.8.8:53) used to resolve DoT/DoH upstream hostnames. Leave empty to use system DNS.",
   settingsCacheSizeLabel: "Cache Capacity (entries)",
   settingsTimeoutLabel: "Upstream Timeout (ms)",
   settingsRetentionLabel: "Log Retention (hours)",
@@ -266,6 +269,9 @@ const zhCN: Record<TranslationKey, string> = {
   settingsSaved: "配置已应用并保存",
   settingsUpstreamsLabel: "上游 DNS 服务器（每行一个）",
   settingsUpstreamsHint: "支持 udp://、tcp://、tls://、https://",
+  settingsBootstrapDnsLabel: "Bootstrap DNS 服务器（每行一个）",
+  settingsBootstrapDnsHint:
+    "可选，仅支持 IP 地址（如 1.1.1.1、tcp://8.8.8.8:53），用于解析 DoT/DoH 上游域名；留空则使用系统 DNS。",
   settingsCacheSizeLabel: "缓存容量（条目数）",
   settingsTimeoutLabel: "上游超时时间（毫秒）",
   settingsRetentionLabel: "日志保留时间（小时）",

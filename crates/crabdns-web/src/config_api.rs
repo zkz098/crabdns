@@ -18,6 +18,7 @@ pub struct ConfigResponse {
     pub listen_dot: Option<String>,
     pub data_dir: String,
     pub upstreams: Vec<String>,
+    pub bootstrap_dns: Vec<String>,
     pub upstream_strategy: UpstreamStrategy,
     #[ts(type = "number")]
     pub cache_size: u64,
@@ -46,6 +47,7 @@ impl From<&Config> for ConfigResponse {
             listen_dot: cfg.listen_dot.map(|addr| addr.to_string()),
             data_dir: cfg.data_dir.display().to_string(),
             upstreams: cfg.upstreams.clone(),
+            bootstrap_dns: cfg.bootstrap_dns.clone(),
             upstream_strategy: cfg.upstream_strategy,
             cache_size: cfg.cache_size,
             optimistic_cache: cfg.optimistic_cache,
@@ -70,6 +72,8 @@ impl From<&Config> for ConfigResponse {
 #[allow(clippy::struct_excessive_bools)]
 pub struct ConfigUpdatePayload {
     pub upstreams: Vec<String>,
+    #[serde(default)]
+    pub bootstrap_dns: Option<Vec<String>>,
     #[serde(default)]
     pub upstream_strategy: Option<UpstreamStrategy>,
     #[ts(type = "number")]
@@ -129,6 +133,11 @@ pub async fn update_config(
 
     let cleaned_upstreams = clean_string_list(payload.upstreams);
     let current = state.app.config.load_full();
+    let bootstrap_dns = clean_string_list(
+        payload
+            .bootstrap_dns
+            .unwrap_or_else(|| current.bootstrap_dns.clone()),
+    );
     let strategy = payload
         .upstream_strategy
         .unwrap_or(current.upstream_strategy);
@@ -173,10 +182,11 @@ pub async fn update_config(
         ));
     }
 
-    if let Err(err) = state.app.pipeline.reload_upstream_with_strategy(
+    if let Err(err) = state.app.pipeline.reload_upstream_with_options(
         &cleaned_upstreams,
         payload.upstream_timeout_ms,
         strategy,
+        &bootstrap_dns,
     ) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -184,12 +194,12 @@ pub async fn update_config(
         ));
     }
 
-    if let Err(err) =
-        state
-            .app
-            .pipeline
-            .reload_split_dns(&split_dns, payload.upstream_timeout_ms, strategy)
-    {
+    if let Err(err) = state.app.pipeline.reload_split_dns_with_bootstrap(
+        &split_dns,
+        payload.upstream_timeout_ms,
+        strategy,
+        &bootstrap_dns,
+    ) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": err.to_string() })),
@@ -213,6 +223,7 @@ pub async fn update_config(
 
     let mut next = (*current).clone();
     next.upstreams = cleaned_upstreams;
+    next.bootstrap_dns = bootstrap_dns;
     next.upstream_strategy = strategy;
     next.cache_size = payload.cache_size;
     next.optimistic_cache = payload.optimistic_cache;

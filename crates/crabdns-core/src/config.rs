@@ -45,6 +45,8 @@ pub struct Config {
     #[serde(default = "default_upstreams")]
     pub upstreams: Vec<String>,
     #[serde(default)]
+    pub bootstrap_dns: Vec<String>,
+    #[serde(default)]
     pub upstream_strategy: UpstreamStrategy,
     #[serde(default = "default_cache_size")]
     pub cache_size: u64,
@@ -144,6 +146,7 @@ impl Default for Config {
             listen_web: default_listen_web(),
             data_dir: default_data_dir(),
             upstreams: default_upstreams(),
+            bootstrap_dns: Vec::new(),
             upstream_strategy: UpstreamStrategy::default(),
             cache_size: default_cache_size(),
             optimistic_cache: default_true(),
@@ -204,6 +207,7 @@ mod tests {
         let parsed = Config::from_toml_str(
             r#"
             listen_dns = "127.0.0.1:15353"
+            bootstrap_dns = ["1.1.1.1", "tcp://8.8.8.8:53"]
             cache_size = 1024
             optimistic_cache = false
             custom_rules = ["||ads.test^"]
@@ -211,6 +215,7 @@ mod tests {
         )
         .expect("valid toml");
         assert_eq!(parsed.listen_dns.port(), 15353);
+        assert_eq!(parsed.bootstrap_dns, vec!["1.1.1.1", "tcp://8.8.8.8:53"]);
         assert_eq!(parsed.cache_size, 1024);
         assert!(!parsed.optimistic_cache);
         assert_eq!(parsed.custom_rules, vec!["||ads.test^"]);

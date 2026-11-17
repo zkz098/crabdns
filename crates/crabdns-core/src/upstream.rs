@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dashmap::DashMap;
 use futures_util::future::select_ok;
+use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::rr::{Name, RData, RecordType};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
@@ -172,12 +175,246 @@ fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
     (input.to_string(), default_port)
 }
 
+#[derive(Debug, Clone)]
+enum BootstrapEndpoint {
+    Udp(SocketAddr),
+    Tcp(SocketAddr),
+}
+
+fn parse_bootstrap_endpoint(raw: &str) -> Result<BootstrapEndpoint> {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("udp://") {
+        return Ok(BootstrapEndpoint::Udp(parse_socket_addr(rest, 53)?));
+    }
+    if let Some(rest) = trimmed.strip_prefix("tcp://") {
+        return Ok(BootstrapEndpoint::Tcp(parse_socket_addr(rest, 53)?));
+    }
+    if trimmed.starts_with("tls://") || trimmed.starts_with("https://") {
+        return Err(CoreError::Config(format!(
+            "bootstrap_dns must be IP addresses (udp:// or tcp://): {trimmed}"
+        )));
+    }
+    Ok(BootstrapEndpoint::Udp(parse_socket_addr(trimmed, 53)?))
+}
+
+#[derive(Debug, Clone)]
+struct CachedIpEntry {
+    ips: Vec<IpAddr>,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct BootstrapResolver {
+    endpoints: Vec<BootstrapEndpoint>,
+    timeout: Duration,
+    cache: Arc<DashMap<String, CachedIpEntry>>,
+}
+
+impl BootstrapResolver {
+    fn new(specs: &[String], timeout: Duration) -> Result<Self> {
+        let mut endpoints = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let trimmed = spec.trim();
+            if !trimmed.is_empty() {
+                endpoints.push(parse_bootstrap_endpoint(trimmed)?);
+            }
+        }
+        Ok(Self {
+            endpoints,
+            timeout,
+            cache: Arc::new(DashMap::new()),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.endpoints.is_empty()
+    }
+
+    async fn resolve_ips(&self, host: &str) -> Result<Vec<IpAddr>> {
+        let host_clean = host.trim().trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = host_clean.parse::<IpAddr>() {
+            return Ok(vec![ip]);
+        }
+
+        let key = host_clean.trim_end_matches('.').to_ascii_lowercase();
+        if key.is_empty() {
+            return Err(CoreError::Upstream("empty upstream hostname".to_string()));
+        }
+
+        if let Some(entry) = self.cache.get(&key)
+            && Instant::now() < entry.expires_at
+        {
+            return Ok(entry.ips.clone());
+        }
+
+        for endpoint in &self.endpoints {
+            if let Ok((ips, ttl_secs)) = query_bootstrap_host(endpoint, &key, self.timeout).await
+                && !ips.is_empty()
+            {
+                let ttl = Duration::from_secs(u64::from(ttl_secs).clamp(30, 3600));
+                self.cache.insert(
+                    key,
+                    CachedIpEntry {
+                        ips: ips.clone(),
+                        expires_at: Instant::now() + ttl,
+                    },
+                );
+                return Ok(ips);
+            }
+        }
+
+        Err(CoreError::Upstream(format!(
+            "bootstrap DNS failed to resolve '{host_clean}'"
+        )))
+    }
+
+    async fn resolve_socket_addrs(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+        let host_clean = host.trim().trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = host_clean.parse::<IpAddr>() {
+            return Ok(vec![SocketAddr::new(ip, port)]);
+        }
+
+        if self.is_empty() {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host_clean, port))
+                .await
+                .map_err(|e| {
+                    CoreError::Upstream(format!("failed to resolve '{host_clean}:{port}': {e}"))
+                })?
+                .collect();
+            if addrs.is_empty() {
+                return Err(CoreError::Upstream(format!(
+                    "DNS resolution returned no addresses for '{host_clean}'"
+                )));
+            }
+            return Ok(addrs);
+        }
+
+        let ips = self.resolve_ips(host_clean).await?;
+        Ok(ips
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, port))
+            .collect())
+    }
+}
+
+impl reqwest::dns::Resolve for BootstrapResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let this = self.clone();
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let ips = this
+                .resolve_ips(&host)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            let addrs: reqwest::dns::Addrs =
+                Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
+            Ok(addrs)
+        })
+    }
+}
+
+async fn query_bootstrap_host(
+    endpoint: &BootstrapEndpoint,
+    host: &str,
+    timeout: Duration,
+) -> Result<(Vec<IpAddr>, u32)> {
+    let fqdn = format!("{host}.");
+    let name = Name::from_ascii(&fqdn)
+        .map_err(|e| CoreError::Upstream(format!("invalid hostname '{host}': {e}")))?;
+
+    let (res_a, res_aaaa) = tokio::join!(
+        query_bootstrap_record(endpoint, name.clone(), RecordType::A, 0xB001, timeout),
+        query_bootstrap_record(endpoint, name, RecordType::AAAA, 0xB002, timeout),
+    );
+
+    let mut ips = Vec::new();
+    let mut min_ttl = u32::MAX;
+    for (found_ips, ttl) in [res_a, res_aaaa].into_iter().flatten() {
+        ips.extend(found_ips);
+        if let Some(t) = ttl {
+            min_ttl = min_ttl.min(t);
+        }
+    }
+
+    if ips.is_empty() {
+        return Err(CoreError::Upstream(format!(
+            "no A/AAAA records for '{host}'"
+        )));
+    }
+    let ttl_secs = if min_ttl == u32::MAX { 60 } else { min_ttl };
+    Ok((ips, ttl_secs))
+}
+
+async fn query_bootstrap_record(
+    endpoint: &BootstrapEndpoint,
+    name: Name,
+    rtype: RecordType,
+    tx_id: u16,
+    timeout: Duration,
+) -> Result<(Vec<IpAddr>, Option<u32>)> {
+    let mut msg = Message::new(tx_id, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
+    msg.add_query(Query::query(name, rtype));
+    let wire = msg
+        .to_vec()
+        .map_err(|e| CoreError::Protocol(format!("failed to encode bootstrap query: {e}")))?;
+
+    let raw_resp = tokio::time::timeout(timeout, async {
+        match endpoint {
+            BootstrapEndpoint::Udp(addr) => {
+                let bind_addr = if addr.is_ipv4() {
+                    "0.0.0.0:0"
+                } else {
+                    "[::]:0"
+                };
+                let sock = UdpSocket::bind(bind_addr).await?;
+                sock.connect(*addr).await?;
+                sock.send(&wire).await?;
+                let mut buf = vec![0_u8; 4096];
+                let n = sock.recv(&mut buf).await?;
+                buf.truncate(n);
+                Ok::<Vec<u8>, CoreError>(buf)
+            }
+            BootstrapEndpoint::Tcp(addr) => exchange_tcp(*addr, &wire).await,
+        }
+    })
+    .await
+    .map_err(|_| CoreError::Upstream("bootstrap DNS query timed out".to_string()))??;
+
+    let resp = Message::from_vec(&raw_resp)
+        .map_err(|e| CoreError::Protocol(format!("invalid bootstrap DNS response: {e}")))?;
+    if resp.response_code != ResponseCode::NoError {
+        return Err(CoreError::Upstream(format!(
+            "bootstrap DNS returned {}",
+            resp.response_code
+        )));
+    }
+
+    let mut ips = Vec::new();
+    let mut min_ttl: Option<u32> = None;
+    for rec in &resp.answers {
+        match &rec.data {
+            RData::A(v4) if rtype == RecordType::A => {
+                ips.push(IpAddr::V4(v4.0));
+                min_ttl = Some(min_ttl.map_or(rec.ttl, |cur| cur.min(rec.ttl)));
+            }
+            RData::AAAA(v6) if rtype == RecordType::AAAA => {
+                ips.push(IpAddr::V6(v6.0));
+                min_ttl = Some(min_ttl.map_or(rec.ttl, |cur| cur.min(rec.ttl)));
+            }
+            _ => {}
+        }
+    }
+    Ok((ips, min_ttl))
+}
+
 pub struct UpstreamPool {
     endpoints: Vec<UpstreamEndpoint>,
     health: Vec<EndpointHealth>,
     udp_pools: Vec<UdpSocketPool>,
     strategy: UpstreamStrategy,
     timeout: Duration,
+    bootstrap: BootstrapResolver,
     http_client: reqwest::Client,
     tls_connector: TlsConnector,
 }
@@ -191,6 +428,15 @@ impl UpstreamPool {
         specs: &[String],
         timeout_ms: u64,
         strategy: UpstreamStrategy,
+    ) -> Result<Self> {
+        Self::new_with_bootstrap(specs, timeout_ms, strategy, &[])
+    }
+
+    pub fn new_with_bootstrap(
+        specs: &[String],
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+        bootstrap_dns: &[String],
     ) -> Result<Self> {
         let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
         let mut endpoints = Vec::with_capacity(specs.len());
@@ -210,8 +456,13 @@ impl UpstreamPool {
             .map(|_| UdpSocketPool::default())
             .collect();
         let timeout = Duration::from_millis(timeout_ms);
-        let http_client = reqwest::Client::builder()
-            .timeout(timeout)
+        let bootstrap = BootstrapResolver::new(bootstrap_dns, timeout)?;
+
+        let mut client_builder = reqwest::Client::builder().timeout(timeout);
+        if !bootstrap.is_empty() {
+            client_builder = client_builder.dns_resolver(Arc::new(bootstrap.clone()));
+        }
+        let http_client = client_builder
             .build()
             .map_err(|e| CoreError::Upstream(e.to_string()))?;
 
@@ -228,6 +479,7 @@ impl UpstreamPool {
             udp_pools,
             strategy,
             timeout,
+            bootstrap,
             http_client,
             tls_connector,
         })
@@ -347,7 +599,14 @@ impl UpstreamPool {
             UpstreamEndpoint::Udp(addr) => exchange_udp(*addr, &self.udp_pools[idx], query_wire).await,
             UpstreamEndpoint::Tcp(addr) => exchange_tcp(*addr, query_wire).await,
             UpstreamEndpoint::Dot { addr, server_name } => {
-                exchange_dot(&self.tls_connector, addr, server_name, query_wire).await
+                exchange_dot(
+                    &self.tls_connector,
+                    &self.bootstrap,
+                    addr,
+                    server_name,
+                    query_wire,
+                )
+                .await
             }
             UpstreamEndpoint::Doh { url } => exchange_doh(&self.http_client, url, query_wire).await,
         }
@@ -398,12 +657,16 @@ async fn exchange_tcp(addr: SocketAddr, query_wire: &[u8]) -> Result<Vec<u8>> {
 
 async fn exchange_dot(
     connector: &TlsConnector,
+    bootstrap: &BootstrapResolver,
     addr: &str,
     server_name: &str,
     query_wire: &[u8],
 ) -> Result<Vec<u8>> {
-    let stream = TcpStream::connect(addr).await?;
-    let name = ServerName::try_from(server_name.to_string())
+    let (host, port) = split_host_port(addr, 853);
+    let addrs = bootstrap.resolve_socket_addrs(&host, port).await?;
+    let stream = TcpStream::connect(addrs.as_slice()).await?;
+    let clean_sni = server_name.trim_start_matches('[').trim_end_matches(']');
+    let name = ServerName::try_from(clean_sni.to_string())
         .map_err(|e| CoreError::Upstream(format!("invalid TLS server name: {e}")))?;
     let mut tls_stream = connector
         .connect(name, stream)
@@ -523,5 +786,99 @@ mod tests {
             dead_snap[0].consecutive_failures,
             UNHEALTHY_FAILURE_THRESHOLD
         );
+    }
+
+    #[test]
+    fn test_bootstrap_endpoint_validation() {
+        assert!(BootstrapResolver::new(
+            &[
+                "1.1.1.1".to_string(),
+                "udp://8.8.8.8:53".to_string(),
+                "tcp://9.9.9.9:53".to_string(),
+                "[2606:4700:4700::1111]:53".to_string(),
+            ],
+            Duration::from_millis(500),
+        )
+        .is_ok());
+
+        for invalid in [
+            "dns.google",
+            "tls://dns.google",
+            "https://dns.google/dns-query",
+        ] {
+            assert!(
+                BootstrapResolver::new(&[invalid.to_string()], Duration::from_millis(500)).is_err(),
+                "expected {invalid} to be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_resolver_queries_and_caches() {
+        use hickory_proto::rr::Record;
+        use hickory_proto::rr::rdata::A;
+        use std::net::Ipv4Addr;
+
+        let sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind mock");
+        let mock_addr = sock.local_addr().expect("addr");
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_clone = Arc::clone(&hits);
+
+        tokio::spawn(async move {
+            let mut buf = [0_u8; 512];
+            while let Ok((len, peer)) = sock.recv_from(&mut buf).await {
+                let req = Message::from_vec(&buf[..len]).expect("valid query");
+                let q = req.queries.first().expect("question").clone();
+                let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+                resp.metadata.recursion_desired = true;
+                resp.metadata.recursion_available = true;
+                resp.metadata.response_code = ResponseCode::NoError;
+                resp.add_query(q.clone());
+                if q.query_type == RecordType::A {
+                    hits_clone.fetch_add(1, Ordering::SeqCst);
+                    resp.add_answer(Record::from_rdata(
+                        q.name,
+                        120,
+                        RData::A(A(Ipv4Addr::new(127, 0, 0, 10))),
+                    ));
+                }
+                let wire = resp.to_vec().expect("encode resp");
+                let _ = sock.send_to(&wire, peer).await;
+            }
+        });
+
+        let resolver = BootstrapResolver::new(
+            &[format!("udp://{mock_addr}")],
+            Duration::from_millis(1000),
+        )
+        .expect("resolver");
+
+        // IP literals bypass DNS queries.
+        let literal = resolver.resolve_ips("127.0.0.1").await.expect("literal");
+        assert_eq!(literal, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // First query hits mock bootstrap server; second hits cache.
+        let ips1 = resolver
+            .resolve_ips("doh.example.test")
+            .await
+            .expect("resolve 1");
+        assert_eq!(ips1, vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10))]);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        let ips2 = resolver
+            .resolve_ips("doh.example.test")
+            .await
+            .expect("resolve 2");
+        assert_eq!(ips2, vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10))]);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // reqwest::dns::Resolve trait integration.
+        let reqwest_name: reqwest::dns::Name = "doh.example.test".parse().expect("reqwest name");
+        let addrs: Vec<SocketAddr> = reqwest::dns::Resolve::resolve(&resolver, reqwest_name)
+            .await
+            .expect("reqwest resolve")
+            .collect();
+        assert_eq!(addrs, vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10)), 0)]);
     }
 }

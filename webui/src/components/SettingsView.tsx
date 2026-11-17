@@ -9,6 +9,8 @@ interface SettingsViewProps {
   configData: ConfigResponse | null;
   upstreamsText: string;
   onUpstreamsChange: (val: string) => void;
+  bootstrapDnsText: string;
+  onBootstrapDnsChange: (val: string) => void;
   upstreamStrategy: UpstreamStrategy;
   onUpstreamStrategyChange: (val: UpstreamStrategy) => void;
   upstreamHealth: UpstreamStatus[];
@@ -105,6 +107,23 @@ export function SettingsView(props: SettingsViewProps) {
           />
           <p class="text-[11px] text-[#8f8f8f] dark:text-[#71717a] mt-1.5">
             {t("settingsUpstreamsHint")}
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-[#171717] dark:text-[#ededed] mb-1.5">
+            {t("settingsBootstrapDnsLabel")}
+          </label>
+          <textarea
+            rows={2}
+            spellcheck={false}
+            placeholder="1.1.1.1&#10;8.8.8.8"
+            value={props.bootstrapDnsText}
+            onInput={(e) => props.onBootstrapDnsChange(e.currentTarget.value)}
+            class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3 font-mono text-xs leading-relaxed text-[#171717] dark:text-[#ededed] outline-none transition-all duration-150 hover:border-[#d4d4d8] dark:hover:border-[#404040] focus:border-[#171717] dark:focus:border-[#ededed] focus:ring-2 focus:ring-black/5 dark:focus:ring-white/10"
+          />
+          <p class="text-[11px] text-[#8f8f8f] dark:text-[#71717a] mt-1.5">
+            {t("settingsBootstrapDnsHint")}
           </p>
         </div>
 

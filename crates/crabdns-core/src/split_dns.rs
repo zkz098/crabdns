@@ -25,6 +25,15 @@ impl SplitUpstreamRouter {
         timeout_ms: u64,
         strategy: UpstreamStrategy,
     ) -> Result<Self> {
+        Self::new_with_bootstrap(rules, timeout_ms, strategy, &[])
+    }
+
+    pub fn new_with_bootstrap(
+        rules: &[SplitDnsRule],
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+        bootstrap_dns: &[String],
+    ) -> Result<Self> {
         let mut routes = Vec::with_capacity(rules.len());
         for rule in rules {
             let suffix = normalize_suffix(&rule.domain);
@@ -38,10 +47,11 @@ impl SplitUpstreamRouter {
                     "split_dns rule for '{suffix}' must specify at least one upstream"
                 )));
             }
-            let pool = Arc::new(UpstreamPool::new_with_strategy(
+            let pool = Arc::new(UpstreamPool::new_with_bootstrap(
                 &rule.upstreams,
                 timeout_ms,
                 strategy,
+                bootstrap_dns,
             )?);
             routes.push(SplitRoute { suffix, pool });
         }

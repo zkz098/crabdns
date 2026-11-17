@@ -57,6 +57,7 @@ impl RunningServer {
 
 fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.upstreams = saved_cfg.upstreams;
+    config.bootstrap_dns = saved_cfg.bootstrap_dns;
     config.upstream_strategy = saved_cfg.upstream_strategy;
     config.cache_size = saved_cfg.cache_size;
     config.optimistic_cache = saved_cfg.optimistic_cache;
@@ -98,10 +99,11 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         current_cfg.cache_size,
         current_cfg.optimistic_cache,
     ));
-    let upstream = Arc::new(UpstreamPool::new_with_strategy(
+    let upstream = Arc::new(UpstreamPool::new_with_bootstrap(
         &current_cfg.upstreams,
         current_cfg.upstream_timeout_ms,
         current_cfg.upstream_strategy,
+        &current_cfg.bootstrap_dns,
     )?);
 
     let (log_tx, log_rx) = mpsc::channel::<QueryEvent>(4096);
@@ -116,10 +118,11 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         &current_cfg.deny_cidrs,
         current_cfg.rate_limit_qps,
     )?;
-    pipeline.reload_split_dns(
+    pipeline.reload_split_dns_with_bootstrap(
         &current_cfg.split_dns,
         current_cfg.upstream_timeout_ms,
         current_cfg.upstream_strategy,
+        &current_cfg.bootstrap_dns,
     )?;
 
     let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;

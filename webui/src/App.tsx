@@ -44,6 +44,7 @@ export default function App() {
 
   const [configData, setConfigData] = createSignal<ConfigResponse | null>(null);
   const [upstreamsText, setUpstreamsText] = createSignal("");
+  const [bootstrapDnsText, setBootstrapDnsText] = createSignal("");
   const [upstreamStrategy, setUpstreamStrategy] = createSignal<UpstreamStrategy>("failover");
   const [upstreamHealth, setUpstreamHealth] = createSignal<UpstreamStatus[]>([]);
   const [probingUpstreams, setProbingUpstreams] = createSignal(false);
@@ -235,6 +236,7 @@ export default function App() {
   function applyConfigToForm(data: ConfigResponse) {
     setConfigData(data);
     setUpstreamsText(data.upstreams.join("\n"));
+    setBootstrapDnsText((data.bootstrap_dns ?? []).join("\n"));
     setUpstreamStrategy(data.upstream_strategy);
     setBlockMode(data.block_mode);
     setAllowCidrsText(data.allow_cidrs.join("\n"));
@@ -488,6 +490,7 @@ export default function App() {
         .filter((item): item is SplitDnsRule => item !== null);
     const payload: ConfigUpdatePayload = {
       upstreams: parseLines(upstreamsText()),
+      bootstrap_dns: parseLines(bootstrapDnsText()),
       upstream_strategy: upstreamStrategy(),
       cache_size: Number(cacheSize()),
       optimistic_cache: optimisticCache(),
@@ -667,6 +670,8 @@ export default function App() {
               configData={configData()}
               upstreamsText={upstreamsText()}
               onUpstreamsChange={setUpstreamsText}
+              bootstrapDnsText={bootstrapDnsText()}
+              onBootstrapDnsChange={setBootstrapDnsText}
               upstreamStrategy={upstreamStrategy()}
               onUpstreamStrategyChange={setUpstreamStrategy}
               upstreamHealth={upstreamHealth()}

@@ -138,7 +138,18 @@ impl DnsPipeline {
         timeout_ms: u64,
         strategy: UpstreamStrategy,
     ) -> Result<()> {
-        let next = UpstreamPool::new_with_strategy(specs, timeout_ms, strategy)?;
+        self.reload_upstream_with_options(specs, timeout_ms, strategy, &[])
+    }
+
+    pub fn reload_upstream_with_options(
+        &self,
+        specs: &[String],
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+        bootstrap_dns: &[String],
+    ) -> Result<()> {
+        let next =
+            UpstreamPool::new_with_bootstrap(specs, timeout_ms, strategy, bootstrap_dns)?;
         self.upstream.store(Arc::new(next));
         Ok(())
     }
@@ -154,7 +165,18 @@ impl DnsPipeline {
         timeout_ms: u64,
         strategy: UpstreamStrategy,
     ) -> Result<()> {
-        let router = SplitUpstreamRouter::new(rules, timeout_ms, strategy)?;
+        self.reload_split_dns_with_bootstrap(rules, timeout_ms, strategy, &[])
+    }
+
+    pub fn reload_split_dns_with_bootstrap(
+        &self,
+        rules: &[SplitDnsRule],
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+        bootstrap_dns: &[String],
+    ) -> Result<()> {
+        let router =
+            SplitUpstreamRouter::new_with_bootstrap(rules, timeout_ms, strategy, bootstrap_dns)?;
         self.split_router.store(Arc::new(router));
         Ok(())
     }
