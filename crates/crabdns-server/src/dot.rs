@@ -39,6 +39,7 @@ pub async fn run_dot_server(
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
+        let _ = stream.set_nodelay(true);
         let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
             tracing::warn!(peer = %peer, "DoT connection rejected: max connections reached");
             drop(stream);

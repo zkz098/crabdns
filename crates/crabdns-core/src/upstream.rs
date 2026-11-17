@@ -17,6 +17,31 @@ use crate::error::{CoreError, Result};
 
 const UNHEALTHY_FAILURE_THRESHOLD: u32 = 3;
 const UNHEALTHY_COOLDOWN_MS: u64 = 15_000;
+const UDP_SOCKET_POOL_MAX_IDLE: usize = 128;
+
+#[derive(Debug, Default)]
+struct UdpSocketPool {
+    sockets: std::sync::Mutex<Vec<UdpSocket>>,
+}
+
+impl UdpSocketPool {
+    fn pop(&self) -> Option<UdpSocket> {
+        self.sockets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+    }
+
+    fn put(&self, sock: UdpSocket) {
+        let mut guard = self
+            .sockets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.len() < UDP_SOCKET_POOL_MAX_IDLE {
+            guard.push(sock);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -150,6 +175,7 @@ fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
 pub struct UpstreamPool {
     endpoints: Vec<UpstreamEndpoint>,
     health: Vec<EndpointHealth>,
+    udp_pools: Vec<UdpSocketPool>,
     strategy: UpstreamStrategy,
     timeout: Duration,
     http_client: reqwest::Client,
@@ -180,6 +206,9 @@ impl UpstreamPool {
         let health = (0..endpoints.len())
             .map(|_| EndpointHealth::default())
             .collect();
+        let udp_pools = (0..endpoints.len())
+            .map(|_| UdpSocketPool::default())
+            .collect();
         let timeout = Duration::from_millis(timeout_ms);
         let http_client = reqwest::Client::builder()
             .timeout(timeout)
@@ -196,6 +225,7 @@ impl UpstreamPool {
         Ok(Self {
             endpoints,
             health,
+            udp_pools,
             strategy,
             timeout,
             http_client,
@@ -288,7 +318,7 @@ impl UpstreamPool {
         let label = endpoint_label(endpoint);
         let start = Instant::now();
 
-        match tokio::time::timeout(self.timeout, self.exchange_one(endpoint, query_wire)).await {
+        match tokio::time::timeout(self.timeout, self.exchange_one(idx, endpoint, query_wire)).await {
             Ok(Ok(resp)) => {
                 let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 health.record_success(elapsed_us);
@@ -309,11 +339,12 @@ impl UpstreamPool {
 
     async fn exchange_one(
         &self,
+        idx: usize,
         endpoint: &UpstreamEndpoint,
         query_wire: &[u8],
     ) -> Result<Vec<u8>> {
         match endpoint {
-            UpstreamEndpoint::Udp(addr) => exchange_udp(*addr, query_wire).await,
+            UpstreamEndpoint::Udp(addr) => exchange_udp(*addr, &self.udp_pools[idx], query_wire).await,
             UpstreamEndpoint::Tcp(addr) => exchange_tcp(*addr, query_wire).await,
             UpstreamEndpoint::Dot { addr, server_name } => {
                 exchange_dot(&self.tls_connector, addr, server_name, query_wire).await
@@ -332,19 +363,30 @@ fn endpoint_label(endpoint: &UpstreamEndpoint) -> String {
     }
 }
 
-async fn exchange_udp(addr: SocketAddr, query_wire: &[u8]) -> Result<Vec<u8>> {
-    let bind_addr = if addr.is_ipv4() {
-        "0.0.0.0:0"
+async fn exchange_udp(
+    addr: SocketAddr,
+    pool: &UdpSocketPool,
+    query_wire: &[u8],
+) -> Result<Vec<u8>> {
+    let socket = if let Some(sock) = pool.pop() {
+        sock
     } else {
-        "[::]:0"
+        let bind_addr = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let sock = UdpSocket::bind(bind_addr).await?;
+        sock.connect(addr).await?;
+        sock
     };
-    let socket = UdpSocket::bind(bind_addr).await?;
-    socket.connect(addr).await?;
+
     socket.send(query_wire).await?;
 
     let mut buf = vec![0_u8; 4096];
     let n = socket.recv(&mut buf).await?;
     buf.truncate(n);
+    pool.put(socket);
     Ok(buf)
 }
 

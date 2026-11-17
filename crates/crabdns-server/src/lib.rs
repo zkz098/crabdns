@@ -19,7 +19,7 @@ pub struct RunningServer {
     pub dot_addr: Option<SocketAddr>,
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
-    udp_task: JoinHandle<()>,
+    udp_tasks: Vec<JoinHandle<()>>,
     tcp_task: JoinHandle<()>,
     dot_task: Option<JoinHandle<()>>,
     web_task: JoinHandle<()>,
@@ -29,7 +29,9 @@ pub struct RunningServer {
 
 impl RunningServer {
     pub async fn shutdown(self) {
-        self.udp_task.abort();
+        for task in &self.udp_tasks {
+            task.abort();
+        }
         self.tcp_task.abort();
         if let Some(dot_task) = &self.dot_task {
             dot_task.abort();
@@ -37,7 +39,9 @@ impl RunningServer {
         self.web_task.abort();
         self.sub_refresh_task.abort();
 
-        let _ = self.udp_task.await;
+        for task in self.udp_tasks {
+            let _ = task.await;
+        }
         let _ = self.tcp_task.await;
         if let Some(dot_task) = self.dot_task {
             let _ = dot_task.await;
@@ -120,7 +124,10 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
 
     let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;
     let dns_addr = tcp_listener.local_addr()?;
-    let udp_socket = Arc::new(UdpSocket::bind(dns_addr).await?);
+    let udp_worker_count = std::thread::available_parallelism()
+        .map_or(2, std::num::NonZeroUsize::get)
+        .clamp(2, 16);
+    let udp_sockets = bind_udp_sockets(dns_addr, udp_worker_count)?;
 
     let tcp_max_connections = current_cfg.tcp_max_connections.max(1);
     let tcp_idle_timeout = Duration::from_secs(current_cfg.tcp_idle_timeout_secs.max(1));
@@ -159,8 +166,13 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         "crabdns started"
     );
 
-    let udp_pipeline = Arc::clone(&pipeline);
-    let udp_task = tokio::spawn(run_udp_server(udp_socket, udp_pipeline));
+    let udp_tasks = udp_sockets
+        .into_iter()
+        .map(|sock| {
+            let udp_pipeline = Arc::clone(&pipeline);
+            tokio::spawn(run_udp_server(sock, udp_pipeline))
+        })
+        .collect();
 
     let tcp_pipeline = Arc::clone(&pipeline);
     let tcp_task = tokio::spawn(run_tcp_server(
@@ -217,13 +229,38 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         dot_addr,
         pipeline,
         storage,
-        udp_task,
+        udp_tasks,
         tcp_task,
         dot_task,
         web_task,
         sub_refresh_task,
         sink_handle,
     })
+}
+
+fn bind_udp_sockets(addr: SocketAddr, count: usize) -> anyhow::Result<Vec<Arc<UdpSocket>>> {
+    #[cfg(unix)]
+    {
+        let mut sockets = Vec::with_capacity(count);
+        for _ in 0..count {
+            let domain = socket2::Domain::for_address(addr);
+            let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+            sock.set_reuse_address(true)?;
+            sock.set_reuse_port(true)?;
+            sock.set_nonblocking(true)?;
+            sock.bind(&addr.into())?;
+            let std_sock: std::net::UdpSocket = sock.into();
+            sockets.push(Arc::new(UdpSocket::from_std(std_sock)?));
+        }
+        Ok(sockets)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = count;
+        let sock = std::net::UdpSocket::bind(addr)?;
+        sock.set_nonblocking(true)?;
+        Ok(vec![Arc::new(UdpSocket::from_std(sock)?)])
+    }
 }
 
 async fn run_udp_server(socket: Arc<UdpSocket>, pipeline: Arc<DnsPipeline>) {
@@ -259,6 +296,7 @@ async fn run_tcp_server(
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
+        let _ = stream.set_nodelay(true);
         let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
             tracing::warn!(peer = %peer, "TCP DNS connection rejected: max connections reached");
             drop(stream);
@@ -284,19 +322,23 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut len_buf = [0_u8; 2];
+    let mut query = Vec::with_capacity(512);
+    let mut write_buf = Vec::with_capacity(514);
     while let Ok(Ok(_)) = tokio::time::timeout(idle_timeout, stream.read_exact(&mut len_buf)).await
     {
         let len = usize::from(u16::from_be_bytes(len_buf));
         if len == 0 || len > 65_535 {
             break;
         }
-        let mut query = vec![0_u8; len];
+        query.resize(len, 0);
         tokio::time::timeout(idle_timeout, stream.read_exact(&mut query)).await??;
         let resp = pipeline.handle_packet(&query, peer).await?;
         let resp_len = u16::try_from(resp.len())?;
+        write_buf.clear();
+        write_buf.extend_from_slice(&resp_len.to_be_bytes());
+        write_buf.extend_from_slice(&resp);
         tokio::time::timeout(idle_timeout, async {
-            stream.write_all(&resp_len.to_be_bytes()).await?;
-            stream.write_all(&resp).await?;
+            stream.write_all(&write_buf).await?;
             stream.flush().await
         })
         .await??;
