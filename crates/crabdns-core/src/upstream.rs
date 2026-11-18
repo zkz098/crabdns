@@ -570,7 +570,8 @@ impl UpstreamPool {
         let label = endpoint_label(endpoint);
         let start = Instant::now();
 
-        match tokio::time::timeout(self.timeout, self.exchange_one(idx, endpoint, query_wire)).await {
+        match tokio::time::timeout(self.timeout, self.exchange_one(idx, endpoint, query_wire)).await
+        {
             Ok(Ok(resp)) => {
                 let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 health.record_success(elapsed_us);
@@ -596,7 +597,9 @@ impl UpstreamPool {
         query_wire: &[u8],
     ) -> Result<Vec<u8>> {
         match endpoint {
-            UpstreamEndpoint::Udp(addr) => exchange_udp(*addr, &self.udp_pools[idx], query_wire).await,
+            UpstreamEndpoint::Udp(addr) => {
+                exchange_udp(*addr, &self.udp_pools[idx], query_wire).await
+            }
             UpstreamEndpoint::Tcp(addr) => exchange_tcp(*addr, query_wire).await,
             UpstreamEndpoint::Dot { addr, server_name } => {
                 exchange_dot(
@@ -790,16 +793,18 @@ mod tests {
 
     #[test]
     fn test_bootstrap_endpoint_validation() {
-        assert!(BootstrapResolver::new(
-            &[
-                "1.1.1.1".to_string(),
-                "udp://8.8.8.8:53".to_string(),
-                "tcp://9.9.9.9:53".to_string(),
-                "[2606:4700:4700::1111]:53".to_string(),
-            ],
-            Duration::from_millis(500),
-        )
-        .is_ok());
+        assert!(
+            BootstrapResolver::new(
+                &[
+                    "1.1.1.1".to_string(),
+                    "udp://8.8.8.8:53".to_string(),
+                    "tcp://9.9.9.9:53".to_string(),
+                    "[2606:4700:4700::1111]:53".to_string(),
+                ],
+                Duration::from_millis(500),
+            )
+            .is_ok()
+        );
 
         for invalid in [
             "dns.google",
@@ -847,11 +852,9 @@ mod tests {
             }
         });
 
-        let resolver = BootstrapResolver::new(
-            &[format!("udp://{mock_addr}")],
-            Duration::from_millis(1000),
-        )
-        .expect("resolver");
+        let resolver =
+            BootstrapResolver::new(&[format!("udp://{mock_addr}")], Duration::from_millis(1000))
+                .expect("resolver");
 
         // IP literals bypass DNS queries.
         let literal = resolver.resolve_ips("127.0.0.1").await.expect("literal");
@@ -879,6 +882,9 @@ mod tests {
             .await
             .expect("reqwest resolve")
             .collect();
-        assert_eq!(addrs, vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10)), 0)]);
+        assert_eq!(
+            addrs,
+            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10)), 0)]
+        );
     }
 }

@@ -62,6 +62,20 @@ export default function App() {
   const [cnameCloakingBlocking, setCnameCloakingBlocking] = createSignal(true);
   const [dohEnabled, setDohEnabled] = createSignal(true);
   const [allowPrivateSubscriptions, setAllowPrivateSubscriptions] = createSignal(false);
+  const [ecsEnabled, setEcsEnabled] = createSignal(false);
+  const [ecsCustomIp, setEcsCustomIp] = createSignal("");
+  const [ecsIpv4Prefix, setEcsIpv4Prefix] = createSignal(24);
+  const [ecsIpv6Prefix, setEcsIpv6Prefix] = createSignal(56);
+  const [dnssecEnabled, setDnssecEnabled] = createSignal(false);
+  const [hostsEnabled, setHostsEnabled] = createSignal(false);
+  const [hostsPath, setHostsPath] = createSignal("");
+  const [privatePtrEnabled, setPrivatePtrEnabled] = createSignal(false);
+  const [privatePtrUpstreamsText, setPrivatePtrUpstreamsText] = createSignal("");
+  const [ddrEnabled, setDdrEnabled] = createSignal(false);
+  const [ddrHostname, setDdrHostname] = createSignal("");
+  const [dnsRebindingProtection, setDnsRebindingProtection] = createSignal(false);
+  const [blockAnyQueries, setBlockAnyQueries] = createSignal(false);
+  const [trustedProxiesText, setTrustedProxiesText] = createSignal("");
   const [blockingStatus, setBlockingStatus] = createSignal<BlockingStatusResponse | null>(null);
   const [cacheFlushedMsg, setCacheFlushedMsg] = createSignal("");
   const [quickRuleMsg, setQuickRuleMsg] = createSignal("");
@@ -254,6 +268,20 @@ export default function App() {
     setCnameCloakingBlocking(data.cname_cloaking_blocking);
     setDohEnabled(data.doh_enabled);
     setAllowPrivateSubscriptions(data.allow_private_subscriptions);
+    setEcsEnabled(data.ecs_enabled);
+    setEcsCustomIp(data.ecs_custom_ip ?? "");
+    setEcsIpv4Prefix(data.ecs_ipv4_prefix);
+    setEcsIpv6Prefix(data.ecs_ipv6_prefix);
+    setDnssecEnabled(data.dnssec_enabled);
+    setHostsEnabled(data.hosts_enabled);
+    setHostsPath(data.hosts_path ?? "");
+    setPrivatePtrEnabled(data.private_ptr_enabled);
+    setPrivatePtrUpstreamsText((data.private_ptr_upstreams ?? []).join("\n"));
+    setDdrEnabled(data.ddr_enabled);
+    setDdrHostname(data.ddr_hostname ?? "");
+    setDnsRebindingProtection(data.dns_rebinding_protection);
+    setBlockAnyQueries(data.block_any_queries);
+    setTrustedProxiesText((data.trusted_proxies ?? []).join("\n"));
   }
 
   async function fetchBlockingStatus() {
@@ -504,6 +532,20 @@ export default function App() {
       cname_cloaking_blocking: cnameCloakingBlocking(),
       doh_enabled: dohEnabled(),
       allow_private_subscriptions: allowPrivateSubscriptions(),
+      ecs_enabled: ecsEnabled(),
+      ecs_custom_ip: ecsCustomIp().trim(),
+      ecs_ipv4_prefix: Number(ecsIpv4Prefix()),
+      ecs_ipv6_prefix: Number(ecsIpv6Prefix()),
+      dnssec_enabled: dnssecEnabled(),
+      hosts_enabled: hostsEnabled(),
+      hosts_path: hostsPath().trim(),
+      private_ptr_enabled: privatePtrEnabled(),
+      private_ptr_upstreams: parseLines(privatePtrUpstreamsText()),
+      ddr_enabled: ddrEnabled(),
+      ddr_hostname: ddrHostname().trim(),
+      dns_rebinding_protection: dnsRebindingProtection(),
+      block_any_queries: blockAnyQueries(),
+      trusted_proxies: parseLines(trustedProxiesText()),
     };
 
     try {
@@ -701,6 +743,34 @@ export default function App() {
               onDohEnabledChange={setDohEnabled}
               allowPrivateSubscriptions={allowPrivateSubscriptions()}
               onAllowPrivateSubscriptionsChange={setAllowPrivateSubscriptions}
+              ecsEnabled={ecsEnabled()}
+              onEcsEnabledChange={setEcsEnabled}
+              ecsCustomIp={ecsCustomIp()}
+              onEcsCustomIpChange={setEcsCustomIp}
+              ecsIpv4Prefix={ecsIpv4Prefix()}
+              onEcsIpv4PrefixChange={setEcsIpv4Prefix}
+              ecsIpv6Prefix={ecsIpv6Prefix()}
+              onEcsIpv6PrefixChange={setEcsIpv6Prefix}
+              dnssecEnabled={dnssecEnabled()}
+              onDnssecEnabledChange={setDnssecEnabled}
+              hostsEnabled={hostsEnabled()}
+              onHostsEnabledChange={setHostsEnabled}
+              hostsPath={hostsPath()}
+              onHostsPathChange={setHostsPath}
+              privatePtrEnabled={privatePtrEnabled()}
+              onPrivatePtrEnabledChange={setPrivatePtrEnabled}
+              privatePtrUpstreamsText={privatePtrUpstreamsText()}
+              onPrivatePtrUpstreamsChange={setPrivatePtrUpstreamsText}
+              ddrEnabled={ddrEnabled()}
+              onDdrEnabledChange={setDdrEnabled}
+              ddrHostname={ddrHostname()}
+              onDdrHostnameChange={setDdrHostname}
+              dnsRebindingProtection={dnsRebindingProtection()}
+              onDnsRebindingProtectionChange={setDnsRebindingProtection}
+              blockAnyQueries={blockAnyQueries()}
+              onBlockAnyQueriesChange={setBlockAnyQueries}
+              trustedProxiesText={trustedProxiesText()}
+              onTrustedProxiesChange={setTrustedProxiesText}
               configMessage={configMessage()}
               configIsError={configIsError()}
               onSave={saveConfig}

@@ -90,6 +90,34 @@ pub struct Config {
     pub tcp_idle_timeout_secs: u64,
     #[serde(default)]
     pub allow_private_subscriptions: bool,
+    #[serde(default)]
+    pub ecs_enabled: bool,
+    #[serde(default)]
+    pub ecs_custom_ip: Option<String>,
+    #[serde(default = "default_ecs_ipv4_prefix")]
+    pub ecs_ipv4_prefix: u8,
+    #[serde(default = "default_ecs_ipv6_prefix")]
+    pub ecs_ipv6_prefix: u8,
+    #[serde(default)]
+    pub dnssec_enabled: bool,
+    #[serde(default)]
+    pub hosts_enabled: bool,
+    #[serde(default)]
+    pub hosts_path: Option<String>,
+    #[serde(default)]
+    pub private_ptr_enabled: bool,
+    #[serde(default)]
+    pub private_ptr_upstreams: Vec<String>,
+    #[serde(default)]
+    pub ddr_enabled: bool,
+    #[serde(default)]
+    pub ddr_hostname: Option<String>,
+    #[serde(default)]
+    pub dns_rebinding_protection: bool,
+    #[serde(default)]
+    pub block_any_queries: bool,
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -139,6 +167,14 @@ fn default_tcp_idle_timeout_secs() -> u64 {
     10
 }
 
+fn default_ecs_ipv4_prefix() -> u8 {
+    24
+}
+
+fn default_ecs_ipv6_prefix() -> u8 {
+    56
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -169,6 +205,20 @@ impl Default for Config {
             tcp_max_connections: default_tcp_max_connections(),
             tcp_idle_timeout_secs: default_tcp_idle_timeout_secs(),
             allow_private_subscriptions: false,
+            ecs_enabled: false,
+            ecs_custom_ip: None,
+            ecs_ipv4_prefix: default_ecs_ipv4_prefix(),
+            ecs_ipv6_prefix: default_ecs_ipv6_prefix(),
+            dnssec_enabled: false,
+            hosts_enabled: false,
+            hosts_path: None,
+            private_ptr_enabled: false,
+            private_ptr_upstreams: Vec::new(),
+            ddr_enabled: false,
+            ddr_hostname: None,
+            dns_rebinding_protection: false,
+            block_any_queries: false,
+            trusted_proxies: Vec::new(),
         }
     }
 }

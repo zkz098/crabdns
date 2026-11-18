@@ -40,6 +40,34 @@ interface SettingsViewProps {
   onDohEnabledChange: (val: boolean) => void;
   allowPrivateSubscriptions: boolean;
   onAllowPrivateSubscriptionsChange: (val: boolean) => void;
+  ecsEnabled: boolean;
+  onEcsEnabledChange: (val: boolean) => void;
+  ecsCustomIp: string;
+  onEcsCustomIpChange: (val: string) => void;
+  ecsIpv4Prefix: number;
+  onEcsIpv4PrefixChange: (val: number) => void;
+  ecsIpv6Prefix: number;
+  onEcsIpv6PrefixChange: (val: number) => void;
+  dnssecEnabled: boolean;
+  onDnssecEnabledChange: (val: boolean) => void;
+  hostsEnabled: boolean;
+  onHostsEnabledChange: (val: boolean) => void;
+  hostsPath: string;
+  onHostsPathChange: (val: string) => void;
+  privatePtrEnabled: boolean;
+  onPrivatePtrEnabledChange: (val: boolean) => void;
+  privatePtrUpstreamsText: string;
+  onPrivatePtrUpstreamsChange: (val: string) => void;
+  ddrEnabled: boolean;
+  onDdrEnabledChange: (val: boolean) => void;
+  ddrHostname: string;
+  onDdrHostnameChange: (val: string) => void;
+  dnsRebindingProtection: boolean;
+  onDnsRebindingProtectionChange: (val: boolean) => void;
+  blockAnyQueries: boolean;
+  onBlockAnyQueriesChange: (val: boolean) => void;
+  trustedProxiesText: string;
+  onTrustedProxiesChange: (val: string) => void;
   configMessage: string;
   configIsError: boolean;
   onSave: () => void;
@@ -354,6 +382,179 @@ export function SettingsView(props: SettingsViewProps) {
               value={props.rateLimitQps}
               onInput={(e) => props.onRateLimitChange(Number(e.currentTarget.value))}
               class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm text-[#171717] dark:text-[#ededed] tabular-nums outline-none"
+            />
+          </div>
+        </div>
+
+        {/* Protocol, DNSSEC & Security */}
+        <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
+          <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+            {t("settingsProtocolSecurityTitle")}
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.ecsEnabled}
+                onChange={(e) => props.onEcsEnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsEcsLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.dnssecEnabled}
+                onChange={(e) => props.onDnssecEnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsDnssecLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.dnsRebindingProtection}
+                onChange={(e) => props.onDnsRebindingProtectionChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsDnsRebindingLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.blockAnyQueries}
+                onChange={(e) => props.onBlockAnyQueriesChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsBlockAnyLabel")}
+            </label>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsEcsCustomIpLabel")}
+              </label>
+              <input
+                type="text"
+                placeholder="203.0.113.0/24"
+                value={props.ecsCustomIp}
+                onInput={(e) => props.onEcsCustomIpChange(e.currentTarget.value)}
+                class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+              />
+            </div>
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsEcsV4PrefixLabel")}
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={32}
+                value={props.ecsIpv4Prefix}
+                onInput={(e) => props.onEcsIpv4PrefixChange(Number(e.currentTarget.value))}
+                class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm text-[#171717] dark:text-[#ededed] tabular-nums outline-none"
+              />
+            </div>
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsEcsV6PrefixLabel")}
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={128}
+                value={props.ecsIpv6Prefix}
+                onInput={(e) => props.onEcsIpv6PrefixChange(Number(e.currentTarget.value))}
+                class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm text-[#171717] dark:text-[#ededed] tabular-nums outline-none"
+              />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+              {t("settingsTrustedProxiesLabel")}
+            </label>
+            <textarea
+              rows={2}
+              spellcheck={false}
+              placeholder="127.0.0.1/32"
+              value={props.trustedProxiesText}
+              onInput={(e) => props.onTrustedProxiesChange(e.currentTarget.value)}
+              class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-2.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+            />
+          </div>
+        </div>
+
+        {/* LAN & System Integration */}
+        <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
+          <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+            {t("settingsLanTitle")}
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.hostsEnabled}
+                onChange={(e) => props.onHostsEnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsHostsLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.privatePtrEnabled}
+                onChange={(e) => props.onPrivatePtrEnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsPrivatePtrLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.ddrEnabled}
+                onChange={(e) => props.onDdrEnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsDdrLabel")}
+            </label>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsHostsPathLabel")}
+              </label>
+              <input
+                type="text"
+                placeholder="/etc/hosts"
+                value={props.hostsPath}
+                onInput={(e) => props.onHostsPathChange(e.currentTarget.value)}
+                class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+              />
+            </div>
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsDdrHostnameLabel")}
+              </label>
+              <input
+                type="text"
+                placeholder="dns.example.com"
+                value={props.ddrHostname}
+                onInput={(e) => props.onDdrHostnameChange(e.currentTarget.value)}
+                class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+              />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+              {t("settingsPrivatePtrUpstreamsLabel")}
+            </label>
+            <textarea
+              rows={2}
+              spellcheck={false}
+              placeholder="udp://192.168.1.1:53"
+              value={props.privatePtrUpstreamsText}
+              onInput={(e) => props.onPrivatePtrUpstreamsChange(e.currentTarget.value)}
+              class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-2.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
             />
           </div>
         </div>

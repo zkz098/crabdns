@@ -49,6 +49,8 @@ fn bench_pipeline_handle_packet(c: &mut Criterion) {
             qname: "cached.example.com.".to_string(),
             qtype: u16::from(RecordType::A),
             qclass: 1,
+            ecs_subnet: None,
+            dnssec_do: false,
         },
         build_cached_response("cached.example.com."),
         300,

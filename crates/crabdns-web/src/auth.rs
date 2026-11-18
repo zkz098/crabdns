@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -237,18 +237,11 @@ pub async fn auth_status(
 }
 
 fn login_client_ip(
+    trusted_proxies: &[String],
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: &HeaderMap,
 ) -> IpAddr {
-    if let Some(ip) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .and_then(|first| first.trim().parse::<IpAddr>().ok())
-    {
-        return ip;
-    }
-    connect_info.map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |Extension(ci)| ci.0.ip())
+    crate::proxy::extract_client_ip(connect_info, headers, trusted_proxies)
 }
 
 pub async fn login(
@@ -266,7 +259,7 @@ pub async fn login(
             .into_response();
     }
 
-    let client_ip = login_client_ip(connect_info, &headers);
+    let client_ip = login_client_ip(&cfg.trusted_proxies, connect_info, &headers);
     if let Some(retry_after) = state.login_limiter.check_locked(client_ip) {
         return (
             StatusCode::TOO_MANY_REQUESTS,

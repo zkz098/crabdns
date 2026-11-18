@@ -33,7 +33,7 @@ crabdns-storage = { path = "crates/crabdns-storage" }
 crabdns-web = { path = "crates/crabdns-web" }
 
 tokio = { version = "1", features = ["full"] }
-hickory-proto = "0.26"
+hickory-proto = { version = "0.26", features = ["dnssec-ring"] }
 moka = { version = "0.12", features = ["sync"] }
 arc-swap = "1"
 fjall = "3"

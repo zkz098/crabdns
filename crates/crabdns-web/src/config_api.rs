@@ -3,7 +3,8 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use crabdns_core::{BlockMode, Config, SplitDnsRule, UpstreamStrategy};
+use crabdns_core::acl::parse_cidr_list;
+use crabdns_core::{BlockMode, Config, DdrConfig, SplitDnsRule, UpstreamStrategy};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -37,6 +38,20 @@ pub struct ConfigResponse {
     pub cname_cloaking_blocking: bool,
     pub doh_enabled: bool,
     pub allow_private_subscriptions: bool,
+    pub ecs_enabled: bool,
+    pub ecs_custom_ip: Option<String>,
+    pub ecs_ipv4_prefix: u8,
+    pub ecs_ipv6_prefix: u8,
+    pub dnssec_enabled: bool,
+    pub hosts_enabled: bool,
+    pub hosts_path: Option<String>,
+    pub private_ptr_enabled: bool,
+    pub private_ptr_upstreams: Vec<String>,
+    pub ddr_enabled: bool,
+    pub ddr_hostname: Option<String>,
+    pub dns_rebinding_protection: bool,
+    pub block_any_queries: bool,
+    pub trusted_proxies: Vec<String>,
 }
 
 impl From<&Config> for ConfigResponse {
@@ -63,6 +78,20 @@ impl From<&Config> for ConfigResponse {
             cname_cloaking_blocking: cfg.cname_cloaking_blocking,
             doh_enabled: cfg.doh_enabled,
             allow_private_subscriptions: cfg.allow_private_subscriptions,
+            ecs_enabled: cfg.ecs_enabled,
+            ecs_custom_ip: cfg.ecs_custom_ip.clone(),
+            ecs_ipv4_prefix: cfg.ecs_ipv4_prefix,
+            ecs_ipv6_prefix: cfg.ecs_ipv6_prefix,
+            dnssec_enabled: cfg.dnssec_enabled,
+            hosts_enabled: cfg.hosts_enabled,
+            hosts_path: cfg.hosts_path.clone(),
+            private_ptr_enabled: cfg.private_ptr_enabled,
+            private_ptr_upstreams: cfg.private_ptr_upstreams.clone(),
+            ddr_enabled: cfg.ddr_enabled,
+            ddr_hostname: cfg.ddr_hostname.clone(),
+            dns_rebinding_protection: cfg.dns_rebinding_protection,
+            block_any_queries: cfg.block_any_queries,
+            trusted_proxies: cfg.trusted_proxies.clone(),
         }
     }
 }
@@ -99,6 +128,34 @@ pub struct ConfigUpdatePayload {
     pub doh_enabled: Option<bool>,
     #[serde(default)]
     pub allow_private_subscriptions: Option<bool>,
+    #[serde(default)]
+    pub ecs_enabled: Option<bool>,
+    #[serde(default)]
+    pub ecs_custom_ip: Option<String>,
+    #[serde(default)]
+    pub ecs_ipv4_prefix: Option<u8>,
+    #[serde(default)]
+    pub ecs_ipv6_prefix: Option<u8>,
+    #[serde(default)]
+    pub dnssec_enabled: Option<bool>,
+    #[serde(default)]
+    pub hosts_enabled: Option<bool>,
+    #[serde(default)]
+    pub hosts_path: Option<String>,
+    #[serde(default)]
+    pub private_ptr_enabled: Option<bool>,
+    #[serde(default)]
+    pub private_ptr_upstreams: Option<Vec<String>>,
+    #[serde(default)]
+    pub ddr_enabled: Option<bool>,
+    #[serde(default)]
+    pub ddr_hostname: Option<String>,
+    #[serde(default)]
+    pub dns_rebinding_protection: Option<bool>,
+    #[serde(default)]
+    pub block_any_queries: Option<bool>,
+    #[serde(default)]
+    pub trusted_proxies: Option<Vec<String>>,
 }
 
 pub async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
@@ -112,6 +169,27 @@ fn clean_string_list(items: Vec<String>) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+fn merge_opt_string(incoming: Option<String>, existing: Option<&str>) -> Option<String> {
+    match incoming {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        None => existing.map(str::to_string),
+    }
+}
+
+fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg.into() })),
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -170,16 +248,54 @@ pub async fn update_config(
     let allow_private_subscriptions = payload
         .allow_private_subscriptions
         .unwrap_or(current.allow_private_subscriptions);
+    let ecs_enabled = payload.ecs_enabled.unwrap_or(current.ecs_enabled);
+    let ecs_custom_ip = merge_opt_string(payload.ecs_custom_ip, current.ecs_custom_ip.as_deref());
+    let ecs_ipv4_prefix = payload.ecs_ipv4_prefix.unwrap_or(current.ecs_ipv4_prefix);
+    let ecs_ipv6_prefix = payload.ecs_ipv6_prefix.unwrap_or(current.ecs_ipv6_prefix);
+    let dnssec_enabled = payload.dnssec_enabled.unwrap_or(current.dnssec_enabled);
+    let hosts_enabled = payload.hosts_enabled.unwrap_or(current.hosts_enabled);
+    let hosts_path = merge_opt_string(payload.hosts_path, current.hosts_path.as_deref());
+    let private_ptr_enabled = payload
+        .private_ptr_enabled
+        .unwrap_or(current.private_ptr_enabled);
+    let private_ptr_upstreams = clean_string_list(
+        payload
+            .private_ptr_upstreams
+            .unwrap_or_else(|| current.private_ptr_upstreams.clone()),
+    );
+    let ddr_enabled = payload.ddr_enabled.unwrap_or(current.ddr_enabled);
+    let ddr_hostname = merge_opt_string(payload.ddr_hostname, current.ddr_hostname.as_deref());
+    let dns_rebinding_protection = payload
+        .dns_rebinding_protection
+        .unwrap_or(current.dns_rebinding_protection);
+    let block_any_queries = payload
+        .block_any_queries
+        .unwrap_or(current.block_any_queries);
+    let trusted_proxies = clean_string_list(
+        payload
+            .trusted_proxies
+            .unwrap_or_else(|| current.trusted_proxies.clone()),
+    );
+
+    if let Err(err) = parse_cidr_list(&trusted_proxies) {
+        return Err(bad_request(err.to_string()));
+    }
 
     if let Err(err) = state
         .app
         .pipeline
         .reload_acl(&allow_cidrs, &deny_cidrs, rate_limit_qps)
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        ));
+        return Err(bad_request(err.to_string()));
+    }
+
+    if let Err(err) = state.app.pipeline.reload_ecs(
+        ecs_enabled,
+        ecs_custom_ip.as_deref(),
+        ecs_ipv4_prefix,
+        ecs_ipv6_prefix,
+    ) {
+        return Err(bad_request(err.to_string()));
     }
 
     if let Err(err) = state.app.pipeline.reload_upstream_with_options(
@@ -188,10 +304,7 @@ pub async fn update_config(
         strategy,
         &bootstrap_dns,
     ) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        ));
+        return Err(bad_request(err.to_string()));
     }
 
     if let Err(err) = state.app.pipeline.reload_split_dns_with_bootstrap(
@@ -200,10 +313,28 @@ pub async fn update_config(
         strategy,
         &bootstrap_dns,
     ) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        ));
+        return Err(bad_request(err.to_string()));
+    }
+
+    if let Err(err) = state.app.pipeline.reload_private_ptr(
+        private_ptr_enabled,
+        &private_ptr_upstreams,
+        payload.upstream_timeout_ms,
+        strategy,
+        &bootstrap_dns,
+    ) {
+        return Err(bad_request(err.to_string()));
+    }
+
+    if hosts_enabled {
+        let resolved_hosts = hosts_path.as_deref().unwrap_or("/etc/hosts");
+        if let Err(err) = state
+            .app
+            .pipeline
+            .reload_hosts_from_path(std::path::Path::new(resolved_hosts))
+        {
+            tracing::warn!(path = %resolved_hosts, error = %err, "failed to load hosts file");
+        }
     }
 
     state.app.pipeline.set_block_mode(block_mode);
@@ -211,6 +342,20 @@ pub async fn update_config(
         .app
         .pipeline
         .set_cname_cloaking(cname_cloaking_blocking);
+    state.app.pipeline.set_dnssec_enabled(dnssec_enabled);
+    state.app.pipeline.set_hosts_enabled(hosts_enabled);
+    state
+        .app
+        .pipeline
+        .set_dns_rebinding_protection(dns_rebinding_protection);
+    state.app.pipeline.set_block_any_queries(block_any_queries);
+    state.app.pipeline.reload_ddr(DdrConfig {
+        enabled: ddr_enabled,
+        hostname: ddr_hostname.clone(),
+        dot_port: current.listen_dot.map(|a| a.port()),
+        doh_enabled,
+        doh_port: Some(current.listen_web.port()),
+    });
 
     let cache_changed = current.cache_size != payload.cache_size
         || current.optimistic_cache != payload.optimistic_cache;
@@ -237,6 +382,20 @@ pub async fn update_config(
     next.cname_cloaking_blocking = cname_cloaking_blocking;
     next.doh_enabled = doh_enabled;
     next.allow_private_subscriptions = allow_private_subscriptions;
+    next.ecs_enabled = ecs_enabled;
+    next.ecs_custom_ip = ecs_custom_ip;
+    next.ecs_ipv4_prefix = ecs_ipv4_prefix;
+    next.ecs_ipv6_prefix = ecs_ipv6_prefix;
+    next.dnssec_enabled = dnssec_enabled;
+    next.hosts_enabled = hosts_enabled;
+    next.hosts_path = hosts_path;
+    next.private_ptr_enabled = private_ptr_enabled;
+    next.private_ptr_upstreams = private_ptr_upstreams;
+    next.ddr_enabled = ddr_enabled;
+    next.ddr_hostname = ddr_hostname;
+    next.dns_rebinding_protection = dns_rebinding_protection;
+    next.block_any_queries = block_any_queries;
+    next.trusted_proxies = trusted_proxies;
 
     state.app.storage.save_config(&next).map_err(|err| {
         (

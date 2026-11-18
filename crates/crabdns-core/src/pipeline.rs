@@ -14,8 +14,17 @@ use ts_rs::TS;
 use crate::acl::{AccessController, AclDecision};
 use crate::cache::{CacheKey, DnsCache};
 use crate::config::{BlockMode, SplitDnsRule, UpstreamStrategy};
+use crate::dnssec::DnssecValidator;
+use crate::edns::{
+    EcsConfig, apply_ecs_to_message, has_dnssec_ok, resolve_ecs_subnet, set_dnssec_ok,
+};
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterEngine};
+use crate::lan::{
+    DdrConfig, HostsTable, PrivatePtrRouter, build_ddr_response, build_hosts_response,
+    is_ddr_query, is_private_ptr_domain,
+};
+use crate::security::{build_rfc8482_any_response, contains_rebinding_ip};
 use crate::split_dns::SplitUpstreamRouter;
 use crate::upstream::UpstreamPool;
 use crate::wire::{build_blocked_response, build_error_response, build_rewrite_response};
@@ -56,6 +65,24 @@ pub struct DnsPipeline {
     cname_cloaking: AtomicBool,
     pause_until_ms: AtomicU64,
     log_tx: Option<mpsc::Sender<QueryEvent>>,
+    ecs_config: ArcSwap<EcsConfig>,
+    dnssec_enabled: AtomicBool,
+    dnssec_validator: Arc<DnssecValidator>,
+    hosts_enabled: AtomicBool,
+    hosts_table: ArcSwap<HostsTable>,
+    private_ptr_router: ArcSwap<PrivatePtrRouter>,
+    ddr_config: ArcSwap<DdrConfig>,
+    dns_rebinding_protection: AtomicBool,
+    block_any_queries: AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+struct ForwardFlags {
+    paused: bool,
+    explicitly_allowed: bool,
+    dnssec_on: bool,
+    client_wants_do: bool,
 }
 
 fn block_mode_to_u8(mode: BlockMode) -> u8 {
@@ -92,6 +119,15 @@ impl DnsPipeline {
             cname_cloaking: AtomicBool::new(true),
             pause_until_ms: AtomicU64::new(0),
             log_tx,
+            ecs_config: ArcSwap::from_pointee(EcsConfig::default()),
+            dnssec_enabled: AtomicBool::new(false),
+            dnssec_validator: Arc::new(DnssecValidator::default()),
+            hosts_enabled: AtomicBool::new(false),
+            hosts_table: ArcSwap::from_pointee(HostsTable::default()),
+            private_ptr_router: ArcSwap::from_pointee(PrivatePtrRouter::default()),
+            ddr_config: ArcSwap::from_pointee(DdrConfig::default()),
+            dns_rebinding_protection: AtomicBool::new(false),
+            block_any_queries: AtomicBool::new(false),
         }
     }
 
@@ -148,8 +184,7 @@ impl DnsPipeline {
         strategy: UpstreamStrategy,
         bootstrap_dns: &[String],
     ) -> Result<()> {
-        let next =
-            UpstreamPool::new_with_bootstrap(specs, timeout_ms, strategy, bootstrap_dns)?;
+        let next = UpstreamPool::new_with_bootstrap(specs, timeout_ms, strategy, bootstrap_dns)?;
         self.upstream.store(Arc::new(next));
         Ok(())
     }
@@ -189,6 +224,64 @@ impl DnsPipeline {
         self.cname_cloaking.load(Ordering::Relaxed)
     }
 
+    pub fn reload_ecs(
+        &self,
+        enabled: bool,
+        custom_ip: Option<&str>,
+        ipv4_prefix: u8,
+        ipv6_prefix: u8,
+    ) -> Result<()> {
+        let cfg = EcsConfig::from_parts(enabled, custom_ip, ipv4_prefix, ipv6_prefix)?;
+        self.ecs_config.store(Arc::new(cfg));
+        Ok(())
+    }
+
+    pub fn set_dnssec_enabled(&self, enabled: bool) {
+        self.dnssec_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_hosts_enabled(&self, enabled: bool) {
+        self.hosts_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn reload_hosts_table(&self, table: HostsTable) {
+        self.hosts_table.store(Arc::new(table));
+    }
+
+    pub fn reload_hosts_from_path(&self, path: &std::path::Path) -> Result<usize> {
+        let table = HostsTable::from_file(path)?;
+        let count = table.len_entries();
+        self.hosts_table.store(Arc::new(table));
+        Ok(count)
+    }
+
+    pub fn reload_private_ptr(
+        &self,
+        enabled: bool,
+        upstreams: &[String],
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+        bootstrap_dns: &[String],
+    ) -> Result<()> {
+        let router =
+            PrivatePtrRouter::new(enabled, upstreams, timeout_ms, strategy, bootstrap_dns)?;
+        self.private_ptr_router.store(Arc::new(router));
+        Ok(())
+    }
+
+    pub fn reload_ddr(&self, cfg: DdrConfig) {
+        self.ddr_config.store(Arc::new(cfg));
+    }
+
+    pub fn set_dns_rebinding_protection(&self, enabled: bool) {
+        self.dns_rebinding_protection
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_block_any_queries(&self, enabled: bool) {
+        self.block_any_queries.store(enabled, Ordering::Relaxed);
+    }
+
     pub fn pause_blocking(&self, duration_secs: Option<u64>) {
         let until = match duration_secs {
             Some(secs) => now_epoch_ms().saturating_add(secs.saturating_mul(1000)),
@@ -221,6 +314,23 @@ impl DnsPipeline {
         self.blocking_status().0
     }
 
+    fn resolve_upstream_with_source(
+        &self,
+        domain: &str,
+        qtype: RecordType,
+    ) -> (Arc<UpstreamPool>, bool) {
+        if qtype == RecordType::PTR && is_private_ptr_domain(domain) {
+            let ptr_router = self.private_ptr_router.load();
+            if let Some(pool) = &ptr_router.pool {
+                return (Arc::clone(pool), true);
+            }
+        }
+        if let Some(pool) = self.split_router.load().resolve(domain) {
+            return (pool, true);
+        }
+        (self.upstream.load_full(), false)
+    }
+
     fn resolve_upstream(&self, domain: &str) -> Arc<UpstreamPool> {
         self.split_router
             .load()
@@ -228,6 +338,66 @@ impl DnsPipeline {
             .unwrap_or_else(|| self.upstream.load_full())
     }
 
+    fn check_local_interceptors(
+        &self,
+        request: &Message,
+        client_addr: SocketAddr,
+        clean_domain: &str,
+        qtype: RecordType,
+        start: Instant,
+    ) -> Result<Option<Vec<u8>>> {
+        if self.block_any_queries.load(Ordering::Relaxed) && qtype == RecordType::ANY {
+            let resp = build_rfc8482_any_response(request)?;
+            self.emit_log(
+                client_addr,
+                clean_domain.to_string(),
+                qtype,
+                QueryOutcome::Blocked,
+                Some("security:any-query".to_string()),
+                None,
+                start,
+                "NOERROR",
+            );
+            return Ok(Some(resp));
+        }
+
+        let ddr = self.ddr_config.load();
+        if ddr.enabled && is_ddr_query(clean_domain, qtype) {
+            let resp = build_ddr_response(request, &ddr)?;
+            self.emit_log(
+                client_addr,
+                clean_domain.to_string(),
+                qtype,
+                QueryOutcome::Rewritten,
+                Some("ddr:resolver".to_string()),
+                None,
+                start,
+                "NOERROR",
+            );
+            return Ok(Some(resp));
+        }
+
+        if self.hosts_enabled.load(Ordering::Relaxed)
+            && let Some(matched) = self.hosts_table.load().lookup(clean_domain, qtype)
+        {
+            let resp = build_hosts_response(request, &matched)?;
+            self.emit_log(
+                client_addr,
+                clean_domain.to_string(),
+                qtype,
+                QueryOutcome::Rewritten,
+                Some("hosts:local".to_string()),
+                None,
+                start,
+                "NOERROR",
+            );
+            return Ok(Some(resp));
+        }
+
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_lines)]
     pub async fn handle_packet(
         &self,
         raw_query: &[u8],
@@ -250,6 +420,12 @@ impl DnsPipeline {
             self.enforce_acl(&request, client_addr, &clean_domain, qtype, start)?
         {
             return Ok(refused);
+        }
+
+        if let Some(local_resp) =
+            self.check_local_interceptors(&request, client_addr, &clean_domain, qtype, start)?
+        {
+            return Ok(local_resp);
         }
 
         let mode = self.block_mode();
@@ -289,16 +465,42 @@ impl DnsPipeline {
             FilterAction::Block | FilterAction::Allow => {}
         }
 
+        if qtype == RecordType::PTR && is_private_ptr_domain(&clean_domain) {
+            let ptr_router = self.private_ptr_router.load();
+            if ptr_router.enabled && ptr_router.pool.is_none() {
+                let resp = build_error_response(&request, ResponseCode::NXDomain)?;
+                self.emit_log(
+                    client_addr,
+                    clean_domain,
+                    qtype,
+                    QueryOutcome::Blocked,
+                    Some("lan:private-ptr".to_string()),
+                    None,
+                    start,
+                    "NXDOMAIN",
+                );
+                return Ok(resp);
+            }
+        }
+
+        let ecs_subnet = resolve_ecs_subnet(&self.ecs_config.load(), client_addr.ip());
+        let dnssec_on = self.dnssec_enabled.load(Ordering::Relaxed);
+        let client_wants_do = has_dnssec_ok(&request);
+
         let cache_key = CacheKey {
             qname: qname.to_ascii_lowercase(),
             qtype: u16::from(qtype),
             qclass,
+            ecs_subnet,
+            dnssec_do: dnssec_on && client_wants_do,
         };
 
         let cache = self.cache.load();
         if let Some(hit) = cache.get(&cache_key, request.id) {
             if hit.is_stale {
-                self.spawn_background_refresh(raw_query.to_vec(), cache_key.clone());
+                let refresh_wire =
+                    Self::build_upstream_query(&request, raw_query, ecs_subnet, dnssec_on);
+                self.spawn_background_refresh(refresh_wire, cache_key.clone());
             }
             self.emit_log(
                 client_addr,
@@ -313,16 +515,23 @@ impl DnsPipeline {
             return Ok(hit.wire_bytes);
         }
 
+        let upstream_query = Self::build_upstream_query(&request, raw_query, ecs_subnet, dnssec_on);
+        let flags = ForwardFlags {
+            paused,
+            explicitly_allowed,
+            dnssec_on,
+            client_wants_do,
+        };
+
         self.forward_to_upstream(
             &request,
-            raw_query,
+            &upstream_query,
             client_addr,
             clean_domain,
             qtype,
             cache_key,
             decision.matched_rule,
-            paused,
-            explicitly_allowed,
+            flags,
             start,
         )
         .await
@@ -354,25 +563,88 @@ impl DnsPipeline {
         build_error_response(request, ResponseCode::Refused).map(Some)
     }
 
+    fn build_upstream_query(
+        request: &Message,
+        raw_query: &[u8],
+        ecs_subnet: Option<(std::net::IpAddr, u8)>,
+        dnssec_on: bool,
+    ) -> Vec<u8> {
+        if ecs_subnet.is_none() && !dnssec_on {
+            return raw_query.to_vec();
+        }
+        let mut msg = request.clone();
+        if let Some(subnet) = ecs_subnet {
+            apply_ecs_to_message(&mut msg, subnet);
+        }
+        if dnssec_on {
+            set_dnssec_ok(&mut msg);
+        }
+        msg.to_vec().unwrap_or_else(|_| raw_query.to_vec())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn forward_to_upstream(
         &self,
         request: &Message,
-        raw_query: &[u8],
+        upstream_query: &[u8],
         client_addr: SocketAddr,
         clean_domain: String,
         qtype: RecordType,
         cache_key: CacheKey,
         matched_rule: Option<String>,
-        paused: bool,
-        explicitly_allowed: bool,
+        flags: ForwardFlags,
         start: Instant,
     ) -> Result<Vec<u8>> {
-        let upstream = self.resolve_upstream(&clean_domain);
-        match upstream.exchange(raw_query).await {
-            Ok((resp_bytes, upstream_label)) => {
-                if !paused
-                    && !explicitly_allowed
+        let (upstream, is_local_route) = self.resolve_upstream_with_source(&clean_domain, qtype);
+        match upstream.exchange(upstream_query).await {
+            Ok((mut resp_bytes, upstream_label)) => {
+                if flags.dnssec_on {
+                    match self
+                        .dnssec_validator
+                        .validate_and_process(&resp_bytes, &upstream, flags.client_wants_do)
+                        .await
+                    {
+                        Ok(processed) => resp_bytes = processed,
+                        Err(err) => {
+                            tracing::warn!(domain = %clean_domain, error = %err, "DNSSEC validation failed");
+                            self.emit_log(
+                                client_addr,
+                                clean_domain,
+                                qtype,
+                                QueryOutcome::Error,
+                                Some("dnssec:bogus".to_string()),
+                                Some(upstream_label),
+                                start,
+                                "SERVFAIL",
+                            );
+                            return build_error_response(request, ResponseCode::ServFail);
+                        }
+                    }
+                }
+
+                if !flags.paused
+                    && !flags.explicitly_allowed
+                    && !is_local_route
+                    && self.dns_rebinding_protection.load(Ordering::Relaxed)
+                    && contains_rebinding_ip(&resp_bytes)
+                {
+                    let (blocked_bytes, rcode) =
+                        build_blocked_response(request, qtype, self.block_mode())?;
+                    self.emit_log(
+                        client_addr,
+                        clean_domain,
+                        qtype,
+                        QueryOutcome::Blocked,
+                        Some("security:dns-rebinding".to_string()),
+                        Some(upstream_label),
+                        start,
+                        rcode,
+                    );
+                    return Ok(blocked_bytes);
+                }
+
+                if !flags.paused
+                    && !flags.explicitly_allowed
                     && self.cname_cloaking()
                     && let Some((blocked_bytes, rule, rcode)) =
                         self.check_cname_cloaking(request, &resp_bytes, qtype)?

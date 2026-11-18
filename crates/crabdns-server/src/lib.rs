@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use crabdns_core::{Config, DnsCache, DnsPipeline, FilterEngine, QueryEvent, UpstreamPool};
+use crabdns_core::{
+    Config, DdrConfig, DnsCache, DnsPipeline, FilterEngine, QueryEvent, UpstreamPool,
+};
 use crabdns_storage::{StorageEngine, spawn_log_sink};
 use crabdns_web::{AppState, build_router};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -24,6 +26,7 @@ pub struct RunningServer {
     dot_task: Option<JoinHandle<()>>,
     web_task: JoinHandle<()>,
     sub_refresh_task: JoinHandle<()>,
+    hosts_watch_task: JoinHandle<()>,
     sink_handle: JoinHandle<()>,
 }
 
@@ -38,6 +41,7 @@ impl RunningServer {
         }
         self.web_task.abort();
         self.sub_refresh_task.abort();
+        self.hosts_watch_task.abort();
 
         for task in self.udp_tasks {
             let _ = task.await;
@@ -48,6 +52,7 @@ impl RunningServer {
         }
         let _ = self.web_task.await;
         let _ = self.sub_refresh_task.await;
+        let _ = self.hosts_watch_task.await;
 
         drop(self.pipeline);
         let _ = self.sink_handle.await;
@@ -74,6 +79,20 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.cname_cloaking_blocking = saved_cfg.cname_cloaking_blocking;
     config.doh_enabled = saved_cfg.doh_enabled;
     config.allow_private_subscriptions = saved_cfg.allow_private_subscriptions;
+    config.ecs_enabled = saved_cfg.ecs_enabled;
+    config.ecs_custom_ip = saved_cfg.ecs_custom_ip;
+    config.ecs_ipv4_prefix = saved_cfg.ecs_ipv4_prefix;
+    config.ecs_ipv6_prefix = saved_cfg.ecs_ipv6_prefix;
+    config.dnssec_enabled = saved_cfg.dnssec_enabled;
+    config.hosts_enabled = saved_cfg.hosts_enabled;
+    config.hosts_path = saved_cfg.hosts_path;
+    config.private_ptr_enabled = saved_cfg.private_ptr_enabled;
+    config.private_ptr_upstreams = saved_cfg.private_ptr_upstreams;
+    config.ddr_enabled = saved_cfg.ddr_enabled;
+    config.ddr_hostname = saved_cfg.ddr_hostname;
+    config.dns_rebinding_protection = saved_cfg.dns_rebinding_protection;
+    config.block_any_queries = saved_cfg.block_any_queries;
+    config.trusted_proxies = saved_cfg.trusted_proxies;
 }
 
 #[allow(clippy::too_many_lines)]
@@ -124,6 +143,36 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         current_cfg.upstream_strategy,
         &current_cfg.bootstrap_dns,
     )?;
+    pipeline.reload_ecs(
+        current_cfg.ecs_enabled,
+        current_cfg.ecs_custom_ip.as_deref(),
+        current_cfg.ecs_ipv4_prefix,
+        current_cfg.ecs_ipv6_prefix,
+    )?;
+    pipeline.set_dnssec_enabled(current_cfg.dnssec_enabled);
+    pipeline.set_hosts_enabled(current_cfg.hosts_enabled);
+    if current_cfg.hosts_enabled {
+        let resolved_hosts = current_cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");
+        if let Err(err) = pipeline.reload_hosts_from_path(std::path::Path::new(resolved_hosts)) {
+            tracing::warn!(path = %resolved_hosts, error = %err, "failed to load hosts file");
+        }
+    }
+    pipeline.reload_private_ptr(
+        current_cfg.private_ptr_enabled,
+        &current_cfg.private_ptr_upstreams,
+        current_cfg.upstream_timeout_ms,
+        current_cfg.upstream_strategy,
+        &current_cfg.bootstrap_dns,
+    )?;
+    pipeline.reload_ddr(DdrConfig {
+        enabled: current_cfg.ddr_enabled,
+        hostname: current_cfg.ddr_hostname.clone(),
+        dot_port: current_cfg.listen_dot.map(|a| a.port()),
+        doh_enabled: current_cfg.doh_enabled,
+        doh_port: Some(current_cfg.listen_web.port()),
+    });
+    pipeline.set_dns_rebinding_protection(current_cfg.dns_rebinding_protection);
+    pipeline.set_block_any_queries(current_cfg.block_any_queries);
 
     let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;
     let dns_addr = tcp_listener.local_addr()?;
@@ -226,6 +275,37 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         }
     });
 
+    let hosts_config = Arc::clone(&config);
+    let hosts_pipeline = Arc::clone(&pipeline);
+    let hosts_watch_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut last_mtime: Option<std::time::SystemTime> = None;
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let cfg = hosts_config.load();
+            if !cfg.hosts_enabled {
+                last_mtime = None;
+                continue;
+            }
+            let path_str = cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");
+            let path = std::path::Path::new(path_str);
+            let Ok(meta) = tokio::fs::metadata(path).await else {
+                continue;
+            };
+            let Ok(mtime) = meta.modified() else {
+                continue;
+            };
+            if last_mtime != Some(mtime) {
+                if let Err(err) = hosts_pipeline.reload_hosts_from_path(path) {
+                    tracing::warn!(path = %path_str, error = %err, "failed to reload hosts file");
+                } else {
+                    last_mtime = Some(mtime);
+                }
+            }
+        }
+    });
+
     Ok(RunningServer {
         dns_addr,
         web_addr,
@@ -237,6 +317,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         dot_task,
         web_task,
         sub_refresh_task,
+        hosts_watch_task,
         sink_handle,
     })
 }
@@ -247,7 +328,8 @@ fn bind_udp_sockets(addr: SocketAddr, count: usize) -> anyhow::Result<Vec<Arc<Ud
         let mut sockets = Vec::with_capacity(count);
         for _ in 0..count {
             let domain = socket2::Domain::for_address(addr);
-            let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+            let sock =
+                socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
             sock.set_reuse_address(true)?;
             sock.set_reuse_port(true)?;
             sock.set_nonblocking(true)?;

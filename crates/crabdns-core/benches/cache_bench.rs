@@ -23,6 +23,8 @@ fn bench_cache_operations(c: &mut Criterion) {
                 qname: format!("host-{i}.example.com."),
                 qtype: 1,
                 qclass: 1,
+                ecs_subnet: None,
+                dnssec_do: false,
             },
             wire.clone(),
             300,
@@ -33,11 +35,15 @@ fn bench_cache_operations(c: &mut Criterion) {
         qname: "host-2500.example.com.".to_string(),
         qtype: 1,
         qclass: 1,
+        ecs_subnet: None,
+        dnssec_do: false,
     };
     let miss_key = CacheKey {
         qname: "uncached.example.org.".to_string(),
         qtype: 1,
         qclass: 1,
+        ecs_subnet: None,
+        dnssec_do: false,
     };
 
     let mut group = c.benchmark_group("dns_cache");

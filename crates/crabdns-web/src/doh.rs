@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Extension, Query, State};
@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::RouterState;
+use crate::proxy::extract_client_ip;
 
 const DNS_MESSAGE_MIME: &str = "application/dns-message";
 const MAX_DOH_PACKET_BYTES: usize = 65_535;
@@ -31,7 +32,8 @@ pub async fn doh_get(
     let Some(packet) = decode_base64url(encoded) else {
         return (StatusCode::BAD_REQUEST, "invalid base64url 'dns' parameter").into_response();
     };
-    handle_doh_packet(&state, &packet, client_addr(connect_info, &headers)).await
+    let client = client_addr(&state, connect_info, &headers);
+    handle_doh_packet(&state, &packet, client).await
 }
 
 pub async fn doh_post(
@@ -56,7 +58,8 @@ pub async fn doh_post(
                 .into_response();
         }
     }
-    handle_doh_packet(&state, &body, client_addr(connect_info, &headers)).await
+    let client = client_addr(&state, connect_info, &headers);
+    handle_doh_packet(&state, &body, client).await
 }
 
 async fn handle_doh_packet(state: &RouterState, packet: &[u8], client: SocketAddr) -> Response {
@@ -78,21 +81,12 @@ async fn handle_doh_packet(state: &RouterState, packet: &[u8], client: SocketAdd
 }
 
 fn client_addr(
+    state: &RouterState,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: &HeaderMap,
 ) -> SocketAddr {
-    if let Some(ip) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .and_then(|first| first.trim().parse::<IpAddr>().ok())
-    {
-        return SocketAddr::new(ip, 0);
-    }
-    connect_info.map_or_else(
-        || SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        |Extension(ci)| ci.0,
-    )
+    let trusted = &state.app.config.load().trusted_proxies;
+    SocketAddr::new(extract_client_ip(connect_info, headers, trusted), 0)
 }
 
 pub fn decode_base64url(input: &str) -> Option<Vec<u8>> {

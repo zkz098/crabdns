@@ -21,6 +21,7 @@ pub mod config_api;
 pub mod controls;
 pub mod doh;
 pub mod metrics;
+pub mod proxy;
 pub mod subscriptions;
 
 #[derive(Embed)]

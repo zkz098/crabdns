@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,8 @@ pub struct CacheKey {
     pub qname: String,
     pub qtype: u16,
     pub qclass: u16,
+    pub ecs_subnet: Option<(IpAddr, u8)>,
+    pub dnssec_do: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +169,8 @@ mod tests {
             qname: "example.com.".to_string(),
             qtype: 1,
             qclass: 1,
+            ecs_subnet: None,
+            dnssec_do: false,
         };
         cache.insert(key.clone(), vec![0x00, 0x01, 0x81, 0x80], 60);
 
@@ -181,6 +186,8 @@ mod tests {
             qname: "stale.example.".to_string(),
             qtype: 1,
             qclass: 1,
+            ecs_subnet: None,
+            dnssec_do: false,
         };
         let expired = CachedEntry {
             wire_bytes: vec![0x00, 0x01, 0x81, 0x80],
