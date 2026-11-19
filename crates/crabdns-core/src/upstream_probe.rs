@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::future::join_all;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
-use hickory_proto::rr::rdata::opt::EdnsOption;
+use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption, NSIDPayload};
 use hickory_proto::rr::rdata::svcb::{SVCB, SvcParamKey, SvcParamValue};
 use hickory_proto::rr::{Name, RData, RecordType};
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,9 @@ use crate::upstream::{
 const MAX_DOH_RESPONSE_BYTES: usize = 65_535;
 const PROBE_EDNS_UDP_SIZE: u16 = 1232;
 const PROBE_ECS_SUBNET: (IpAddr, u8) = (IpAddr::V4(Ipv4Addr::new(203, 0, 113, 0)), 24);
+const EDNS_CODE_COOKIE: u16 = 10;
+const EDNS_CODE_PADDING: u16 = 12;
+const EDNS_CODE_EDE: u16 = 15;
 const DNSSEC_BOGUS_DOMAIN: &str = "dnssec-failed.org.";
 const ECS_PROBE_DOMAIN: &str = "www.bing.com.";
 const DDR_PROBE_DOMAIN: &str = "_dns.resolver.arpa.";
@@ -58,6 +61,11 @@ pub struct UpstreamCapabilities {
     pub ecs: Option<bool>,
     pub nxdomain_hijack: Option<bool>,
     pub ddr_upgrades: Vec<String>,
+    pub nsid: Option<String>,
+    pub dns_cookies: Option<bool>,
+    pub edns_padding: Option<bool>,
+    pub ede: Option<bool>,
+    pub ede_detail: Option<String>,
     pub error: Option<String>,
 }
 
@@ -80,6 +88,11 @@ impl UpstreamCapabilities {
             ecs: None,
             nxdomain_hijack: None,
             ddr_upgrades: Vec::new(),
+            nsid: None,
+            dns_cookies: None,
+            edns_padding: None,
+            ede: None,
+            ede_detail: None,
             error: Some(error),
         }
     }
@@ -162,8 +175,16 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
     let encrypted = matches!(protocol, UpstreamProtocol::Dot | UpstreamProtocol::Doh);
     let label = endpoint_label(&endpoint);
 
-    // 1. Primary probe: `.` DNSKEY with EDNS0 + DO=1
-    let primary_wire = match build_probe_query(".", RecordType::DNSKEY, true, true, None) {
+    // 1. Primary probe: `.` DNSKEY with EDNS0 + DO=1 + NSID + Client Cookie
+    let client_cookie = make_client_cookie();
+    let primary_opts = ProbeQueryOptions {
+        with_edns: true,
+        with_do: true,
+        with_nsid: true,
+        client_cookie: Some(client_cookie),
+        ecs_subnet: None,
+    };
+    let primary_wire = match build_probe_query(".", RecordType::DNSKEY, primary_opts) {
         Ok(w) => w,
         Err(err) => return UpstreamCapabilities::failed(input, label, protocol, err.to_string()),
     };
@@ -173,7 +194,9 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
         Err(primary_err) => {
             // If EDNS query failed at transport/timeout level, try a plain query once
             // before declaring unreachable (some legacy middleboxes drop EDNS packets).
-            let Ok(plain_wire) = build_probe_query(".", RecordType::NS, false, false, None) else {
+            let Ok(plain_wire) =
+                build_probe_query(".", RecordType::NS, ProbeQueryOptions::default())
+            else {
                 return UpstreamCapabilities::failed(
                     input,
                     label,
@@ -200,7 +223,7 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
         }
     };
 
-    let Ok(primary_msg) = Message::from_vec(&primary_exchange.wire) else {
+    let Ok(mut primary_msg) = Message::from_vec(&primary_exchange.wire) else {
         return UpstreamCapabilities::failed(
             input,
             label,
@@ -211,6 +234,36 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
 
     let mut latency_ms = primary_exchange.latency_ms;
     let transport_detail = primary_exchange.transport_detail;
+    let mut nsid = extract_nsid(&primary_msg);
+    let mut padding_seen = has_edns_padding(&primary_msg);
+    let mut ede_detail = extract_ede(&primary_msg);
+    let mut cookies_supported = has_valid_server_cookie(&primary_msg, client_cookie);
+
+    // RFC 7873: BADCOOKIE proves cookie support; re-query without cookie to inspect DNSKEY/RRSIG.
+    if primary_msg.response_code == ResponseCode::BADCOOKIE {
+        cookies_supported = true;
+        let retry_opts = ProbeQueryOptions {
+            with_edns: true,
+            with_do: true,
+            with_nsid: true,
+            client_cookie: None,
+            ecs_subnet: None,
+        };
+        if let Ok(retry_wire) = build_probe_query(".", RecordType::DNSKEY, retry_opts)
+            && let Ok(retry_meta) = exchange_once(ctx, &endpoint, &retry_wire).await
+            && let Ok(retry_msg) = Message::from_vec(&retry_meta.wire)
+        {
+            if nsid.is_none() {
+                nsid = extract_nsid(&retry_msg);
+            }
+            padding_seen |= has_edns_padding(&retry_msg);
+            if ede_detail.is_none() {
+                ede_detail = extract_ede(&retry_msg);
+            }
+            primary_msg = retry_msg;
+        }
+    }
+
     let mut recursion_available = Some(primary_msg.metadata.recursion_available);
 
     let edns_rejected = matches!(
@@ -221,7 +274,8 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
     let (edns, edns_udp_size, dnssec_aware, root_ad_bit) = if edns_rejected {
         // Confirm reachability & RA via non-EDNS query when server rejected EDNS
         if primary_msg.response_code != ResponseCode::NoError
-            && let Ok(plain_wire) = build_probe_query(".", RecordType::NS, false, false, None)
+            && let Ok(plain_wire) =
+                build_probe_query(".", RecordType::NS, ProbeQueryOptions::default())
             && let Ok(plain_meta) = exchange_once(ctx, &endpoint, &plain_wire).await
             && let Ok(plain_msg) = Message::from_vec(&plain_meta.wire)
         {
@@ -239,6 +293,13 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
             if let Ok(tcp_meta) = exchange_once(ctx, &tcp_ep, &primary_wire).await
                 && let Ok(tcp_msg) = Message::from_vec(&tcp_meta.wire)
             {
+                if nsid.is_none() {
+                    nsid = extract_nsid(&tcp_msg);
+                }
+                padding_seen |= has_edns_padding(&tcp_msg);
+                if ede_detail.is_none() {
+                    ede_detail = extract_ede(&tcp_msg);
+                }
                 tcp_msg
             } else {
                 primary_msg
@@ -252,11 +313,11 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
         (Some(true), udp_size, Some(aware), ad)
     };
 
-    // 2. Concurrent secondary probes: DNSSEC validating, NXDOMAIN hijack, ECS, DDR
+    // 2. Concurrent secondary probes: DNSSEC validating (+EDE), NXDOMAIN hijack, ECS, DDR
     let edns_supported = edns != Some(false);
     let probe_ddr_flag = !encrypted;
 
-    let (dnssec_validating, nxdomain_hijack, ecs, ddr_upgrades) = tokio::join!(
+    let (dnssec_probe, nxdomain_hijack, ecs, ddr_upgrades) = tokio::join!(
         probe_dnssec_validating(
             ctx,
             &endpoint,
@@ -268,6 +329,33 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
         probe_ecs(ctx, &endpoint, edns_supported),
         probe_ddr(ctx, &endpoint, probe_ddr_flag),
     );
+
+    if ede_detail.is_none() {
+        ede_detail = dnssec_probe.ede_detail;
+    }
+    padding_seen |= dnssec_probe.padding_seen;
+
+    let ede = if ede_detail.is_some() {
+        Some(true)
+    } else if dnssec_probe.saw_servfail {
+        Some(false)
+    } else {
+        None
+    };
+
+    let dns_cookies = if edns_supported {
+        Some(cookies_supported)
+    } else {
+        Some(false)
+    };
+
+    let edns_padding = if padding_seen {
+        Some(true)
+    } else if encrypted && edns_supported {
+        Some(false)
+    } else {
+        None
+    };
 
     UpstreamCapabilities {
         input,
@@ -281,10 +369,15 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
         edns,
         edns_udp_size,
         dnssec_aware,
-        dnssec_validating,
+        dnssec_validating: dnssec_probe.validating,
         ecs,
         nxdomain_hijack,
         ddr_upgrades,
+        nsid,
+        dns_cookies,
+        edns_padding,
+        ede,
+        ede_detail,
         error: None,
     }
 }
@@ -328,8 +421,20 @@ async fn finish_plain_only_probe(
         ecs: Some(false),
         nxdomain_hijack,
         ddr_upgrades,
+        nsid: None,
+        dns_cookies: Some(false),
+        edns_padding: None,
+        ede: Some(false),
+        ede_detail: None,
         error: None,
     }
+}
+
+struct DnssecValidatingProbe {
+    validating: Option<bool>,
+    saw_servfail: bool,
+    ede_detail: Option<String>,
+    padding_seen: bool,
 }
 
 async fn probe_dnssec_validating(
@@ -338,25 +443,60 @@ async fn probe_dnssec_validating(
     edns_supported: bool,
     is_aware: bool,
     root_ad_bit: bool,
-) -> Option<bool> {
+) -> DnssecValidatingProbe {
     if !edns_supported {
-        return Some(false);
+        return DnssecValidatingProbe {
+            validating: Some(false),
+            saw_servfail: false,
+            ede_detail: None,
+            padding_seen: false,
+        };
     }
-    let wire = build_probe_query(DNSSEC_BOGUS_DOMAIN, RecordType::A, true, true, None).ok()?;
+    let opts = ProbeQueryOptions {
+        with_edns: true,
+        with_do: true,
+        ..ProbeQueryOptions::default()
+    };
+    let Ok(wire) = build_probe_query(DNSSEC_BOGUS_DOMAIN, RecordType::A, opts) else {
+        return DnssecValidatingProbe {
+            validating: None,
+            saw_servfail: false,
+            ede_detail: None,
+            padding_seen: false,
+        };
+    };
+    let mut saw_servfail = false;
+    let mut ede_detail = None;
+    let mut padding_seen = false;
     if let Ok(meta) = exchange_once(ctx, endpoint, &wire).await
         && let Ok(resp) = Message::from_vec(&meta.wire)
     {
+        ede_detail = extract_ede(&resp);
+        padding_seen = has_edns_padding(&resp);
         if resp.response_code == ResponseCode::ServFail {
-            return Some(true);
+            saw_servfail = true;
+            return DnssecValidatingProbe {
+                validating: Some(true),
+                saw_servfail,
+                ede_detail,
+                padding_seen,
+            };
         }
         if resp.response_code == ResponseCode::NoError && !resp.answers.is_empty() {
-            return Some(false);
+            return DnssecValidatingProbe {
+                validating: Some(false),
+                saw_servfail,
+                ede_detail,
+                padding_seen,
+            };
         }
     }
-    if is_aware && root_ad_bit {
-        return Some(true);
+    DnssecValidatingProbe {
+        validating: (is_aware && root_ad_bit).then_some(true),
+        saw_servfail,
+        ede_detail,
+        padding_seen,
     }
-    None
 }
 
 async fn probe_nxdomain_hijack(ctx: &ProbeContext, endpoint: &UpstreamEndpoint) -> Option<bool> {
@@ -364,7 +504,7 @@ async fn probe_nxdomain_hijack(ctx: &ProbeContext, endpoint: &UpstreamEndpoint) 
         .duration_since(UNIX_EPOCH)
         .map_or(0xCAFE, |d| d.subsec_nanos());
     let domain = format!("crabdns-probe-{nonce:08x}.invalid.");
-    let wire = build_probe_query(&domain, RecordType::A, false, false, None).ok()?;
+    let wire = build_probe_query(&domain, RecordType::A, ProbeQueryOptions::default()).ok()?;
     let meta = exchange_once(ctx, endpoint, &wire).await.ok()?;
     let resp = Message::from_vec(&meta.wire).ok()?;
     match resp.response_code {
@@ -378,14 +518,12 @@ async fn probe_ecs(ctx: &ProbeContext, endpoint: &UpstreamEndpoint, enabled: boo
     if !enabled {
         return Some(false);
     }
-    let wire = build_probe_query(
-        ECS_PROBE_DOMAIN,
-        RecordType::A,
-        true,
-        false,
-        Some(PROBE_ECS_SUBNET),
-    )
-    .ok()?;
+    let opts = ProbeQueryOptions {
+        with_edns: true,
+        ecs_subnet: Some(PROBE_ECS_SUBNET),
+        ..ProbeQueryOptions::default()
+    };
+    let wire = build_probe_query(ECS_PROBE_DOMAIN, RecordType::A, opts).ok()?;
     let meta = exchange_once(ctx, endpoint, &wire).await.ok()?;
     let resp = Message::from_vec(&meta.wire).ok()?;
     if resp.response_code != ResponseCode::NoError {
@@ -404,7 +542,11 @@ async fn probe_ddr(ctx: &ProbeContext, endpoint: &UpstreamEndpoint, enabled: boo
     if !enabled {
         return Vec::new();
     }
-    let Ok(wire) = build_probe_query(DDR_PROBE_DOMAIN, RecordType::SVCB, true, false, None) else {
+    let opts = ProbeQueryOptions {
+        with_edns: true,
+        ..ProbeQueryOptions::default()
+    };
+    let Ok(wire) = build_probe_query(DDR_PROBE_DOMAIN, RecordType::SVCB, opts) else {
         return Vec::new();
     };
     let Ok(meta) = exchange_once(ctx, endpoint, &wire).await else {
@@ -514,13 +656,128 @@ fn has_rrsig(msg: &Message) -> bool {
         .any(|rec| rec.record_type() == RecordType::RRSIG)
 }
 
-fn build_probe_query(
-    domain: &str,
-    qtype: RecordType,
+#[derive(Debug, Default, Clone, Copy)]
+struct ProbeQueryOptions {
     with_edns: bool,
     with_do: bool,
+    with_nsid: bool,
+    client_cookie: Option<[u8; 8]>,
     ecs_subnet: Option<(IpAddr, u8)>,
-) -> Result<Vec<u8>> {
+}
+
+fn make_client_cookie() -> [u8; 8] {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0x0123_4567_89ab_cdef_u128, |d| d.as_nanos());
+    let val = (nanos as u64) ^ 0xA5A5_5A5A_C3C3_3C3C;
+    val.to_be_bytes()
+}
+
+fn extract_nsid(msg: &Message) -> Option<String> {
+    let edns = msg.edns.as_ref()?;
+    for (code, opt) in edns.options().as_ref() {
+        let bytes = match (code, opt) {
+            (_, EdnsOption::NSID(payload)) => payload.as_ref(),
+            (EdnsCode::NSID, EdnsOption::Unknown(_, data)) => data.as_slice(),
+            _ => continue,
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() && trimmed.chars().all(|c| !c.is_control()) {
+                return Some(trimmed.to_string());
+            }
+        }
+        let mut hex = String::with_capacity(2 + bytes.len() * 2);
+        hex.push_str("0x");
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(&mut hex, "{b:02x}");
+        }
+        return Some(hex);
+    }
+    None
+}
+
+fn has_valid_server_cookie(msg: &Message, client_cookie: [u8; 8]) -> bool {
+    msg.edns.as_ref().is_some_and(|edns| {
+        edns.options()
+            .as_ref()
+            .iter()
+            .any(|(code, opt)| match (code, opt) {
+                (EdnsCode::Cookie, EdnsOption::Unknown(_, data))
+                | (_, EdnsOption::Unknown(EDNS_CODE_COOKIE, data)) => {
+                    data.len() >= 16 && data.len() <= 40 && data.starts_with(&client_cookie)
+                }
+                _ => false,
+            })
+    })
+}
+
+fn has_edns_padding(msg: &Message) -> bool {
+    msg.edns.as_ref().is_some_and(|edns| {
+        edns.options().as_ref().iter().any(|(code, opt)| {
+            matches!(code, EdnsCode::Padding)
+                || matches!(opt, EdnsOption::Unknown(EDNS_CODE_PADDING, _))
+        })
+    })
+}
+
+fn extract_ede(msg: &Message) -> Option<String> {
+    let edns = msg.edns.as_ref()?;
+    for (_, opt) in edns.options().as_ref() {
+        if let EdnsOption::Unknown(EDNS_CODE_EDE, data) = opt
+            && data.len() >= 2
+        {
+            let info_code = u16::from_be_bytes([data[0], data[1]]);
+            let label = ede_code_label(info_code);
+            let extra = std::str::from_utf8(&data[2..])
+                .ok()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            return Some(match (label, extra) {
+                (Some(name), Some(text)) => format!("{info_code}: {name} ({text})"),
+                (Some(name), None) => format!("{info_code}: {name}"),
+                (None, Some(text)) => format!("{info_code}: {text}"),
+                (None, None) => format!("EDE {info_code}"),
+            });
+        }
+    }
+    None
+}
+
+const fn ede_code_label(code: u16) -> Option<&'static str> {
+    match code {
+        0 => Some("Other Error"),
+        1 => Some("Unsupported DNSKEY Algorithm"),
+        2 => Some("Unsupported DS Digest Type"),
+        3 => Some("Stale Answer"),
+        4 => Some("Forged Answer"),
+        5 => Some("DNSSEC Indeterminate"),
+        6 => Some("DNSSEC Bogus"),
+        7 => Some("Signature Expired"),
+        8 => Some("Signature Not Yet Valid"),
+        9 => Some("DNSKEY Missing"),
+        10 => Some("RRSIGs Missing"),
+        11 => Some("No Zone Key Bit Set"),
+        12 => Some("NSEC Missing"),
+        13 => Some("Cached Error"),
+        14 => Some("Not Ready"),
+        15 => Some("Blocked"),
+        16 => Some("Censored"),
+        17 => Some("Filtered"),
+        18 => Some("Prohibited"),
+        20 => Some("Not Authoritative"),
+        21 => Some("Not Supported"),
+        22 => Some("No Reachable Authority"),
+        23 => Some("Network Error"),
+        _ => None,
+    }
+}
+
+fn build_probe_query(domain: &str, qtype: RecordType, opts: ProbeQueryOptions) -> Result<Vec<u8>> {
     let id = (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0x4242, |d| d.subsec_nanos())
@@ -532,13 +789,28 @@ fn build_probe_query(
     msg.metadata.recursion_desired = true;
     msg.add_query(Query::query(name, qtype));
 
-    if with_edns || with_do || ecs_subnet.is_some() {
+    let needs_edns = opts.with_edns
+        || opts.with_do
+        || opts.with_nsid
+        || opts.client_cookie.is_some()
+        || opts.ecs_subnet.is_some();
+
+    if needs_edns {
         let edns = msg.edns.get_or_insert_with(Edns::new);
         edns.set_max_payload(PROBE_EDNS_UDP_SIZE);
-        if with_do {
+        if opts.with_nsid
+            && let Ok(empty_nsid) = NSIDPayload::new(Vec::new())
+        {
+            edns.options_mut().insert(EdnsOption::NSID(empty_nsid));
+        }
+        if let Some(cookie) = opts.client_cookie {
+            edns.options_mut()
+                .insert(EdnsOption::Unknown(EDNS_CODE_COOKIE, cookie.to_vec()));
+        }
+        if opts.with_do {
             set_dnssec_ok(&mut msg);
         }
-        if let Some(subnet) = ecs_subnet {
+        if let Some(subnet) = opts.ecs_subnet {
             apply_ecs_to_message(&mut msg, subnet);
         }
     }
@@ -720,6 +992,10 @@ mod tests {
         hijack_nxdomain: bool,
         support_ddr: bool,
         recursion_available: bool,
+        nsid: Option<&'static str>,
+        support_cookies: bool,
+        support_padding: bool,
+        support_ede: bool,
     }
 
     #[allow(clippy::too_many_lines)]
@@ -746,6 +1022,40 @@ mod tests {
                         if req.edns.is_some() && cfg.support_edns {
                             let mut edns = Edns::new();
                             edns.set_max_payload(1232);
+                            if let Some(nsid_str) = cfg.nsid
+                                && req.edns.as_ref().is_some_and(|e| {
+                                    e.options().as_ref().iter().any(|(c, o)| {
+                                        matches!(c, EdnsCode::NSID)
+                                            || matches!(o, EdnsOption::NSID(_))
+                                    })
+                                })
+                                && let Ok(payload) = NSIDPayload::new(nsid_str.as_bytes().to_vec())
+                            {
+                                edns.options_mut().insert(EdnsOption::NSID(payload));
+                            }
+                            if cfg.support_cookies
+                                && let Some(client_bytes) = req.edns.as_ref().and_then(|e| {
+                                    e.options().as_ref().iter().find_map(|(_, o)| match o {
+                                        EdnsOption::Unknown(EDNS_CODE_COOKIE, data)
+                                            if data.len() >= 8 =>
+                                        {
+                                            Some(data[..8].to_vec())
+                                        }
+                                        _ => None,
+                                    })
+                                })
+                            {
+                                let mut full_cookie = client_bytes;
+                                full_cookie.extend_from_slice(&[
+                                    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                                ]);
+                                edns.options_mut()
+                                    .insert(EdnsOption::Unknown(EDNS_CODE_COOKIE, full_cookie));
+                            }
+                            if cfg.support_padding {
+                                edns.options_mut()
+                                    .insert(EdnsOption::Unknown(EDNS_CODE_PADDING, vec![0; 16]));
+                            }
                             if cfg.support_ecs
                                 && req.edns.as_ref().is_some_and(|e| {
                                     e.options()
@@ -790,6 +1100,14 @@ mod tests {
                         } else if qname == DNSSEC_BOGUS_DOMAIN {
                             if cfg.support_dnssec_validating {
                                 resp.metadata.response_code = ResponseCode::ServFail;
+                                if cfg.support_ede
+                                    && let Some(edns) = resp.edns.as_mut()
+                                {
+                                    let mut ede_data = 6_u16.to_be_bytes().to_vec();
+                                    ede_data.extend_from_slice(b"validation failure");
+                                    edns.options_mut()
+                                        .insert(EdnsOption::Unknown(EDNS_CODE_EDE, ede_data));
+                                }
                             } else {
                                 resp.metadata.response_code = ResponseCode::NoError;
                                 resp.add_answer(Record::from_rdata(
@@ -876,6 +1194,10 @@ mod tests {
             hijack_nxdomain: false,
             support_ddr: true,
             recursion_available: true,
+            nsid: Some("hkg-edge-01"),
+            support_cookies: true,
+            support_padding: true,
+            support_ede: true,
         })
         .await;
         let results = probe_upstreams(&[format!("udp://{addr}")], &[], 2000)
@@ -893,6 +1215,14 @@ mod tests {
         assert_eq!(cap.dnssec_validating, Some(true));
         assert_eq!(cap.ecs, Some(true));
         assert_eq!(cap.nxdomain_hijack, Some(false));
+        assert_eq!(cap.nsid.as_deref(), Some("hkg-edge-01"));
+        assert_eq!(cap.dns_cookies, Some(true));
+        assert_eq!(cap.edns_padding, Some(true));
+        assert_eq!(cap.ede, Some(true));
+        assert_eq!(
+            cap.ede_detail.as_deref(),
+            Some("6: DNSSEC Bogus (validation failure)")
+        );
         assert_eq!(
             cap.ddr_upgrades,
             vec![
@@ -912,6 +1242,10 @@ mod tests {
             hijack_nxdomain: true,
             support_ddr: false,
             recursion_available: false,
+            nsid: None,
+            support_cookies: false,
+            support_padding: false,
+            support_ede: false,
         })
         .await;
         let results = probe_upstreams(&[format!("udp://{addr}")], &[], 2000)
@@ -925,6 +1259,10 @@ mod tests {
         assert_eq!(cap.dnssec_validating, Some(false));
         assert_eq!(cap.ecs, Some(false));
         assert_eq!(cap.nxdomain_hijack, Some(true));
+        assert_eq!(cap.nsid, None);
+        assert_eq!(cap.dns_cookies, Some(false));
+        assert_eq!(cap.edns_padding, None);
+        assert_eq!(cap.ede, None);
         assert_eq!(cap.ddr_upgrades, Vec::<String>::new());
     }
 

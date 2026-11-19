@@ -297,6 +297,43 @@ export function SettingsView(props: SettingsViewProps) {
                             </span>
                           </Show>
 
+                          {/* NSID node identifier */}
+                          <Show when={cap.nsid}>
+                            {(nsid) => (
+                              <span
+                                title={`NSID: ${nsid()}`}
+                                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border border-indigo-500/20 max-w-[200px] truncate"
+                              >
+                                <span class="i-ri-server-line text-[10px] shrink-0" />
+                                <span class="truncate">{nsid()}</span>
+                              </span>
+                            )}
+                          </Show>
+
+                          {/* DNS Cookies (RFC 7873) */}
+                          <Show when={cap.dns_cookies === true}>
+                            <span class="px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                              {t("settingsCapCookies")}
+                            </span>
+                          </Show>
+
+                          {/* EDNS Padding (RFC 7830) */}
+                          <Show when={cap.edns_padding === true}>
+                            <span class="px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                              {t("settingsCapPadding")}
+                            </span>
+                          </Show>
+
+                          {/* Extended DNS Errors (RFC 8914) */}
+                          <Show when={cap.ede === true}>
+                            <span
+                              title={cap.ede_detail ?? "RFC 8914 Extended DNS Errors"}
+                              class="px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20"
+                            >
+                              {t("settingsCapEde")}
+                            </span>
+                          </Show>
+
                           {/* RA warning */}
                           <Show when={cap.recursion_available === false}>
                             <span class="px-2 py-0.5 rounded-md text-[11px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20">
