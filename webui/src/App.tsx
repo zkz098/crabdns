@@ -21,6 +21,7 @@ import type { RulesPayload } from "./types/RulesPayload";
 import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { StatsResponse } from "./types/StatsResponse";
 import type { TestRuleResponse } from "./types/TestRuleResponse";
+import type { UpstreamCapabilities } from "./types/UpstreamCapabilities";
 import type { UpstreamStatus } from "./types/UpstreamStatus";
 import type { UpstreamStrategy } from "./types/UpstreamStrategy";
 
@@ -48,6 +49,9 @@ export default function App() {
   const [upstreamStrategy, setUpstreamStrategy] = createSignal<UpstreamStrategy>("failover");
   const [upstreamHealth, setUpstreamHealth] = createSignal<UpstreamStatus[]>([]);
   const [probingUpstreams, setProbingUpstreams] = createSignal(false);
+  const [upstreamCapabilities, setUpstreamCapabilities] = createSignal<UpstreamCapabilities[]>([]);
+  const [probingCapabilities, setProbingCapabilities] = createSignal(false);
+  const [probeCapabilitiesError, setProbeCapabilitiesError] = createSignal("");
   const [blockMode, setBlockMode] = createSignal<BlockMode>("zero_ip");
   const [allowCidrsText, setAllowCidrsText] = createSignal("");
   const [denyCidrsText, setDenyCidrsText] = createSignal("");
@@ -387,6 +391,51 @@ export default function App() {
     } finally {
       setProbingUpstreams(false);
     }
+  }
+
+  async function probeUpstreamCapabilities() {
+    const upstreams = upstreamsText()
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (upstreams.length === 0) {
+      setUpstreamCapabilities([]);
+      return;
+    }
+    const bootstrap_dns = bootstrapDnsText()
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    setProbingCapabilities(true);
+    setProbeCapabilitiesError("");
+    try {
+      const res = await fetch("/api/upstreams/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          upstreams,
+          bootstrap_dns,
+          timeout_ms: upstreamTimeoutMs(),
+        }),
+      });
+      if (res.ok) {
+        setUpstreamCapabilities(await res.json());
+      } else {
+        const errBody = await res.json().catch(() => null);
+        setProbeCapabilitiesError(errBody?.error ?? t("rulesFailed"));
+      }
+    } catch {
+      setProbeCapabilitiesError(t("rulesNetworkError"));
+    } finally {
+      setProbingCapabilities(false);
+    }
+  }
+
+  function replaceUpstreamLine(fromInput: string, toUrl: string) {
+    const lines = upstreamsText().split("\n");
+    const next = lines.map((line) => (line.trim() === fromInput ? toUrl : line)).join("\n");
+    setUpstreamsText(next);
   }
 
   async function fetchAuthStatus(): Promise<boolean> {
@@ -731,6 +780,11 @@ export default function App() {
               upstreamHealth={upstreamHealth()}
               probingUpstreams={probingUpstreams()}
               onProbeUpstreams={probeUpstreams}
+              upstreamCapabilities={upstreamCapabilities()}
+              probingCapabilities={probingCapabilities()}
+              probeCapabilitiesError={probeCapabilitiesError()}
+              onProbeCapabilities={probeUpstreamCapabilities}
+              onReplaceUpstream={replaceUpstreamLine}
               blockMode={blockMode()}
               onBlockModeChange={setBlockMode}
               allowCidrsText={allowCidrsText()}

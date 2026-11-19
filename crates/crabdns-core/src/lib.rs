@@ -10,6 +10,7 @@ pub mod pipeline;
 pub mod security;
 pub mod split_dns;
 pub mod upstream;
+pub mod upstream_probe;
 mod wire;
 
 pub use acl::{AccessController, AclDecision, IpNet};
@@ -23,3 +24,4 @@ pub use lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter};
 pub use pipeline::{DnsPipeline, QueryEvent, QueryOutcome};
 pub use split_dns::SplitUpstreamRouter;
 pub use upstream::{UpstreamPool, UpstreamStatus};
+pub use upstream_probe::{UpstreamCapabilities, UpstreamProtocol, probe_upstreams};

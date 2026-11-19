@@ -8,7 +8,10 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use crabdns_core::{CacheStats, Config, DnsPipeline, FilterStats, QueryEvent, UpstreamStatus};
+use crabdns_core::{
+    CacheStats, Config, DnsPipeline, FilterStats, QueryEvent, UpstreamCapabilities, UpstreamStatus,
+    probe_upstreams as probe_upstream_caps,
+};
 use crabdns_storage::{StatsSnapshot, StorageEngine};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
@@ -85,6 +88,17 @@ struct RulesPayload {
     stats: Option<FilterStats>,
 }
 
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct UpstreamProbePayload {
+    pub upstreams: Vec<String>,
+    #[serde(default)]
+    pub bootstrap_dns: Option<Vec<String>>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub timeout_ms: Option<u64>,
+}
+
 pub use config_api::{ConfigResponse, ConfigUpdatePayload};
 
 pub fn build_router(state: AppState) -> Router {
@@ -131,6 +145,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/upstreams/health",
             get(get_upstream_health).post(probe_upstreams),
         )
+        .route("/api/upstreams/probe", post(probe_upstream_capabilities))
         .route("/api/auth/settings", put(auth::update_auth))
         .layer(middleware::from_fn_with_state(
             router_state.clone(),
@@ -158,6 +173,57 @@ async fn probe_upstreams(State(state): State<RouterState>) -> Json<Vec<UpstreamS
     let pool = state.app.pipeline.upstream();
     pool.probe_all().await;
     Json(pool.health_snapshot())
+}
+
+const MAX_PROBE_UPSTREAMS: usize = 16;
+
+async fn probe_upstream_capabilities(
+    State(state): State<RouterState>,
+    Json(payload): Json<UpstreamProbePayload>,
+) -> std::result::Result<Json<Vec<UpstreamCapabilities>>, (StatusCode, Json<serde_json::Value>)> {
+    let upstreams: Vec<String> = payload
+        .upstreams
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if upstreams.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "at least one upstream server is required" })),
+        ));
+    }
+    if upstreams.len() > MAX_PROBE_UPSTREAMS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("too many upstreams to probe at once (max {MAX_PROBE_UPSTREAMS})")
+            })),
+        ));
+    }
+
+    let cfg = state.app.config.load();
+    let bootstrap_dns: Vec<String> = payload
+        .bootstrap_dns
+        .unwrap_or_else(|| cfg.bootstrap_dns.clone())
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let timeout_ms = payload
+        .timeout_ms
+        .unwrap_or(cfg.upstream_timeout_ms)
+        .clamp(500, 10_000);
+
+    let results = probe_upstream_caps(&upstreams, &bootstrap_dns, timeout_ms)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+        })?;
+    Ok(Json(results))
 }
 
 async fn health(State(state): State<RouterState>) -> Json<HealthResponse> {
@@ -605,5 +671,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after_logout.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_upstream_probe_endpoint_validation_and_response() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+        let config = Arc::new(ArcSwap::from_pointee(Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        }));
+        let filter = Arc::new(FilterEngine::new(&[]));
+        let cache = Arc::new(DnsCache::new(64, false));
+        let upstream =
+            Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 500).unwrap());
+        let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+        let (live_tx, _) = broadcast::channel(16);
+
+        let app = build_router(AppState {
+            config,
+            pipeline,
+            storage,
+            live_tx,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // Empty list rejected
+        let empty_res = client
+            .post(format!("{base}/api/upstreams/probe"))
+            .header("content-type", "application/json")
+            .body(r#"{"upstreams":[]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(empty_res.status(), StatusCode::BAD_REQUEST);
+
+        // Unreachable local port returns structured capability entry
+        let probe_res = client
+            .post(format!("{base}/api/upstreams/probe"))
+            .header("content-type", "application/json")
+            .body(r#"{"upstreams":["udp://127.0.0.1:1"],"timeout_ms":500}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(probe_res.status(), StatusCode::OK);
+        let caps: Vec<UpstreamCapabilities> =
+            serde_json::from_slice(&probe_res.bytes().await.unwrap()).unwrap();
+        assert_eq!(caps.len(), 1);
+        assert!(!caps[0].reachable);
+        assert_eq!(caps[0].endpoint, "udp://127.0.0.1:1");
     }
 }

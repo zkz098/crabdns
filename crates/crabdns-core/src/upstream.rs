@@ -166,7 +166,7 @@ fn parse_socket_addr(input: &str, default_port: u16) -> Result<SocketAddr> {
     )))
 }
 
-fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
+pub(crate) fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
     if let Some((host, port_str)) = input.rsplit_once(':')
         && let Ok(port) = port_str.parse::<u16>()
     {
@@ -204,14 +204,14 @@ struct CachedIpEntry {
 }
 
 #[derive(Debug, Clone)]
-struct BootstrapResolver {
+pub(crate) struct BootstrapResolver {
     endpoints: Vec<BootstrapEndpoint>,
     timeout: Duration,
     cache: Arc<DashMap<String, CachedIpEntry>>,
 }
 
 impl BootstrapResolver {
-    fn new(specs: &[String], timeout: Duration) -> Result<Self> {
+    pub(crate) fn new(specs: &[String], timeout: Duration) -> Result<Self> {
         let mut endpoints = Vec::with_capacity(specs.len());
         for spec in specs {
             let trimmed = spec.trim();
@@ -226,7 +226,7 @@ impl BootstrapResolver {
         })
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.endpoints.is_empty()
     }
 
@@ -268,7 +268,11 @@ impl BootstrapResolver {
         )))
     }
 
-    async fn resolve_socket_addrs(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    pub(crate) async fn resolve_socket_addrs(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>> {
         let host_clean = host.trim().trim_start_matches('[').trim_end_matches(']');
         if let Ok(ip) = host_clean.parse::<IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, port)]);
@@ -616,7 +620,7 @@ impl UpstreamPool {
     }
 }
 
-fn endpoint_label(endpoint: &UpstreamEndpoint) -> String {
+pub(crate) fn endpoint_label(endpoint: &UpstreamEndpoint) -> String {
     match endpoint {
         UpstreamEndpoint::Udp(addr) => format!("udp://{addr}"),
         UpstreamEndpoint::Tcp(addr) => format!("tcp://{addr}"),
@@ -702,7 +706,10 @@ async fn exchange_doh(client: &reqwest::Client, url: &str, query_wire: &[u8]) ->
     Ok(bytes.to_vec())
 }
 
-async fn send_tcp_framed<W: AsyncWriteExt + Unpin>(writer: &mut W, payload: &[u8]) -> Result<()> {
+pub(crate) async fn send_tcp_framed<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    payload: &[u8],
+) -> Result<()> {
     let len = u16::try_from(payload.len())
         .map_err(|_| CoreError::Protocol("DNS message exceeds 65535 bytes".to_string()))?;
     writer.write_all(&len.to_be_bytes()).await?;
@@ -711,7 +718,7 @@ async fn send_tcp_framed<W: AsyncWriteExt + Unpin>(writer: &mut W, payload: &[u8
     Ok(())
 }
 
-async fn read_tcp_framed<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
+pub(crate) async fn read_tcp_framed<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
     let mut len_buf = [0_u8; 2];
     reader.read_exact(&mut len_buf).await?;
     let len = usize::from(u16::from_be_bytes(len_buf));

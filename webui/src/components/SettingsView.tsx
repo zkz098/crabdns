@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { t } from "../i18n";
 import type { BlockMode } from "../types/BlockMode";
 import type { ConfigResponse } from "../types/ConfigResponse";
+import type { UpstreamCapabilities } from "../types/UpstreamCapabilities";
 import type { UpstreamStatus } from "../types/UpstreamStatus";
 import type { UpstreamStrategy } from "../types/UpstreamStrategy";
 
@@ -16,6 +17,11 @@ interface SettingsViewProps {
   upstreamHealth: UpstreamStatus[];
   probingUpstreams: boolean;
   onProbeUpstreams: () => void;
+  upstreamCapabilities: UpstreamCapabilities[];
+  probingCapabilities: boolean;
+  probeCapabilitiesError: string;
+  onProbeCapabilities: () => void;
+  onReplaceUpstream: (fromInput: string, toUrl: string) => void;
   blockMode: BlockMode;
   onBlockModeChange: (val: BlockMode) => void;
   allowCidrsText: string;
@@ -131,9 +137,30 @@ export function SettingsView(props: SettingsViewProps) {
       {/* Form Fields */}
       <div class="space-y-5">
         <div>
-          <label class="block text-xs font-medium text-[#171717] dark:text-[#ededed] mb-1.5">
-            {t("settingsUpstreamsLabel")}
-          </label>
+          <div class="flex items-center justify-between gap-2 mb-1.5">
+            <label class="block text-xs font-medium text-[#171717] dark:text-[#ededed]">
+              {t("settingsUpstreamsLabel")}
+            </label>
+            <button
+              type="button"
+              disabled={props.probingCapabilities}
+              onClick={props.onProbeCapabilities}
+              class="h-7 px-2.5 rounded-md text-xs font-medium bg-white dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] text-[#171717] dark:text-[#ededed] inline-flex items-center gap-1.5 cursor-pointer hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] disabled:opacity-50 transition-colors"
+            >
+              <span
+                class={
+                  props.probingCapabilities
+                    ? "i-ri-loader-4-line animate-spin text-xs"
+                    : "i-ri-radar-line text-xs"
+                }
+              />
+              <span>
+                {props.probingCapabilities
+                  ? t("settingsProbingCapabilities")
+                  : t("settingsProbeCapabilities")}
+              </span>
+            </button>
+          </div>
           <textarea
             rows={4}
             spellcheck={false}
@@ -144,6 +171,185 @@ export function SettingsView(props: SettingsViewProps) {
           <p class="text-[11px] text-[#8f8f8f] dark:text-[#71717a] mt-1.5">
             {t("settingsUpstreamsHint")}
           </p>
+
+          <Show when={props.probeCapabilitiesError}>
+            <p class="text-xs text-rose-600 dark:text-rose-400 mt-2">
+              {props.probeCapabilitiesError}
+            </p>
+          </Show>
+
+          <Show when={props.upstreamCapabilities.length > 0}>
+            <div class="mt-3 space-y-2">
+              <For each={props.upstreamCapabilities}>
+                {(cap) => {
+                  const protoLabel = () => {
+                    const base =
+                      cap.protocol === "doh"
+                        ? "DoH"
+                        : cap.protocol === "dot"
+                          ? "DoT"
+                          : cap.protocol.toUpperCase();
+                    return cap.transport_detail ? `${base} · ${cap.transport_detail}` : base;
+                  };
+                  return (
+                    <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3 space-y-2">
+                      <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div class="flex items-center gap-2 min-w-0">
+                          <span
+                            class={`h-2 w-2 rounded-full shrink-0 ${
+                              cap.reachable ? "bg-emerald-500" : "bg-rose-500"
+                            }`}
+                          />
+                          <span class="font-mono text-xs text-[#171717] dark:text-[#ededed] truncate">
+                            {cap.endpoint}
+                          </span>
+                        </div>
+                        <div class="flex items-center gap-1.5 shrink-0">
+                          <span
+                            class={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                              cap.encrypted
+                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20"
+                                : "bg-zinc-500/10 text-zinc-700 dark:text-zinc-300 border-zinc-500/20"
+                            }`}
+                          >
+                            <Show when={cap.encrypted}>
+                              <span class="i-ri-lock-line text-[10px]" />
+                            </Show>
+                            {protoLabel()}
+                          </span>
+                          <Show
+                            when={cap.reachable && cap.latency_ms !== null}
+                            fallback={
+                              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
+                                {t("settingsCapUnreachable")}
+                              </span>
+                            }
+                          >
+                            <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa] tabular-nums">
+                              {cap.latency_ms}ms
+                            </span>
+                          </Show>
+                        </div>
+                      </div>
+
+                      <Show when={cap.error}>
+                        <p class="text-[11px] text-rose-600 dark:text-rose-400 font-mono break-all">
+                          {cap.error}
+                        </p>
+                      </Show>
+
+                      <Show when={cap.reachable}>
+                        <div class="flex flex-wrap items-center gap-1.5">
+                          {/* EDNS0 */}
+                          <Show
+                            when={cap.edns === true}
+                            fallback={
+                              <Show when={cap.edns === false}>
+                                <span class="px-2 py-0.5 rounded-md text-[11px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20">
+                                  {t("settingsCapNoEdns")}
+                                </span>
+                              </Show>
+                            }
+                          >
+                            <span class="px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 tabular-nums">
+                              {cap.edns_udp_size ? `EDNS0 (${cap.edns_udp_size}B)` : "EDNS0"}
+                            </span>
+                          </Show>
+
+                          {/* DNSSEC */}
+                          <Show
+                            when={cap.dnssec_validating === true}
+                            fallback={
+                              <Show
+                                when={cap.dnssec_aware === true}
+                                fallback={
+                                  <Show when={cap.dnssec_aware === false}>
+                                    <span class="px-2 py-0.5 rounded-md text-[11px] bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border border-zinc-500/20">
+                                      {t("settingsCapNoDnssec")}
+                                    </span>
+                                  </Show>
+                                }
+                              >
+                                <span class="px-2 py-0.5 rounded-md text-[11px] bg-sky-500/10 text-sky-700 dark:text-sky-400 border border-sky-500/20">
+                                  {t("settingsCapDnssecAware")}
+                                </span>
+                              </Show>
+                            }
+                          >
+                            <span class="px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                              {t("settingsCapDnssecValidating")}
+                            </span>
+                          </Show>
+
+                          {/* ECS */}
+                          <Show
+                            when={cap.ecs === true}
+                            fallback={
+                              <Show when={cap.ecs === false}>
+                                <span class="px-2 py-0.5 rounded-md text-[11px] bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border border-zinc-500/20">
+                                  {t("settingsCapNoEcs")}
+                                </span>
+                              </Show>
+                            }
+                          >
+                            <span class="px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                              {t("settingsCapEcs")}
+                            </span>
+                          </Show>
+
+                          {/* RA warning */}
+                          <Show when={cap.recursion_available === false}>
+                            <span class="px-2 py-0.5 rounded-md text-[11px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20">
+                              {t("settingsCapNonRecursive")}
+                            </span>
+                          </Show>
+
+                          {/* NXDOMAIN hijack warning */}
+                          <Show when={cap.nxdomain_hijack === true}>
+                            <span class="px-2 py-0.5 rounded-md text-[11px] font-medium bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
+                              {t("settingsCapNxdomainHijack")}
+                            </span>
+                          </Show>
+                        </div>
+
+                        {/* Config mismatch hints */}
+                        <Show when={props.dnssecEnabled && cap.dnssec_aware === false}>
+                          <p class="text-[11px] text-amber-700 dark:text-amber-400">
+                            {t("settingsCapDnssecMismatchHint")}
+                          </p>
+                        </Show>
+                        <Show when={props.ecsEnabled && cap.ecs === false}>
+                          <p class="text-[11px] text-amber-700 dark:text-amber-400">
+                            {t("settingsCapEcsMismatchHint")}
+                          </p>
+                        </Show>
+
+                        {/* DDR encrypted upgrade suggestions */}
+                        <Show when={cap.ddr_upgrades.length > 0}>
+                          <div class="flex flex-wrap items-center gap-1.5 pt-0.5">
+                            <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                              {t("settingsCapDdrUpgradeLabel")}
+                            </span>
+                            <For each={cap.ddr_upgrades}>
+                              {(upgradeUrl) => (
+                                <button
+                                  type="button"
+                                  onClick={() => props.onReplaceUpstream(cap.input, upgradeUrl)}
+                                  class="px-2 py-0.5 rounded-md text-[11px] font-mono bg-white dark:bg-[#111111] border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 cursor-pointer transition-colors"
+                                >
+                                  {upgradeUrl}
+                                </button>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                      </Show>
+                    </div>
+                  );
+                }}
+              </For>
+            </div>
+          </Show>
         </div>
 
         <div>
