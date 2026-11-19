@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crabdns_core::{Config, QueryEvent, QueryOutcome};
+use crabdns_core::{Config, PersistedCacheEntry, QueryEvent, QueryOutcome};
 use dashmap::DashMap;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use foldhash::fast::RandomState;
@@ -81,6 +81,7 @@ pub struct StorageEngine {
     logs: Keyspace,
     meta: Keyspace,
     sub_contents: Keyspace,
+    dns_cache: Keyspace,
     seq: AtomicU64,
     total_queries: AtomicU64,
     blocked_queries: AtomicU64,
@@ -98,6 +99,7 @@ impl StorageEngine {
         let logs = db.keyspace("logs", KeyspaceCreateOptions::default)?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
         let sub_contents = db.keyspace("sub_contents", KeyspaceCreateOptions::default)?;
+        let dns_cache = db.keyspace("dns_cache", KeyspaceCreateOptions::default)?;
 
         let persisted = match meta.get(KEY_COUNTERS)? {
             Some(bytes) => serde_json::from_slice::<PersistedCounters>(&bytes).unwrap_or_default(),
@@ -109,6 +111,7 @@ impl StorageEngine {
             logs,
             meta,
             sub_contents,
+            dns_cache,
             seq: AtomicU64::new(0),
             total_queries: AtomicU64::new(persisted.total),
             blocked_queries: AtomicU64::new(persisted.blocked),
@@ -312,6 +315,50 @@ impl StorageEngine {
             batch.commit()?;
         }
         Ok(removed)
+    }
+
+    pub fn clear_dns_cache(&self) -> Result<()> {
+        let mut batch = self.db.batch();
+        for guard in self.dns_cache.iter() {
+            let key = guard.key()?;
+            batch.remove(&self.dns_cache, key);
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    pub fn save_dns_cache(&self, entries: &[PersistedCacheEntry]) -> Result<usize> {
+        let mut batch = self.db.batch();
+        for guard in self.dns_cache.iter() {
+            let key = guard.key()?;
+            batch.remove(&self.dns_cache, key);
+        }
+        let mut saved = 0;
+        for (idx, entry) in entries.iter().enumerate() {
+            let key = idx.to_be_bytes();
+            let val = serde_json::to_vec(entry)?;
+            batch.insert(&self.dns_cache, key, val);
+            saved += 1;
+        }
+        batch.commit()?;
+        Ok(saved)
+    }
+
+    pub fn load_dns_cache(
+        &self,
+        now_unix_secs: i64,
+        stale_grace_secs: i64,
+    ) -> Result<Vec<PersistedCacheEntry>> {
+        let mut entries = Vec::new();
+        for guard in self.dns_cache.iter() {
+            let val = guard.value()?;
+            if let Ok(entry) = serde_json::from_slice::<PersistedCacheEntry>(&val)
+                && entry.expires_at_unix_secs + stale_grace_secs > now_unix_secs
+            {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
     }
 }
 

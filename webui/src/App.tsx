@@ -54,6 +54,10 @@ export default function App() {
   const [rateLimitQps, setRateLimitQps] = createSignal(0);
   const [cacheSize, setCacheSize] = createSignal(65536);
   const [optimisticCache, setOptimisticCache] = createSignal(true);
+  const [cacheMinTtlSecs, setCacheMinTtlSecs] = createSignal(10);
+  const [cacheMaxTtlSecs, setCacheMaxTtlSecs] = createSignal(86400);
+  const [cachePrefetchEnabled, setCachePrefetchEnabled] = createSignal(true);
+  const [cachePersistEnabled, setCachePersistEnabled] = createSignal(false);
   const [upstreamTimeoutMs, setUpstreamTimeoutMs] = createSignal(3000);
   const [logRetentionHours, setLogRetentionHours] = createSignal(24);
   const [configMessage, setConfigMessage] = createSignal("");
@@ -258,6 +262,10 @@ export default function App() {
     setRateLimitQps(data.rate_limit_qps);
     setCacheSize(data.cache_size);
     setOptimisticCache(data.optimistic_cache);
+    setCacheMinTtlSecs(data.cache_min_ttl_secs);
+    setCacheMaxTtlSecs(data.cache_max_ttl_secs);
+    setCachePrefetchEnabled(data.cache_prefetch_enabled);
+    setCachePersistEnabled(data.cache_persist_enabled);
     setUpstreamTimeoutMs(data.upstream_timeout_ms);
     setLogRetentionHours(data.log_retention_hours);
     setAuthEnabled(data.web_auth_enabled);
@@ -522,6 +530,10 @@ export default function App() {
       upstream_strategy: upstreamStrategy(),
       cache_size: Number(cacheSize()),
       optimistic_cache: optimisticCache(),
+      cache_min_ttl_secs: Number(cacheMinTtlSecs()),
+      cache_max_ttl_secs: Number(cacheMaxTtlSecs()),
+      cache_prefetch_enabled: cachePrefetchEnabled(),
+      cache_persist_enabled: cachePersistEnabled(),
       upstream_timeout_ms: Number(upstreamTimeoutMs()),
       log_retention_hours: Number(logRetentionHours()),
       block_mode: blockMode(),
@@ -735,6 +747,14 @@ export default function App() {
               onLogRetentionChange={setLogRetentionHours}
               optimisticCache={optimisticCache()}
               onOptimisticCacheChange={setOptimisticCache}
+              cacheMinTtlSecs={cacheMinTtlSecs()}
+              onCacheMinTtlChange={setCacheMinTtlSecs}
+              cacheMaxTtlSecs={cacheMaxTtlSecs()}
+              onCacheMaxTtlChange={setCacheMaxTtlSecs}
+              cachePrefetchEnabled={cachePrefetchEnabled()}
+              onCachePrefetchChange={setCachePrefetchEnabled}
+              cachePersistEnabled={cachePersistEnabled()}
+              onCachePersistChange={setCachePersistEnabled}
               splitDnsText={splitDnsText()}
               onSplitDnsChange={setSplitDnsText}
               cnameCloakingBlocking={cnameCloakingBlocking()}

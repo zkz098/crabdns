@@ -21,12 +21,14 @@ pub struct RunningServer {
     pub dot_addr: Option<SocketAddr>,
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
+    config: Arc<ArcSwap<Config>>,
     udp_tasks: Vec<JoinHandle<()>>,
     tcp_task: JoinHandle<()>,
     dot_task: Option<JoinHandle<()>>,
     web_task: JoinHandle<()>,
     sub_refresh_task: JoinHandle<()>,
     hosts_watch_task: JoinHandle<()>,
+    cache_persist_task: JoinHandle<()>,
     sink_handle: JoinHandle<()>,
 }
 
@@ -42,6 +44,7 @@ impl RunningServer {
         self.web_task.abort();
         self.sub_refresh_task.abort();
         self.hosts_watch_task.abort();
+        self.cache_persist_task.abort();
 
         for task in self.udp_tasks {
             let _ = task.await;
@@ -53,11 +56,26 @@ impl RunningServer {
         let _ = self.web_task.await;
         let _ = self.sub_refresh_task.await;
         let _ = self.hosts_watch_task.await;
+        let _ = self.cache_persist_task.await;
+
+        if self.config.load().cache_persist_enabled {
+            let now_secs = current_unix_secs();
+            let snapshot = self.pipeline.cache().export_persisted(now_secs);
+            if let Err(err) = self.storage.save_dns_cache(&snapshot) {
+                tracing::warn!(error = %err, "failed to persist dns cache on shutdown");
+            }
+        }
 
         drop(self.pipeline);
         let _ = self.sink_handle.await;
         drop(self.storage);
     }
+}
+
+fn current_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
@@ -66,6 +84,10 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.upstream_strategy = saved_cfg.upstream_strategy;
     config.cache_size = saved_cfg.cache_size;
     config.optimistic_cache = saved_cfg.optimistic_cache;
+    config.cache_min_ttl_secs = saved_cfg.cache_min_ttl_secs;
+    config.cache_max_ttl_secs = saved_cfg.cache_max_ttl_secs;
+    config.cache_prefetch_enabled = saved_cfg.cache_prefetch_enabled;
+    config.cache_persist_enabled = saved_cfg.cache_persist_enabled;
     config.upstream_timeout_ms = saved_cfg.upstream_timeout_ms;
     config.log_retention_hours = saved_cfg.log_retention_hours;
     config.block_mode = saved_cfg.block_mode;
@@ -114,10 +136,27 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let sub_contents = storage.load_enabled_subscription_contents()?;
     filter.reload_from_sources(&custom_rules_text, custom_enabled, &sub_contents);
 
-    let cache = Arc::new(DnsCache::new(
+    let cache = Arc::new(DnsCache::with_options(
         current_cfg.cache_size,
         current_cfg.optimistic_cache,
+        current_cfg.cache_min_ttl_secs,
+        current_cfg.cache_max_ttl_secs,
+        current_cfg.cache_prefetch_enabled,
     ));
+    if current_cfg.cache_persist_enabled {
+        let now_secs = current_unix_secs();
+        match storage.load_dns_cache(now_secs, cache.stale_grace_secs()) {
+            Ok(entries) => {
+                let restored = cache.import_persisted(entries, now_secs);
+                if restored > 0 {
+                    tracing::info!(restored, "restored persisted dns cache entries");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to load persisted dns cache");
+            }
+        }
+    }
     let upstream = Arc::new(UpstreamPool::new_with_bootstrap(
         &current_cfg.upstreams,
         current_cfg.upstream_timeout_ms,
@@ -306,18 +345,39 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         }
     });
 
+    let cache_persist_config = Arc::clone(&config);
+    let cache_persist_pipeline = Arc::clone(&pipeline);
+    let cache_persist_storage = Arc::clone(&storage);
+    let cache_persist_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(300));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !cache_persist_config.load().cache_persist_enabled {
+                continue;
+            }
+            let now_secs = current_unix_secs();
+            let snapshot = cache_persist_pipeline.cache().export_persisted(now_secs);
+            if let Err(err) = cache_persist_storage.save_dns_cache(&snapshot) {
+                tracing::warn!(error = %err, "periodic dns cache persistence failed");
+            }
+        }
+    });
+
     Ok(RunningServer {
         dns_addr,
         web_addr,
         dot_addr,
         pipeline,
         storage,
+        config,
         udp_tasks,
         tcp_task,
         dot_task,
         web_task,
         sub_refresh_task,
         hosts_watch_task,
+        cache_persist_task,
         sink_handle,
     })
 }

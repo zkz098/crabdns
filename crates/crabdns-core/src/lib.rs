@@ -13,7 +13,7 @@ pub mod upstream;
 mod wire;
 
 pub use acl::{AccessController, AclDecision, IpNet};
-pub use cache::{CacheHit, CacheStats, DnsCache};
+pub use cache::{CacheHit, CacheStats, DnsCache, PersistedCacheEntry};
 pub use config::{BlockMode, Config, SplitDnsRule, UpstreamStrategy};
 pub use dnssec::{DnssecValidator, ValidationOutcome};
 pub use edns::EcsConfig;

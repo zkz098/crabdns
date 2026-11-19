@@ -24,6 +24,10 @@ pub struct ConfigResponse {
     #[ts(type = "number")]
     pub cache_size: u64,
     pub optimistic_cache: bool,
+    pub cache_min_ttl_secs: u32,
+    pub cache_max_ttl_secs: u32,
+    pub cache_prefetch_enabled: bool,
+    pub cache_persist_enabled: bool,
     #[ts(type = "number")]
     pub upstream_timeout_ms: u64,
     #[ts(type = "number")]
@@ -66,6 +70,10 @@ impl From<&Config> for ConfigResponse {
             upstream_strategy: cfg.upstream_strategy,
             cache_size: cfg.cache_size,
             optimistic_cache: cfg.optimistic_cache,
+            cache_min_ttl_secs: cfg.cache_min_ttl_secs,
+            cache_max_ttl_secs: cfg.cache_max_ttl_secs,
+            cache_prefetch_enabled: cfg.cache_prefetch_enabled,
+            cache_persist_enabled: cfg.cache_persist_enabled,
             upstream_timeout_ms: cfg.upstream_timeout_ms,
             log_retention_hours: cfg.log_retention_hours,
             block_mode: cfg.block_mode,
@@ -108,6 +116,14 @@ pub struct ConfigUpdatePayload {
     #[ts(type = "number")]
     pub cache_size: u64,
     pub optimistic_cache: bool,
+    #[serde(default)]
+    pub cache_min_ttl_secs: Option<u32>,
+    #[serde(default)]
+    pub cache_max_ttl_secs: Option<u32>,
+    #[serde(default)]
+    pub cache_prefetch_enabled: Option<bool>,
+    #[serde(default)]
+    pub cache_persist_enabled: Option<bool>,
     #[ts(type = "number")]
     pub upstream_timeout_ms: u64,
     #[ts(type = "number")]
@@ -357,13 +373,38 @@ pub async fn update_config(
         doh_port: Some(current.listen_web.port()),
     });
 
+    let cache_min_ttl_secs = payload
+        .cache_min_ttl_secs
+        .unwrap_or(current.cache_min_ttl_secs)
+        .max(1);
+    let cache_max_ttl_secs = payload
+        .cache_max_ttl_secs
+        .unwrap_or(current.cache_max_ttl_secs);
+    if cache_max_ttl_secs < cache_min_ttl_secs {
+        return Err(bad_request(
+            "cache_max_ttl_secs must be >= cache_min_ttl_secs",
+        ));
+    }
+    let cache_prefetch_enabled = payload
+        .cache_prefetch_enabled
+        .unwrap_or(current.cache_prefetch_enabled);
+    let cache_persist_enabled = payload
+        .cache_persist_enabled
+        .unwrap_or(current.cache_persist_enabled);
+
     let cache_changed = current.cache_size != payload.cache_size
-        || current.optimistic_cache != payload.optimistic_cache;
+        || current.optimistic_cache != payload.optimistic_cache
+        || current.cache_min_ttl_secs != cache_min_ttl_secs
+        || current.cache_max_ttl_secs != cache_max_ttl_secs
+        || current.cache_prefetch_enabled != cache_prefetch_enabled;
     if cache_changed {
-        state
-            .app
-            .pipeline
-            .reload_cache(payload.cache_size, payload.optimistic_cache);
+        state.app.pipeline.reload_cache_with_options(
+            payload.cache_size,
+            payload.optimistic_cache,
+            cache_min_ttl_secs,
+            cache_max_ttl_secs,
+            cache_prefetch_enabled,
+        );
     }
 
     let mut next = (*current).clone();
@@ -372,6 +413,10 @@ pub async fn update_config(
     next.upstream_strategy = strategy;
     next.cache_size = payload.cache_size;
     next.optimistic_cache = payload.optimistic_cache;
+    next.cache_min_ttl_secs = cache_min_ttl_secs;
+    next.cache_max_ttl_secs = cache_max_ttl_secs;
+    next.cache_prefetch_enabled = cache_prefetch_enabled;
+    next.cache_persist_enabled = cache_persist_enabled;
     next.upstream_timeout_ms = payload.upstream_timeout_ms;
     next.log_retention_hours = payload.log_retention_hours;
     next.block_mode = block_mode;

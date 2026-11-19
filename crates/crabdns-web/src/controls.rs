@@ -103,6 +103,9 @@ pub async fn resume_blocking(State(state): State<RouterState>) -> Json<BlockingS
 
 pub async fn flush_cache(State(state): State<RouterState>) -> Json<OkResponse> {
     state.app.pipeline.cache().flush();
+    if let Err(err) = state.app.storage.clear_dns_cache() {
+        tracing::warn!(error = %err, "failed to clear persisted dns cache");
+    }
     Json(OkResponse { status: "ok" })
 }
 

@@ -194,6 +194,23 @@ impl DnsPipeline {
             .store(Arc::new(DnsCache::new(max_capacity, optimistic)));
     }
 
+    pub fn reload_cache_with_options(
+        &self,
+        max_capacity: u64,
+        optimistic: bool,
+        min_ttl_secs: u32,
+        max_ttl_secs: u32,
+        prefetch_enabled: bool,
+    ) {
+        self.cache.store(Arc::new(DnsCache::with_options(
+            max_capacity,
+            optimistic,
+            min_ttl_secs,
+            max_ttl_secs,
+            prefetch_enabled,
+        )));
+    }
+
     pub fn reload_split_dns(
         &self,
         rules: &[SplitDnsRule],
@@ -497,7 +514,7 @@ impl DnsPipeline {
 
         let cache = self.cache.load();
         if let Some(hit) = cache.get(&cache_key, request.id) {
-            if hit.is_stale {
+            if hit.needs_refresh {
                 let refresh_wire =
                     Self::build_upstream_query(&request, raw_query, ecs_subnet, dnssec_on);
                 self.spawn_background_refresh(refresh_wire, cache_key.clone());
@@ -726,6 +743,8 @@ impl DnsPipeline {
         tokio::spawn(async move {
             if let Ok((resp_bytes, _)) = upstream.exchange(&query_wire).await {
                 let _ = cache_upstream_response(&cache, key, &resp_bytes);
+            } else {
+                cache.clear_refresh_inflight(&key);
             }
         });
     }

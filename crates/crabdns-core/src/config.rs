@@ -52,6 +52,14 @@ pub struct Config {
     pub cache_size: u64,
     #[serde(default = "default_true")]
     pub optimistic_cache: bool,
+    #[serde(default = "default_cache_min_ttl_secs")]
+    pub cache_min_ttl_secs: u32,
+    #[serde(default = "default_cache_max_ttl_secs")]
+    pub cache_max_ttl_secs: u32,
+    #[serde(default = "default_true")]
+    pub cache_prefetch_enabled: bool,
+    #[serde(default)]
+    pub cache_persist_enabled: bool,
     #[serde(default = "default_upstream_timeout_ms")]
     pub upstream_timeout_ms: u64,
     #[serde(default)]
@@ -143,6 +151,14 @@ fn default_cache_size() -> u64 {
     65_536
 }
 
+fn default_cache_min_ttl_secs() -> u32 {
+    10
+}
+
+fn default_cache_max_ttl_secs() -> u32 {
+    86_400
+}
+
 fn default_true() -> bool {
     true
 }
@@ -186,6 +202,10 @@ impl Default for Config {
             upstream_strategy: UpstreamStrategy::default(),
             cache_size: default_cache_size(),
             optimistic_cache: default_true(),
+            cache_min_ttl_secs: default_cache_min_ttl_secs(),
+            cache_max_ttl_secs: default_cache_max_ttl_secs(),
+            cache_prefetch_enabled: true,
+            cache_persist_enabled: false,
             upstream_timeout_ms: default_upstream_timeout_ms(),
             custom_rules: Vec::new(),
             log_retention_hours: default_log_retention_hours(),

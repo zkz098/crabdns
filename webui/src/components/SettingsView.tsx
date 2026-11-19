@@ -32,6 +32,14 @@ interface SettingsViewProps {
   onLogRetentionChange: (val: number) => void;
   optimisticCache: boolean;
   onOptimisticCacheChange: (val: boolean) => void;
+  cacheMinTtlSecs: number;
+  onCacheMinTtlChange: (val: number) => void;
+  cacheMaxTtlSecs: number;
+  onCacheMaxTtlChange: (val: number) => void;
+  cachePrefetchEnabled: boolean;
+  onCachePrefetchChange: (val: boolean) => void;
+  cachePersistEnabled: boolean;
+  onCachePersistChange: (val: boolean) => void;
   splitDnsText: string;
   onSplitDnsChange: (val: string) => void;
   cnameCloakingBlocking: boolean;
@@ -216,6 +224,52 @@ export function SettingsView(props: SettingsViewProps) {
               }`}
             />
           </button>
+        </div>
+
+        {/* Cache TTL, Prefetch & Persistence */}
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+              {t("settingsCacheMinTtlLabel")}
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={props.cacheMinTtlSecs}
+              onInput={(e) => props.onCacheMinTtlChange(Number(e.currentTarget.value))}
+              class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm text-[#171717] dark:text-[#ededed] tabular-nums outline-none"
+            />
+          </div>
+          <div>
+            <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+              {t("settingsCacheMaxTtlLabel")}
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={props.cacheMaxTtlSecs}
+              onInput={(e) => props.onCacheMaxTtlChange(Number(e.currentTarget.value))}
+              class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm text-[#171717] dark:text-[#ededed] tabular-nums outline-none"
+            />
+          </div>
+          <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={props.cachePrefetchEnabled}
+              onChange={(e) => props.onCachePrefetchChange(e.currentTarget.checked)}
+              class="rounded border-[#eaeaea] dark:border-[#262626]"
+            />
+            {t("settingsCachePrefetchLabel")}
+          </label>
+          <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={props.cachePersistEnabled}
+              onChange={(e) => props.onCachePersistChange(e.currentTarget.checked)}
+              class="rounded border-[#eaeaea] dark:border-[#262626]"
+            />
+            {t("settingsCachePersistLabel")}
+          </label>
         </div>
 
         {/* Upstream Strategy & Block Response Mode */}
