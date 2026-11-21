@@ -32,9 +32,16 @@ struct LoginAttempt {
     locked_until: Option<Instant>,
 }
 
-#[derive(Default)]
 pub struct LoginRateLimiter {
     attempts: DashMap<IpAddr, LoginAttempt>,
+}
+
+impl Default for LoginRateLimiter {
+    fn default() -> Self {
+        Self {
+            attempts: DashMap::with_shard_amount(16),
+        }
+    }
 }
 
 impl LoginRateLimiter {
@@ -60,18 +67,26 @@ impl LoginRateLimiter {
         before.saturating_sub(after)
     }
 
-    fn evict_oldest_attempt(&self) -> bool {
-        let oldest_ip = self
+    fn evict_oldest_batch(&self, count: usize) -> usize {
+        let mut candidates: Vec<(IpAddr, Instant)> = self
             .attempts
             .iter()
-            .min_by_key(|e| e.value().window_start)
-            .map(|e| *e.key());
-        if let Some(old_ip) = oldest_ip {
-            self.attempts.remove(&old_ip);
-            true
-        } else {
-            false
+            .map(|e| (*e.key(), e.value().window_start))
+            .collect();
+        if candidates.is_empty() || count == 0 {
+            return 0;
         }
+        let remove_n = count.min(candidates.len());
+        if remove_n < candidates.len() {
+            candidates.select_nth_unstable_by_key(remove_n - 1, |(_, ts)| *ts);
+        }
+        let mut removed = 0;
+        for (ip, _) in candidates.into_iter().take(remove_n) {
+            if self.attempts.remove(&ip).is_some() {
+                removed += 1;
+            }
+        }
+        removed
     }
 
     pub fn check_locked(&self, ip: IpAddr) -> Option<u64> {
@@ -93,10 +108,9 @@ impl LoginRateLimiter {
         let now = Instant::now();
         if !self.attempts.contains_key(&ip) && self.attempts.len() >= MAX_LOGIN_ATTEMPT_ENTRIES {
             self.prune_expired_at(now);
-            while self.attempts.len() >= MAX_LOGIN_ATTEMPT_ENTRIES {
-                if !self.evict_oldest_attempt() {
-                    break;
-                }
+            if self.attempts.len() >= MAX_LOGIN_ATTEMPT_ENTRIES {
+                let batch = (MAX_LOGIN_ATTEMPT_ENTRIES / 16).max(1);
+                let _ = self.evict_oldest_batch(batch);
             }
         }
         let mut entry = self.attempts.entry(ip).or_insert(LoginAttempt {
@@ -126,9 +140,16 @@ struct SessionEntry {
     expires_at: Instant,
 }
 
-#[derive(Default)]
 pub struct SessionStore {
     sessions: DashMap<String, SessionEntry>,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self {
+            sessions: DashMap::with_shard_amount(8),
+        }
+    }
 }
 
 impl SessionStore {

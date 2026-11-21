@@ -57,8 +57,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Run nextest
-        run: cargo nextest run -p crabdns-core -p crabdns-storage -p crabdns-web -p crabdns-server --profile ci --no-fail-fast --hide-progress-bar
+      - name: Run unit & E2E tests
+        run: cargo nextest run -p crabdns-core -p crabdns-storage -p crabdns-web -p crabdns-server -E 'not (binary(heap_bounds) | binary(stability_ci))' --profile ci --no-fail-fast --hide-progress-bar
+      - name: Run heap-bounds & virtual-time stability gates
+        run: cargo nextest run -p crabdns-core -p crabdns-web -p crabdns-server -E 'binary(heap_bounds) | binary(stability_ci)' --profile ci --no-fail-fast --hide-progress-bar
 
   fuzz:
     name: Fuzz Build

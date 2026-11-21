@@ -522,6 +522,7 @@ pub fn spawn_log_sink(
     tokio::spawn(async move {
         let mut buffer = Vec::with_capacity(256);
         let mut interval = tokio::time::interval(Duration::from_millis(250));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {

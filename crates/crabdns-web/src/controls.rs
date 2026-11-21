@@ -246,6 +246,7 @@ pub async fn ws_logs(ws: WebSocketUpgrade, State(state): State<RouterState>) -> 
 
 async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<QueryEvent>) {
     let mut ping_interval = tokio::time::interval(WS_PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping_interval.tick().await;
     loop {
         tokio::select! {

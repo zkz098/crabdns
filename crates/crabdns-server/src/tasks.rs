@@ -32,12 +32,18 @@ pub fn prune_logs_once(storage: &StorageEngine, retention_hours: u64) -> anyhow:
     Ok(storage.prune_older_than(cutoff_ms)?)
 }
 
+fn delay_interval(period: Duration) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
 pub fn spawn_log_prune_task(
     config: Arc<ArcSwap<Config>>,
     storage: Arc<StorageEngine>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(600));
+        let mut interval = delay_interval(Duration::from_secs(600));
         loop {
             interval.tick().await;
             let retention_hours = config.load().log_retention_hours;
@@ -65,7 +71,7 @@ pub fn spawn_subscription_refresh_task(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let client = crabdns_web::subscriptions::build_http_client();
-        let mut interval = tokio::time::interval(Duration::from_hours(24));
+        let mut interval = delay_interval(Duration::from_hours(24));
         interval.tick().await;
         loop {
             interval.tick().await;
@@ -90,7 +96,7 @@ pub fn spawn_hosts_watch_task(
     pipeline: Arc<DnsPipeline>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = delay_interval(Duration::from_secs(30));
         let mut last_mtime: Option<SystemTime> = None;
         interval.tick().await;
         loop {
@@ -135,7 +141,7 @@ pub fn spawn_cache_persist_task(
     storage: Arc<StorageEngine>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(300));
+        let mut interval = delay_interval(Duration::from_secs(300));
         interval.tick().await;
         loop {
             interval.tick().await;
@@ -171,7 +177,7 @@ async fn file_stamp(path: Option<&PathBuf>) -> Option<(Option<SystemTime>, u64)>
 
 pub fn spawn_tls_watch_task(tls_manager: Arc<TlsManager>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = delay_interval(Duration::from_secs(30));
         let (init_cert, init_key) = tls_manager.paths();
         let mut last_stamps = (
             file_stamp(init_cert.as_ref()).await,

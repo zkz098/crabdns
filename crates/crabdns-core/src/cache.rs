@@ -307,6 +307,10 @@ impl DnsCache {
         self.inner.run_pending_tasks();
     }
 
+    pub fn run_pending_tasks(&self) {
+        self.inner.run_pending_tasks();
+    }
+
     pub fn entry_count(&self) -> u64 {
         self.inner.entry_count()
     }
