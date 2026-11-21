@@ -72,6 +72,13 @@ const KEY_RUNTIME_CONFIG: &[u8] = b"runtime_config";
 const KEY_CLIENTS: &[u8] = b"clients";
 const KEY_CLIENT_GROUPS: &[u8] = b"client_groups";
 
+const FJALL_CACHE_BYTES: u64 = 4 * 1024 * 1024;
+const FJALL_MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
+const FJALL_MAX_CACHED_FILES: usize = 64;
+const FJALL_WORKER_THREADS: usize = 2;
+const FJALL_LOGS_MEMTABLE_BYTES: u64 = 4 * 1024 * 1024;
+const FJALL_SMALL_MEMTABLE_BYTES: u64 = 2 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PersistedCounters {
     total: u64,
@@ -100,11 +107,24 @@ pub struct StorageEngine {
 
 impl StorageEngine {
     pub fn open(data_dir: &Path) -> Result<Self> {
-        let db = Database::builder(data_dir.join("fjall")).open()?;
-        let logs = db.keyspace("logs", KeyspaceCreateOptions::default)?;
-        let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
-        let sub_contents = db.keyspace("sub_contents", KeyspaceCreateOptions::default)?;
-        let dns_cache = db.keyspace("dns_cache", KeyspaceCreateOptions::default)?;
+        let db = Database::builder(data_dir.join("fjall"))
+            .cache_size(FJALL_CACHE_BYTES)
+            .max_journaling_size(FJALL_MAX_JOURNAL_BYTES)
+            .max_cached_files(Some(FJALL_MAX_CACHED_FILES))
+            .worker_threads(FJALL_WORKER_THREADS)
+            .open()?;
+        let logs = db.keyspace("logs", || {
+            KeyspaceCreateOptions::default().max_memtable_size(FJALL_LOGS_MEMTABLE_BYTES)
+        })?;
+        let meta = db.keyspace("meta", || {
+            KeyspaceCreateOptions::default().max_memtable_size(FJALL_SMALL_MEMTABLE_BYTES)
+        })?;
+        let sub_contents = db.keyspace("sub_contents", || {
+            KeyspaceCreateOptions::default().max_memtable_size(FJALL_SMALL_MEMTABLE_BYTES)
+        })?;
+        let dns_cache = db.keyspace("dns_cache", || {
+            KeyspaceCreateOptions::default().max_memtable_size(FJALL_SMALL_MEMTABLE_BYTES)
+        })?;
 
         let persisted = match meta.get(KEY_COUNTERS)? {
             Some(bytes) => serde_json::from_slice::<PersistedCounters>(&bytes).unwrap_or_default(),
@@ -222,6 +242,14 @@ impl StorageEngine {
             top_blocked: top_n(&self.blocked_counts, 10),
             top_clients: top_n(&self.client_counts, 10),
         }
+    }
+
+    pub fn tracked_stat_entries(&self) -> (usize, usize, usize) {
+        (
+            self.domain_counts.len(),
+            self.blocked_counts.len(),
+            self.client_counts.len(),
+        )
     }
 
     pub fn save_custom_rules(&self, rules_text: &str) -> Result<()> {
@@ -502,29 +530,36 @@ pub fn spawn_log_sink(
                         let _ = live_tx.send(event.clone());
                         buffer.push(event);
                         if buffer.len() >= 256 {
-                            flush_buffer(&storage, &mut buffer);
+                            flush_buffer(&storage, &mut buffer).await;
                         }
                     } else {
-                        flush_buffer(&storage, &mut buffer);
+                        flush_buffer(&storage, &mut buffer).await;
                         break;
                     }
                 }
                 _ = interval.tick() => {
-                    flush_buffer(&storage, &mut buffer);
+                    flush_buffer(&storage, &mut buffer).await;
                 }
             }
         }
     })
 }
 
-fn flush_buffer(storage: &StorageEngine, buffer: &mut Vec<QueryEvent>) {
+async fn flush_buffer(storage: &Arc<StorageEngine>, buffer: &mut Vec<QueryEvent>) {
     if buffer.is_empty() {
         return;
     }
-    if let Err(err) = storage.record_batch(buffer) {
-        tracing::error!(error = %err, "failed to flush query logs to fjall");
+    let batch = std::mem::replace(buffer, Vec::with_capacity(256));
+    let st = Arc::clone(storage);
+    match tokio::task::spawn_blocking(move || st.record_batch(&batch)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::error!(error = %err, "failed to flush query logs to fjall");
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "query log flush task panicked");
+        }
     }
-    buffer.clear();
 }
 
 #[cfg(test)]

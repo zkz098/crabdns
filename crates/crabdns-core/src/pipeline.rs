@@ -1,13 +1,12 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use hickory_proto::rr::RecordType;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use ts_rs::TS;
 
 use crate::acl::AccessController;
@@ -16,6 +15,7 @@ use crate::clients::{
     ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ResolvedClientPolicy,
     ip_to_ptr_domain,
 };
+use crate::clock::monotonic_now_ms;
 use crate::config::{BlockMode, SplitDnsRule, UpstreamStrategy};
 use crate::dnssec::DnssecValidator;
 use crate::edns::EcsConfig;
@@ -79,6 +79,17 @@ pub struct QueryEvent {
     pub answers: Vec<String>,
 }
 
+pub(crate) const MAX_BG_REFRESHES: usize = 64;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PipelineRuntimeMetrics {
+    pub log_dropped: u64,
+    pub singleflight_inflight: usize,
+    pub rdns_inflight: usize,
+    pub acl_tracked_clients: usize,
+    pub bg_refresh_inflight: usize,
+}
+
 pub struct DnsPipeline {
     pub(crate) filter: Arc<FilterEngine>,
     pub(crate) cache: ArcSwap<DnsCache>,
@@ -89,10 +100,12 @@ pub struct DnsPipeline {
     pub(crate) name_resolver: Arc<ClientNameResolver>,
     pub(crate) rdns_enabled: AtomicBool,
     pub(crate) inflight: Arc<Singleflight<CacheKey, (Vec<u8>, String)>>,
+    pub(crate) refresh_limiter: Arc<Semaphore>,
     pub(crate) block_mode: AtomicU8,
     pub(crate) cname_cloaking: AtomicBool,
     pub(crate) pause_until_ms: AtomicU64,
     pub(crate) log_tx: Option<mpsc::Sender<QueryEvent>>,
+    pub(crate) log_dropped: AtomicU64,
     pub(crate) ecs_config: ArcSwap<EcsConfig>,
     pub(crate) dnssec_enabled: AtomicBool,
     pub(crate) dnssec_validator: Arc<DnssecValidator>,
@@ -138,10 +151,12 @@ impl DnsPipeline {
             name_resolver: Arc::new(ClientNameResolver::new()),
             rdns_enabled: AtomicBool::new(true),
             inflight: Arc::new(Singleflight::new()),
+            refresh_limiter: Arc::new(Semaphore::new(MAX_BG_REFRESHES)),
             block_mode: AtomicU8::new(block_mode_to_u8(BlockMode::ZeroIp)),
             cname_cloaking: AtomicBool::new(true),
             pause_until_ms: AtomicU64::new(0),
             log_tx,
+            log_dropped: AtomicU64::new(0),
             ecs_config: ArcSwap::from_pointee(EcsConfig::default()),
             dnssec_enabled: AtomicBool::new(false),
             dnssec_validator: Arc::new(DnssecValidator::default()),
@@ -421,9 +436,22 @@ impl DnsPipeline {
         self.block_any_queries.store(enabled, Ordering::Relaxed);
     }
 
+    pub fn runtime_metrics(&self) -> PipelineRuntimeMetrics {
+        PipelineRuntimeMetrics {
+            log_dropped: self.log_dropped.load(Ordering::Relaxed),
+            singleflight_inflight: self.inflight.inflight_count(),
+            rdns_inflight: self.name_resolver.inflight_count(),
+            acl_tracked_clients: self.acl.load().tracked_clients(),
+            bg_refresh_inflight: MAX_BG_REFRESHES
+                .saturating_sub(self.refresh_limiter.available_permits()),
+        }
+    }
+
     pub fn pause_blocking(&self, duration_secs: Option<u64>) {
         let until = match duration_secs {
-            Some(secs) => now_epoch_ms().saturating_add(secs.saturating_mul(1000)),
+            Some(secs) => monotonic_now_ms()
+                .saturating_add(secs.saturating_mul(1000))
+                .min(u64::MAX - 1),
             None => u64::MAX,
         };
         self.pause_until_ms.store(until, Ordering::Relaxed);
@@ -441,7 +469,7 @@ impl DnsPipeline {
         if until == u64::MAX {
             return (true, None);
         }
-        let now = now_epoch_ms();
+        let now = monotonic_now_ms();
         if now >= until {
             self.pause_until_ms.store(0, Ordering::Relaxed);
             return (false, None);
@@ -473,14 +501,4 @@ impl DnsPipeline {
         }
         (self.upstream.load_full(), None, false)
     }
-}
-
-pub(crate) fn now_epoch_ms() -> u64 {
-    u64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-    )
-    .unwrap_or(u64::MAX)
 }

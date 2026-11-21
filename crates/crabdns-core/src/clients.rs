@@ -13,6 +13,8 @@ use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use tokio::sync::Semaphore;
+
 use crate::acl::IpNet;
 use crate::config::{BlockMode, UpstreamStrategy};
 use crate::error::{CoreError, Result};
@@ -23,6 +25,7 @@ const RDNS_CACHE_CAPACITY: u64 = 4096;
 const RDNS_CACHE_TTL: Duration = Duration::from_mins(15);
 const RDNS_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CLIENT_ID_LEN: usize = 64;
+const MAX_INFLIGHT_RDNS: usize = 32;
 
 const fn default_true() -> bool {
     true
@@ -341,6 +344,18 @@ fn build_resolved_policy(
 pub struct ClientNameResolver {
     rdns_cache: Cache<IpAddr, Option<String>, RandomState>,
     inflight: Arc<DashMap<IpAddr, (), RandomState>>,
+    limiter: Arc<Semaphore>,
+}
+
+struct RdnsInflightGuard {
+    inflight: Arc<DashMap<IpAddr, (), RandomState>>,
+    ip: IpAddr,
+}
+
+impl Drop for RdnsInflightGuard {
+    fn drop(&mut self) {
+        self.inflight.remove(&self.ip);
+    }
 }
 
 impl Default for ClientNameResolver {
@@ -358,7 +373,12 @@ impl ClientNameResolver {
         Self {
             rdns_cache,
             inflight: Arc::new(DashMap::with_hasher(RandomState::default())),
+            limiter: Arc::new(Semaphore::new(MAX_INFLIGHT_RDNS)),
         }
+    }
+
+    pub fn inflight_count(&self) -> usize {
+        self.inflight.len()
     }
 
     pub fn lookup_cached(&self, ip: IpAddr) -> Option<Option<String>> {
@@ -372,17 +392,24 @@ impl ClientNameResolver {
         if self.rdns_cache.contains_key(&ip) {
             return;
         }
+        let Ok(permit) = Arc::clone(&self.limiter).try_acquire_owned() else {
+            return;
+        };
         let Entry::Vacant(vacant) = self.inflight.entry(ip) else {
             return;
         };
         vacant.insert(());
 
         let cache = self.rdns_cache.clone();
-        let inflight = Arc::clone(&self.inflight);
+        let guard = RdnsInflightGuard {
+            inflight: Arc::clone(&self.inflight),
+            ip,
+        };
         tokio::spawn(async move {
+            let _permit = permit;
+            let _guard = guard;
             let resolved = resolve_ptr_name(ip, &upstream).await;
             cache.insert(ip, resolved);
-            inflight.remove(&ip);
         });
     }
 }

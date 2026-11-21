@@ -22,6 +22,8 @@ const SESSION_TTL: Duration = Duration::from_hours(24);
 const MAX_LOGIN_FAILURES: u32 = 5;
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const LOGIN_LOCKOUT: Duration = Duration::from_secs(60);
+const MAX_LOGIN_ATTEMPT_ENTRIES: usize = 4_096;
+const MAX_SESSIONS: usize = 256;
 
 #[derive(Debug, Clone)]
 struct LoginAttempt {
@@ -36,19 +38,67 @@ pub struct LoginRateLimiter {
 }
 
 impl LoginRateLimiter {
+    pub fn tracked_entries(&self) -> usize {
+        self.attempts.len()
+    }
+
+    pub fn prune_expired(&self) -> usize {
+        self.prune_expired_at(Instant::now())
+    }
+
+    fn prune_expired_at(&self, now: Instant) -> usize {
+        let before = self.attempts.len();
+        self.attempts.retain(|_, entry| {
+            let locked = entry.locked_until.is_some_and(|until| now < until);
+            let active_window = now.duration_since(entry.window_start) <= LOGIN_WINDOW;
+            locked || active_window
+        });
+        let after = self.attempts.len();
+        if after == 0 || after.saturating_mul(4) < before {
+            self.attempts.shrink_to_fit();
+        }
+        before.saturating_sub(after)
+    }
+
+    fn evict_oldest_attempt(&self) -> bool {
+        let oldest_ip = self
+            .attempts
+            .iter()
+            .min_by_key(|e| e.value().window_start)
+            .map(|e| *e.key());
+        if let Some(old_ip) = oldest_ip {
+            self.attempts.remove(&old_ip);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn check_locked(&self, ip: IpAddr) -> Option<u64> {
+        let now = Instant::now();
         let entry = self.attempts.get(&ip)?;
-        if let Some(until) = entry.locked_until {
-            let now = Instant::now();
-            if now < until {
-                return Some((until - now).as_secs().max(1));
-            }
+        if let Some(until) = entry.locked_until
+            && now < until
+        {
+            return Some((until - now).as_secs().max(1));
+        }
+        if now.duration_since(entry.window_start) > LOGIN_WINDOW {
+            drop(entry);
+            self.attempts.remove(&ip);
         }
         None
     }
 
     pub fn record_failure(&self, ip: IpAddr) {
         let now = Instant::now();
+        if !self.attempts.contains_key(&ip) && self.attempts.len() >= MAX_LOGIN_ATTEMPT_ENTRIES {
+            self.prune_expired_at(now);
+            while self.attempts.len() >= MAX_LOGIN_ATTEMPT_ENTRIES {
+                if !self.evict_oldest_attempt() {
+                    break;
+                }
+            }
+        }
         let mut entry = self.attempts.entry(ip).or_insert(LoginAttempt {
             failures: 0,
             window_start: now,
@@ -82,7 +132,47 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
+    pub fn active_sessions(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub fn prune_expired(&self) -> usize {
+        self.prune_expired_at(Instant::now())
+    }
+
+    fn prune_expired_at(&self, now: Instant) -> usize {
+        let before = self.sessions.len();
+        self.sessions.retain(|_, entry| now < entry.expires_at);
+        let after = self.sessions.len();
+        if after == 0 || after.saturating_mul(4) < before {
+            self.sessions.shrink_to_fit();
+        }
+        before.saturating_sub(after)
+    }
+
+    fn evict_earliest_session(&self) -> bool {
+        let earliest = self
+            .sessions
+            .iter()
+            .min_by_key(|e| e.value().expires_at)
+            .map(|e| e.key().clone());
+        if let Some(token) = earliest {
+            self.sessions.remove(&token);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn create_session(&self, username: &str) -> Option<String> {
+        let now = Instant::now();
+        self.prune_expired_at(now);
+        while self.sessions.len() >= MAX_SESSIONS {
+            if !self.evict_earliest_session() {
+                break;
+            }
+        }
+
         let mut bytes = [0_u8; 32];
         SystemRandom::new().fill(&mut bytes).ok()?;
         let token = hex_encode(&bytes);
@@ -90,7 +180,7 @@ impl SessionStore {
             token.clone(),
             SessionEntry {
                 username: username.to_string(),
-                expires_at: Instant::now() + SESSION_TTL,
+                expires_at: now + SESSION_TTL,
             },
         );
         Some(token)
@@ -482,5 +572,55 @@ mod tests {
         assert_eq!(store.validate(&token).as_deref(), Some("admin"));
         store.revoke(&token);
         assert!(store.validate(&token).is_none());
+    }
+
+    #[test]
+    fn test_session_store_prunes_expired_and_caps_total() {
+        let store = SessionStore::default();
+        let expired_at = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap_or_else(Instant::now);
+        for i in 0..10 {
+            store.sessions.insert(
+                format!("expired-{i}"),
+                SessionEntry {
+                    username: "admin".to_string(),
+                    expires_at: expired_at,
+                },
+            );
+        }
+        assert_eq!(store.active_sessions(), 10);
+
+        // Creating one session prunes all expired entries first.
+        let fresh = store.create_session("admin").expect("token");
+        assert_eq!(store.active_sessions(), 1);
+        assert!(store.validate(&fresh).is_some());
+
+        // Cap enforces <= MAX_SESSIONS.
+        for _ in 0..(MAX_SESSIONS + 25) {
+            let _ = store.create_session("admin").expect("token");
+        }
+        assert_eq!(store.active_sessions(), MAX_SESSIONS);
+    }
+
+    #[test]
+    fn test_login_rate_limiter_prunes_expired_and_caps_entries() {
+        let limiter = LoginRateLimiter::default();
+        let stale_ip: IpAddr = "198.51.100.10".parse().unwrap();
+        limiter.record_failure(stale_ip);
+        assert_eq!(limiter.tracked_entries(), 1);
+
+        let future = Instant::now() + LOGIN_WINDOW + Duration::from_secs(5);
+        assert_eq!(limiter.prune_expired_at(future), 1);
+        assert_eq!(limiter.tracked_entries(), 0);
+
+        for i in 0..(MAX_LOGIN_ATTEMPT_ENTRIES + 64) {
+            let b = ((i >> 16) & 0xff) as u8;
+            let c = ((i >> 8) & 0xff) as u8;
+            let d = (i & 0xff) as u8;
+            let ip: IpAddr = format!("10.{b}.{c}.{d}").parse().unwrap();
+            limiter.record_failure(ip);
+        }
+        assert!(limiter.tracked_entries() <= MAX_LOGIN_ATTEMPT_ENTRIES);
     }
 }

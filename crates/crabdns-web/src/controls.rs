@@ -1,14 +1,21 @@
 use std::net::IpAddr;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::StatusCode;
-use crabdns_core::{FilterAction, FilterStats, RewriteAction};
+use axum::response::Response;
+use crabdns_core::{FilterAction, FilterStats, QueryEvent, RewriteAction};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use ts_rs::TS;
 
 use crate::RouterState;
 use crate::subscriptions::{ApiError, rebuild_filter_engine};
+
+const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
+const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -231,4 +238,56 @@ pub async fn test_rule(
         matched_list: decision.matched_list,
         rewrite,
     }))
+}
+
+pub async fn ws_logs(ws: WebSocketUpgrade, State(state): State<RouterState>) -> Response {
+    ws.on_upgrade(move |socket| handle_ws(socket, state.app.live_tx.subscribe()))
+}
+
+async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<QueryEvent>) {
+    let mut ping_interval = tokio::time::interval(WS_PING_INTERVAL);
+    ping_interval.tick().await;
+    loop {
+        tokio::select! {
+            recv = rx.recv() => {
+                match recv {
+                    Ok(event) => {
+                        let Ok(json) = serde_json::to_string(&event) else {
+                            continue;
+                        };
+                        if !matches!(
+                            tokio::time::timeout(
+                                WS_SEND_TIMEOUT,
+                                socket.send(Message::Text(json.into())),
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    None | Some(Ok(Message::Close(_)) | Err(_)) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+            _ = ping_interval.tick() => {
+                if !matches!(
+                    tokio::time::timeout(
+                        WS_SEND_TIMEOUT,
+                        socket.send(Message::Ping(axum::body::Bytes::new())),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    break;
+                }
+            }
+        }
+    }
 }

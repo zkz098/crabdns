@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use futures_util::future::select_ok;
@@ -14,6 +14,7 @@ use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use ts_rs::TS;
 
+use crate::clock::monotonic_now_ms;
 use crate::config::UpstreamStrategy;
 use crate::error::{CoreError, Result};
 use crate::upstream_transport::{
@@ -73,8 +74,10 @@ impl EndpointHealth {
         self.total_failures.fetch_add(1, Ordering::Relaxed);
         let fails = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
         if fails >= UNHEALTHY_FAILURE_THRESHOLD {
-            self.unhealthy_until_ms
-                .store(now_ms + UNHEALTHY_COOLDOWN_MS, Ordering::Relaxed);
+            self.unhealthy_until_ms.store(
+                now_ms.saturating_add(UNHEALTHY_COOLDOWN_MS),
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -88,12 +91,6 @@ impl EndpointHealth {
             total_failures: self.total_failures.load(Ordering::Relaxed),
         }
     }
-}
-
-fn now_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[derive(Debug, Clone)]
@@ -467,7 +464,7 @@ impl UpstreamPool {
     }
 
     pub fn health_snapshot(&self) -> Vec<UpstreamStatus> {
-        let now_ms = now_epoch_ms();
+        let now_ms = monotonic_now_ms();
         self.endpoints
             .iter()
             .zip(&self.health)
@@ -495,7 +492,7 @@ impl UpstreamPool {
     }
 
     fn ordered_candidates(&self) -> Vec<usize> {
-        let now_ms = now_epoch_ms();
+        let now_ms = monotonic_now_ms();
         let mut healthy: Vec<usize> = (0..self.endpoints.len())
             .filter(|&i| self.health[i].is_healthy(now_ms))
             .collect();
@@ -556,12 +553,12 @@ impl UpstreamPool {
             }
             Ok(Err(err)) => {
                 tracing::warn!(upstream = %label, error = %err, "upstream query failed");
-                health.record_failure(now_epoch_ms());
+                health.record_failure(monotonic_now_ms());
                 Err(err)
             }
             Err(_) => {
                 tracing::warn!(upstream = %label, "upstream query timed out");
-                health.record_failure(now_epoch_ms());
+                health.record_failure(monotonic_now_ms());
                 Err(CoreError::Upstream(format!("upstream {label} timed out")))
             }
         }

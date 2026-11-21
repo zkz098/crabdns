@@ -1,6 +1,7 @@
 pub mod acl;
 pub mod cache;
 pub mod clients;
+mod clock;
 pub mod config;
 pub mod dnssec;
 pub mod edns;
@@ -29,7 +30,9 @@ pub use edns::EcsConfig;
 pub use error::{CoreError, Result};
 pub use filter::{FilterAction, FilterDecision, FilterEngine, FilterStats, RewriteAction};
 pub use lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter};
-pub use pipeline::{DnsPipeline, QueryContext, QueryEvent, QueryOutcome, QueryProtocol};
+pub use pipeline::{
+    DnsPipeline, PipelineRuntimeMetrics, QueryContext, QueryEvent, QueryOutcome, QueryProtocol,
+};
 pub use split_dns::SplitUpstreamRouter;
 pub use upstream::{UpstreamPool, UpstreamStatus};
 pub use upstream_probe::{UpstreamCapabilities, UpstreamProtocol, probe_upstreams};

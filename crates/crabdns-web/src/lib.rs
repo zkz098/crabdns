@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware;
@@ -118,7 +117,7 @@ pub fn build_router(state: AppState) -> Router {
     let protected_api = Router::new()
         .route("/api/stats", get(get_stats))
         .route("/api/logs", get(get_logs))
-        .route("/api/logs/ws", get(ws_logs))
+        .route("/api/logs/ws", get(controls::ws_logs))
         .route("/api/rules", get(get_rules).put(update_rules))
         .route("/api/rules/quick", post(controls::quick_rule))
         .route("/api/rules/test", post(controls::test_rule))
@@ -280,21 +279,6 @@ async fn get_logs(
         .query_logs(limit, params.search.as_deref(), params.outcome.as_deref())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(logs))
-}
-
-async fn ws_logs(ws: WebSocketUpgrade, State(state): State<RouterState>) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, state.app.live_tx.subscribe()))
-}
-
-async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<QueryEvent>) {
-    while let Ok(event) = rx.recv().await {
-        let Ok(json) = serde_json::to_string(&event) else {
-            continue;
-        };
-        if socket.send(Message::Text(json.into())).await.is_err() {
-            break;
-        }
-    }
 }
 
 async fn get_rules(

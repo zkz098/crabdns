@@ -86,6 +86,10 @@ where
         }
     }
 
+    pub fn inflight_count(&self) -> usize {
+        self.flights.len()
+    }
+
     pub fn acquire(&self, key: K) -> FlightRole<K, V> {
         match self.flights.entry(key.clone()) {
             Entry::Occupied(entry) => FlightRole::Follower(entry.get().subscribe()),

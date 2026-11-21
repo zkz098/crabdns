@@ -661,24 +661,31 @@ impl DnsPipeline {
         client_wants_do: bool,
     ) {
         let cache = self.cache.load_full();
+        let Ok(permit) = Arc::clone(&self.refresh_limiter).try_acquire_owned() else {
+            cache.clear_refresh_inflight(&key);
+            return;
+        };
         let validator = Arc::clone(&self.dnssec_validator);
         tokio::spawn(async move {
-            if let Ok((mut resp_bytes, _)) = upstream.exchange(&query_wire).await {
-                if dnssec_on {
-                    if let Ok(processed) = validator
-                        .validate_and_process(&resp_bytes, &upstream, client_wants_do)
-                        .await
-                    {
-                        resp_bytes = processed;
-                    } else {
-                        cache.clear_refresh_inflight(&key);
-                        return;
-                    }
-                }
-                let _ = cache_upstream_response(&cache, key, &resp_bytes);
-            } else {
-                cache.clear_refresh_inflight(&key);
+            let _permit = permit;
+            let mut guard = RefreshGuard {
+                cache,
+                key,
+                inserted: false,
+            };
+            let Ok((mut resp_bytes, _)) = upstream.exchange(&query_wire).await else {
+                return;
+            };
+            if dnssec_on {
+                let Ok(processed) = validator
+                    .validate_and_process(&resp_bytes, &upstream, client_wants_do)
+                    .await
+                else {
+                    return;
+                };
+                resp_bytes = processed;
             }
+            guard.inserted = cache_upstream_response(&guard.cache, guard.key.clone(), &resp_bytes);
         });
     }
 
@@ -712,7 +719,23 @@ impl DnsPipeline {
             rcode: rcode.to_string(),
             answers,
         };
-        let _ = tx.try_send(event);
+        if tx.try_send(event).is_err() {
+            self.log_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct RefreshGuard {
+    cache: Arc<DnsCache>,
+    key: CacheKey,
+    inserted: bool,
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        if !self.inserted {
+            self.cache.clear_refresh_inflight(&self.key);
+        }
     }
 }
 
@@ -723,13 +746,14 @@ fn extract_rcode_str(resp_bytes: &[u8]) -> String {
     )
 }
 
-fn cache_upstream_response(cache: &DnsCache, key: CacheKey, resp_bytes: &[u8]) -> String {
+fn cache_upstream_response(cache: &DnsCache, key: CacheKey, resp_bytes: &[u8]) -> bool {
     let Ok(msg) = Message::from_vec(resp_bytes) else {
-        return "UNKNOWN".to_string();
+        return false;
     };
-    let rcode = msg.response_code;
     if let Some(ttl) = compute_response_cache_ttl(&msg) {
         cache.insert(key, resp_bytes.to_vec(), ttl);
+        true
+    } else {
+        false
     }
-    rcode.to_string()
 }

@@ -113,6 +113,79 @@ impl TrieNode {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RuleBucket {
+    ImportantAllow,
+    ImportantBlock,
+    Allow,
+    Block,
+    Rewrite,
+}
+
+fn parse_rule_line(
+    raw_line: &str,
+    mut on_rule: impl FnMut(RuleBucket, &str, &str, MatchScope, Option<RewriteAction>),
+) {
+    let line = raw_line.trim();
+    if line.is_empty() || line.starts_with('!') || line.starts_with('#') {
+        return;
+    }
+
+    if let Some(parsed) = parse_adguard_rule(line) {
+        let bucket = if parsed.rewrite.is_some() {
+            RuleBucket::Rewrite
+        } else {
+            match (parsed.is_allow, parsed.is_important) {
+                (true, true) => RuleBucket::ImportantAllow,
+                (true, false) => RuleBucket::Allow,
+                (false, true) => RuleBucket::ImportantBlock,
+                (false, false) => RuleBucket::Block,
+            }
+        };
+        on_rule(bucket, line, &parsed.domain, parsed.scope, parsed.rewrite);
+        return;
+    }
+
+    parse_hosts_or_bare_line(line, &mut on_rule);
+}
+
+fn parse_hosts_or_bare_line(
+    line: &str,
+    on_rule: &mut impl FnMut(RuleBucket, &str, &str, MatchScope, Option<RewriteAction>),
+) {
+    let no_comment = line.split('#').next().unwrap_or(line).trim();
+    let mut parts = no_comment.split_whitespace();
+    let Some(first) = parts.next() else {
+        return;
+    };
+
+    if let Some(second) = parts.next() {
+        if first.parse::<IpAddr>().is_ok() {
+            let is_sinkhole = first == "0.0.0.0" || first == "::" || first == "127.0.0.1";
+            let scope = if is_sinkhole {
+                MatchScope::Exact
+            } else {
+                MatchScope::DomainAndSubdomains
+            };
+            for host in std::iter::once(second).chain(parts) {
+                if is_valid_domain_token(host) {
+                    on_rule(RuleBucket::Block, line, host, scope, None);
+                }
+            }
+        }
+        return;
+    }
+
+    let (scope, token) = if let Some(rest) = first.strip_prefix("*.") {
+        (MatchScope::SubdomainsOnly, rest)
+    } else {
+        (MatchScope::DomainAndSubdomains, first)
+    };
+    if is_valid_domain_token(token) {
+        on_rule(RuleBucket::Block, line, token, scope, None);
+    }
+}
+
 #[derive(Debug, Default)]
 struct RuleSet {
     important_allows: TrieNode,
@@ -145,103 +218,37 @@ impl RuleSet {
     }
 
     fn parse_and_insert_with_source(&mut self, raw_line: &str, source_id: u32) {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('!') || line.starts_with('#') {
-            return;
-        }
-
-        if let Some(parsed) = parse_adguard_rule(line) {
-            self.insert_parsed(&parsed, line, source_id);
-            return;
-        }
-
-        self.parse_hosts_or_bare(line, source_id);
-    }
-
-    fn insert_parsed(&mut self, parsed: &ParsedRule, raw: &str, source_id: u32) {
-        self.stats.total_rules += 1;
-        let meta = RuleMeta {
-            rule_text: raw.to_string(),
-            scope: parsed.scope,
-            rewrite: parsed.rewrite.clone(),
-            source_id,
-        };
-
-        if parsed.rewrite.is_some() {
-            self.stats.rewrite_rules += 1;
-            self.rewrites.insert(&parsed.domain, meta);
-            return;
-        }
-
-        match (parsed.is_allow, parsed.is_important) {
-            (true, true) => {
-                self.stats.allow_rules += 1;
-                self.important_allows.insert(&parsed.domain, meta);
-            }
-            (true, false) => {
-                self.stats.allow_rules += 1;
-                self.allows.insert(&parsed.domain, meta);
-            }
-            (false, true) => {
-                self.stats.block_rules += 1;
-                self.important_blocks.insert(&parsed.domain, meta);
-            }
-            (false, false) => {
-                self.stats.block_rules += 1;
-                self.blocks.insert(&parsed.domain, meta);
-            }
-        }
-    }
-
-    fn parse_hosts_or_bare(&mut self, line: &str, source_id: u32) {
-        let no_comment = line.split('#').next().unwrap_or(line).trim();
-        let parts: Vec<&str> = no_comment.split_whitespace().collect();
-        if parts.is_empty() {
-            return;
-        }
-
-        if parts.len() >= 2 && parts[0].parse::<IpAddr>().is_ok() {
-            let ip_str = parts[0];
-            let is_sinkhole = ip_str == "0.0.0.0" || ip_str == "::" || ip_str == "127.0.0.1";
-            for &host in &parts[1..] {
-                if !is_valid_domain_token(host) {
-                    continue;
-                }
-                self.stats.total_rules += 1;
-                self.stats.block_rules += 1;
-                let meta = RuleMeta {
-                    rule_text: line.to_string(),
-                    scope: if is_sinkhole {
-                        MatchScope::Exact
-                    } else {
-                        MatchScope::DomainAndSubdomains
-                    },
-                    rewrite: None,
-                    source_id,
-                };
-                self.blocks.insert(host, meta);
-            }
-            return;
-        }
-
-        if parts.len() == 1 {
-            let (scope, token) = if let Some(rest) = parts[0].strip_prefix("*.") {
-                (MatchScope::SubdomainsOnly, rest)
-            } else {
-                (MatchScope::DomainAndSubdomains, parts[0])
+        parse_rule_line(raw_line, |bucket, raw, domain, scope, rewrite| {
+            self.stats.total_rules += 1;
+            let meta = RuleMeta {
+                rule_text: raw.to_string(),
+                scope,
+                rewrite,
+                source_id,
             };
-            if is_valid_domain_token(token) {
-                self.stats.total_rules += 1;
-                self.stats.block_rules += 1;
-                let meta = RuleMeta {
-                    rule_text: line.to_string(),
-                    scope,
-                    rewrite: None,
-                    source_id,
-                };
-                self.blocks.insert(token, meta);
+            match bucket {
+                RuleBucket::ImportantAllow => {
+                    self.stats.allow_rules += 1;
+                    self.important_allows.insert(domain, meta);
+                }
+                RuleBucket::Allow => {
+                    self.stats.allow_rules += 1;
+                    self.allows.insert(domain, meta);
+                }
+                RuleBucket::ImportantBlock => {
+                    self.stats.block_rules += 1;
+                    self.important_blocks.insert(domain, meta);
+                }
+                RuleBucket::Block => {
+                    self.stats.block_rules += 1;
+                    self.blocks.insert(domain, meta);
+                }
+                RuleBucket::Rewrite => {
+                    self.stats.rewrite_rules += 1;
+                    self.rewrites.insert(domain, meta);
+                }
             }
-        }
+        });
     }
 
     fn evaluate(&self, domain: &str) -> FilterDecision {
@@ -394,6 +401,7 @@ fn parse_dnsrewrite_value(raw: &str) -> Option<RewriteAction> {
 
 fn is_valid_domain_token(token: &str) -> bool {
     !token.is_empty()
+        && token.len() <= 253
         && !token.contains('*')
         && !token.contains('/')
         && token
@@ -467,7 +475,18 @@ impl FilterEngine {
     }
 
     pub fn count_rules_in_text(rules_text: &str) -> FilterStats {
-        RuleSet::from_named_lines("count", rules_text.lines()).stats
+        let mut stats = FilterStats::default();
+        for line in rules_text.lines() {
+            parse_rule_line(line, |bucket, _, _, _, _| {
+                stats.total_rules += 1;
+                match bucket {
+                    RuleBucket::ImportantAllow | RuleBucket::Allow => stats.allow_rules += 1,
+                    RuleBucket::ImportantBlock | RuleBucket::Block => stats.block_rules += 1,
+                    RuleBucket::Rewrite => stats.rewrite_rules += 1,
+                }
+            });
+        }
+        stats
     }
 
     pub fn evaluate(&self, domain: &str) -> FilterDecision {
@@ -605,5 +624,29 @@ mod tests {
             engine.evaluate("custom.example.com").action,
             FilterAction::Allow
         );
+    }
+
+    #[test]
+    fn test_filter_rejects_overlong_domain_and_counts_without_trie() {
+        let overlong = format!("||{}example.com^", "a.".repeat(200));
+        assert!(!is_valid_domain_token(&"a.".repeat(200)));
+
+        let mixed = format!(
+            "! comment\n\
+             {overlong}\n\
+             ||ad.example.com^\n\
+             @@||ok.example.com^\n\
+             ||imp.example.com^$important\n\
+             ||rw.example.com^$dnsrewrite=1.2.3.4\n\
+             0.0.0.0 host1.test host2.test\n\
+             *.wild.example.com\n"
+        );
+        let counted = FilterEngine::count_rules_in_text(&mixed);
+        let built = RuleSet::from_named_lines("check", mixed.lines()).stats;
+        assert_eq!(counted.total_rules, built.total_rules);
+        assert_eq!(counted.block_rules, built.block_rules);
+        assert_eq!(counted.allow_rules, built.allow_rules);
+        assert_eq!(counted.rewrite_rules, built.rewrite_rules);
+        assert_eq!(counted.total_rules, 7);
     }
 }

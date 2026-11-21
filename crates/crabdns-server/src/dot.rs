@@ -36,8 +36,13 @@ pub async fn run_dot_server(
 ) {
     let limiter = Arc::new(Semaphore::new(max_connections.max(1)));
     loop {
-        let Ok((stream, peer)) = listener.accept().await else {
-            continue;
+        let (stream, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(error = %err, "DoT accept error; backing off");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
         };
         let _ = stream.set_nodelay(true);
         let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {

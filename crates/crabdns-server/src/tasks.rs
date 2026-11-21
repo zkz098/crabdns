@@ -109,10 +109,20 @@ pub fn spawn_hosts_watch_task(
                 continue;
             };
             if last_mtime != Some(mtime) {
-                if let Err(err) = pipeline.reload_hosts_from_path(path) {
-                    tracing::warn!(path = %path_str, error = %err, "failed to reload hosts file");
-                } else {
-                    last_mtime = Some(mtime);
+                let pipe = Arc::clone(&pipeline);
+                let path_buf = path.to_path_buf();
+                match tokio::task::spawn_blocking(move || pipe.reload_hosts_from_path(&path_buf))
+                    .await
+                {
+                    Ok(Ok(_)) => {
+                        last_mtime = Some(mtime);
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!(path = %path_str, error = %err, "failed to reload hosts file");
+                    }
+                    Err(err) => {
+                        tracing::warn!(path = %path_str, error = %err, "hosts reload task panicked");
+                    }
                 }
             }
         }
@@ -133,9 +143,21 @@ pub fn spawn_cache_persist_task(
                 continue;
             }
             let now_secs = current_unix_secs();
-            let snapshot = pipeline.cache().export_persisted(now_secs);
-            if let Err(err) = storage.save_dns_cache(&snapshot) {
-                tracing::warn!(error = %err, "periodic dns cache persistence failed");
+            let cache = pipeline.cache();
+            let st = Arc::clone(&storage);
+            match tokio::task::spawn_blocking(move || {
+                let snapshot = cache.export_persisted(now_secs);
+                st.save_dns_cache(&snapshot)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(error = %err, "periodic dns cache persistence failed");
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "periodic dns cache persistence task panicked");
+                }
             }
         }
     })

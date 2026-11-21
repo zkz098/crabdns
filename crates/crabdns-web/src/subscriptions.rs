@@ -168,22 +168,37 @@ pub async fn fetch_subscription_text_with_policy(
         return Err(format!("HTTP {}", resp.status()));
     }
 
+    let bytes = read_response_bounded(resp, MAX_SUBSCRIPTION_BYTES).await?;
+    Ok(String::from_utf8(bytes)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+}
+
+async fn read_response_bounded(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
     if let Some(len) = resp.content_length()
-        && len > MAX_SUBSCRIPTION_BYTES as u64
+        && len > max_bytes as u64
     {
         return Err("Subscription file exceeds 50 MB limit".to_string());
     }
 
-    let bytes = resp
-        .bytes()
+    let mut out = Vec::with_capacity(
+        usize::try_from(resp.content_length().unwrap_or(0))
+            .unwrap_or(0)
+            .min(max_bytes),
+    );
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
-
-    if bytes.len() > MAX_SUBSCRIPTION_BYTES {
-        return Err("Subscription file exceeds 50 MB limit".to_string());
+        .map_err(|e| format!("Failed to read response body: {e}"))?
+    {
+        if out.len().saturating_add(chunk.len()) > max_bytes {
+            return Err("Subscription file exceeds 50 MB limit".to_string());
+        }
+        out.extend_from_slice(&chunk);
     }
-
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(out)
 }
 
 pub fn rebuild_filter_engine(
@@ -527,4 +542,61 @@ pub async fn refresh_all_subscriptions(
     .await
     .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(subs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_read_response_bounded_rejects_oversized_chunked_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut req_buf = [0_u8; 1024];
+                let mut total = 0;
+                while total < req_buf.len() {
+                    let Ok(n) = stream.read(&mut req_buf[total..]).await else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    total += n;
+                    if req_buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
+                let _ = stream.write_all(header.as_bytes()).await;
+                let chunk = vec![b'a'; 2048];
+                let chunk_hdr = format!("{:x}\r\n", chunk.len());
+                for _ in 0..3 {
+                    let _ = stream.write_all(chunk_hdr.as_bytes()).await;
+                    let _ = stream.write_all(&chunk).await;
+                    let _ = stream.write_all(b"\r\n").await;
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+                let _ = stream.flush().await;
+                let _ = done_rx.await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/list.txt"))
+            .send()
+            .await
+            .expect("send");
+        let err = read_response_bounded(resp, 4096)
+            .await
+            .expect_err("chunked stream over 4096 bytes should fail");
+        let _ = done_tx.send(());
+        assert!(err.contains("exceeds"), "unexpected err: {err}");
+    }
 }

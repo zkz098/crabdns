@@ -1,9 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use dashmap::DashMap;
 use foldhash::fast::RandomState;
 
+use crate::clock::monotonic_now_ms;
 use crate::error::{CoreError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,11 +105,16 @@ struct TokenBucket {
     last_refill: Instant,
 }
 
+const MAX_TRACKED_CLIENTS: usize = 16_384;
+const BUCKET_STALE_SECS: u64 = 60;
+const PRUNE_COOLDOWN_MS: u64 = 5_000;
+
 pub struct AccessController {
     allow_cidrs: Vec<IpNet>,
     deny_cidrs: Vec<IpNet>,
     rate_limit_qps: u32,
     buckets: DashMap<IpAddr, TokenBucket, RandomState>,
+    last_prune_ms: AtomicU64,
 }
 
 impl AccessController {
@@ -119,7 +126,23 @@ impl AccessController {
             deny_cidrs,
             rate_limit_qps,
             buckets: DashMap::with_hasher(RandomState::default()),
+            last_prune_ms: AtomicU64::new(0),
         })
+    }
+
+    pub fn tracked_clients(&self) -> usize {
+        self.buckets.len()
+    }
+
+    pub fn prune_stale(&self) {
+        let before = self.buckets.len();
+        let now = Instant::now();
+        self.buckets
+            .retain(|_, b| now.duration_since(b.last_refill).as_secs() < BUCKET_STALE_SECS);
+        let after = self.buckets.len();
+        if after == 0 || after.saturating_mul(4) < before {
+            self.buckets.shrink_to_fit();
+        }
     }
 
     pub fn check(&self, client_ip: IpAddr) -> AclDecision {
@@ -138,30 +161,47 @@ impl AccessController {
     }
 
     fn consume_token(&self, client_ip: IpAddr) -> bool {
-        const MAX_TRACKED_CLIENTS: usize = 65_536;
-        if self.buckets.len() > MAX_TRACKED_CLIENTS {
-            let now = Instant::now();
-            self.buckets
-                .retain(|_, b| now.duration_since(b.last_refill).as_secs() < 60);
-        }
-
         let now = Instant::now();
         let rate = f64::from(self.rate_limit_qps);
+
+        if let Some(mut entry) = self.buckets.get_mut(&client_ip) {
+            return refill_and_consume(&mut entry, now, rate);
+        }
+
+        if self.buckets.len() >= MAX_TRACKED_CLIENTS {
+            let now_ms = monotonic_now_ms();
+            let prev = self.last_prune_ms.load(Ordering::Relaxed);
+            if now_ms.saturating_sub(prev) >= PRUNE_COOLDOWN_MS
+                && self
+                    .last_prune_ms
+                    .compare_exchange(prev, now_ms, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            {
+                self.prune_stale();
+            }
+            if self.buckets.len() >= MAX_TRACKED_CLIENTS {
+                return false;
+            }
+        }
+
         let mut entry = self.buckets.entry(client_ip).or_insert(TokenBucket {
             tokens: rate,
             last_refill: now,
         });
+        refill_and_consume(&mut entry, now, rate)
+    }
+}
 
-        let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
-        entry.tokens = (entry.tokens + elapsed * rate).min(rate);
-        entry.last_refill = now;
+fn refill_and_consume(entry: &mut TokenBucket, now: Instant, rate: f64) -> bool {
+    let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
+    entry.tokens = (entry.tokens + elapsed * rate).min(rate);
+    entry.last_refill = now;
 
-        if entry.tokens >= 1.0 {
-            entry.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
+    if entry.tokens >= 1.0 {
+        entry.tokens -= 1.0;
+        true
+    } else {
+        false
     }
 }
 
@@ -215,5 +255,23 @@ mod tests {
         assert_eq!(acl.check(ok_ip), AclDecision::Allow);
         assert_eq!(acl.check(ok_ip), AclDecision::Allow);
         assert_eq!(acl.check(ok_ip), AclDecision::RateLimited);
+    }
+
+    #[test]
+    fn test_acl_rate_limit_buckets_strictly_bounded() {
+        let acl = AccessController::new(&[], &[], 5).expect("valid acl");
+        for i in 0..(MAX_TRACKED_CLIENTS + 500) {
+            let b = ((i >> 16) & 0xff) as u8;
+            let c = ((i >> 8) & 0xff) as u8;
+            let d = (i & 0xff) as u8;
+            let ip = IpAddr::V4(Ipv4Addr::new(10, b, c, d));
+            let dec = acl.check(ip);
+            if i < MAX_TRACKED_CLIENTS {
+                assert_eq!(dec, AclDecision::Allow);
+            } else {
+                assert_eq!(dec, AclDecision::RateLimited);
+            }
+        }
+        assert!(acl.tracked_clients() <= MAX_TRACKED_CLIENTS);
     }
 }

@@ -53,8 +53,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let server = spawn_server(config).await?;
-    tokio::signal::ctrl_c().await?;
+    wait_for_shutdown_signal().await?;
     tracing::info!("shutting down crabdns");
     server.shutdown().await;
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => res,
+            _ = sigterm.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }

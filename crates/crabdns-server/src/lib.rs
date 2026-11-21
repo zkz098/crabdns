@@ -22,6 +22,9 @@ mod tls;
 
 pub use tasks::prune_logs_once;
 
+const UDP_MAX_INFLIGHT: usize = 2048;
+const ACCEPT_ERR_BACKOFF: Duration = Duration::from_millis(50);
+
 pub struct RunningServer {
     pub dns_addr: SocketAddr,
     pub web_addr: SocketAddr,
@@ -79,9 +82,21 @@ impl RunningServer {
 
         if self.config.load().cache_persist_enabled {
             let now_secs = tasks::current_unix_secs();
-            let snapshot = self.pipeline.cache().export_persisted(now_secs);
-            if let Err(err) = self.storage.save_dns_cache(&snapshot) {
-                tracing::warn!(error = %err, "failed to persist dns cache on shutdown");
+            let cache = self.pipeline.cache();
+            let storage = Arc::clone(&self.storage);
+            match tokio::task::spawn_blocking(move || {
+                let snapshot = cache.export_persisted(now_secs);
+                storage.save_dns_cache(&snapshot)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(error = %err, "failed to persist dns cache on shutdown");
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "dns cache shutdown persistence task panicked");
+                }
             }
         }
 
@@ -406,11 +421,13 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         "crabdns started"
     );
 
+    let udp_limiter = Arc::new(Semaphore::new(UDP_MAX_INFLIGHT));
     let udp_tasks = udp_sockets
         .into_iter()
         .map(|sock| {
             let udp_pipeline = Arc::clone(&pipeline);
-            tokio::spawn(run_udp_server(sock, udp_pipeline))
+            let limiter = Arc::clone(&udp_limiter);
+            tokio::spawn(run_udp_server(sock, udp_pipeline, limiter))
         })
         .collect();
 
@@ -487,16 +504,30 @@ fn bind_udp_sockets(addr: SocketAddr, count: usize) -> anyhow::Result<Vec<Arc<Ud
     }
 }
 
-async fn run_udp_server(socket: Arc<UdpSocket>, pipeline: Arc<DnsPipeline>) {
+async fn run_udp_server(
+    socket: Arc<UdpSocket>,
+    pipeline: Arc<DnsPipeline>,
+    limiter: Arc<Semaphore>,
+) {
     let mut buf = vec![0_u8; 4096];
     loop {
-        let Ok((len, peer)) = socket.recv_from(&mut buf).await else {
+        let (len, peer) = match socket.recv_from(&mut buf).await {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(error = %err, "UDP DNS recv error; backing off");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+        };
+        let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
+            tracing::warn!(peer = %peer, "UDP DNS query dropped: max inflight reached");
             continue;
         };
         let packet = buf[..len].to_vec();
         let sock = Arc::clone(&socket);
         let pipe = Arc::clone(&pipeline);
         tokio::spawn(async move {
+            let _permit = permit;
             match pipe.handle_packet(&packet, peer).await {
                 Ok(resp) => {
                     let _ = sock.send_to(&resp, peer).await;
@@ -517,8 +548,13 @@ async fn run_tcp_server(
 ) {
     let limiter = Arc::new(Semaphore::new(max_connections.max(1)));
     loop {
-        let Ok((stream, peer)) = listener.accept().await else {
-            continue;
+        let (stream, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(error = %err, "TCP DNS accept error; backing off");
+                tokio::time::sleep(ACCEPT_ERR_BACKOFF).await;
+                continue;
+            }
         };
         let _ = stream.set_nodelay(true);
         let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {

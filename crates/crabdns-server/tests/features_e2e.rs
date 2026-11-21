@@ -90,6 +90,19 @@ async fn test_doh_metrics_blocking_cache_and_rules_apis() {
         .unwrap();
     assert!(metrics_text.contains("crabdns_queries_total"));
     assert!(metrics_text.contains("crabdns_cache_hits_total"));
+    assert!(metrics_text.contains("crabdns_log_channel_dropped_total"));
+    assert!(metrics_text.contains("crabdns_singleflight_inflight"));
+    assert!(metrics_text.contains("crabdns_rdns_inflight"));
+    assert!(metrics_text.contains("crabdns_bg_refresh_inflight"));
+    assert!(metrics_text.contains("crabdns_acl_tracked_clients"));
+    assert!(metrics_text.contains("crabdns_auth_sessions"));
+    assert!(metrics_text.contains("crabdns_auth_login_attempts"));
+    assert!(metrics_text.contains("crabdns_storage_tracked_entries"));
+    #[cfg(target_os = "linux")]
+    {
+        assert!(metrics_text.contains("crabdns_process_resident_memory_bytes"));
+        assert!(metrics_text.contains("crabdns_process_open_fds"));
+    }
 
     // 3. Pause / Resume blocking
     let pause_resp = post_json(

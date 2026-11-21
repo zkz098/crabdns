@@ -33,6 +33,7 @@ pub(crate) fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
 const UDP_SOCKET_POOL_MAX_IDLE: usize = 128;
 const CONN_POOL_MAX_IDLE: usize = 32;
 const CONN_POOL_IDLE_TTL: Duration = Duration::from_secs(30);
+const MAX_DOH_RESPONSE_BYTES: usize = 65_535;
 
 #[derive(Debug, Default)]
 pub(crate) struct UdpSocketPool {
@@ -226,7 +227,7 @@ pub(crate) async fn exchange_doh(
     url: &str,
     query_wire: &[u8],
 ) -> Result<Vec<u8>> {
-    let resp = client
+    let mut resp = client
         .post(url)
         .header("content-type", "application/dns-message")
         .header("accept", "application/dns-message")
@@ -241,11 +242,32 @@ pub(crate) async fn exchange_doh(
             resp.status()
         )));
     }
-    let bytes = resp
-        .bytes()
+    if let Some(len) = resp.content_length()
+        && len > MAX_DOH_RESPONSE_BYTES as u64
+    {
+        return Err(CoreError::Upstream(format!(
+            "DoH response exceeds {MAX_DOH_RESPONSE_BYTES} bytes limit"
+        )));
+    }
+
+    let mut out = Vec::with_capacity(
+        usize::try_from(resp.content_length().unwrap_or(0))
+            .unwrap_or(0)
+            .min(MAX_DOH_RESPONSE_BYTES),
+    );
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| CoreError::Upstream(format!("DoH body read failed: {e}")))?;
-    Ok(bytes.to_vec())
+        .map_err(|e| CoreError::Upstream(format!("DoH body read failed: {e}")))?
+    {
+        if out.len().saturating_add(chunk.len()) > MAX_DOH_RESPONSE_BYTES {
+            return Err(CoreError::Upstream(format!(
+                "DoH response exceeds {MAX_DOH_RESPONSE_BYTES} bytes limit"
+            )));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 async fn tcp_roundtrip<S: AsyncReadExt + AsyncWriteExt + Unpin>(
@@ -275,4 +297,62 @@ pub(crate) async fn read_tcp_framed<R: AsyncReadExt + Unpin>(reader: &mut R) -> 
     let mut buf = vec![0_u8; len];
     reader.read_exact(&mut buf).await?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_exchange_doh_rejects_oversized_chunked_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut req_buf = [0_u8; 1024];
+                let mut total = 0;
+                while total < req_buf.len() {
+                    let Ok(n) = stream.read(&mut req_buf[total..]).await else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    total += n;
+                    if let Some(pos) = req_buf[..total].windows(4).position(|w| w == b"\r\n\r\n")
+                        && total >= pos + 4 + 3
+                    {
+                        break;
+                    }
+                }
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nTransfer-Encoding: chunked\r\n\r\n";
+                let _ = stream.write_all(header.as_bytes()).await;
+                // Two 40KB chunks exceed MAX_DOH_RESPONSE_BYTES (65,535) without Content-Length.
+                let chunk_data = vec![b'A'; 40_000];
+                let chunk_hdr = format!("{:x}\r\n", chunk_data.len());
+                for _ in 0..2 {
+                    let _ = stream.write_all(chunk_hdr.as_bytes()).await;
+                    let _ = stream.write_all(&chunk_data).await;
+                    let _ = stream.write_all(b"\r\n").await;
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+                let _ = stream.flush().await;
+                let _ = done_rx.await;
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("client");
+        let err = exchange_doh(&client, &format!("http://{addr}/dns-query"), &[0, 1, 2])
+            .await
+            .expect_err("oversized chunked DoH response must fail");
+        let _ = done_tx.send(());
+        assert!(err.to_string().contains("exceeds"), "unexpected err: {err}");
+    }
 }

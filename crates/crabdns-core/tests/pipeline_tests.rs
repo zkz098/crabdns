@@ -1,7 +1,9 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crabdns_core::PersistedCacheEntry;
 
 use crabdns_core::cache::{CacheKey, DnsCache};
 use crabdns_core::config::{BlockMode, UpstreamStrategy};
@@ -436,4 +438,152 @@ async fn test_pipeline_client_policies_and_profiles() {
     let kid_ev = rx.recv().await.unwrap();
     assert_eq!(kid_ev.client_name.as_deref(), Some("Kid iPad"));
     assert_eq!(kid_ev.matched_list.as_deref(), Some("group:Kids"));
+}
+
+async fn wait_for_refresh_idle(pipeline: &DnsPipeline, calls: &AtomicUsize, expected_calls: usize) {
+    for _ in 0..100 {
+        if calls.load(Ordering::SeqCst) >= expected_calls
+            && pipeline.runtime_metrics().bg_refresh_inflight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+}
+
+#[tokio::test]
+async fn test_background_refresh_clears_inflight_on_servfail() {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_bg = Arc::clone(&calls);
+
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 2048];
+        while let Ok((len, peer)) = sock.recv_from(&mut buf).await {
+            let req = Message::from_vec(&buf[..len]).unwrap();
+            let call_num = calls_bg.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+            resp.metadata.recursion_available = true;
+            resp.queries.clone_from(&req.queries);
+            if call_num == 1 {
+                resp.metadata.response_code = ResponseCode::ServFail;
+            } else if let Some(q) = req.queries.first() {
+                resp.metadata.response_code = ResponseCode::NoError;
+                resp.add_answer(Record::from_rdata(
+                    q.name().clone(),
+                    120,
+                    RData::A(A(Ipv4Addr::new(5, 6, 7, 8))),
+                ));
+            }
+            let _ = sock.send_to(&resp.to_vec().unwrap(), peer).await;
+        }
+    });
+
+    let mut cached_resp = Message::new(0x0001, MessageType::Response, OpCode::Query);
+    cached_resp.metadata.recursion_available = true;
+    cached_resp.metadata.response_code = ResponseCode::NoError;
+    let qname = Name::from_ascii("stale-refresh.example.").unwrap();
+    cached_resp.add_query(Query::query(qname.clone(), RecordType::A));
+    cached_resp.add_answer(Record::from_rdata(
+        qname,
+        10,
+        RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+    ));
+    let now_secs = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+
+    let cache = Arc::new(DnsCache::with_options(64, true, 10, 86_400, true));
+    let imported = cache.import_persisted(
+        vec![PersistedCacheEntry {
+            qname: "stale-refresh.example.".to_string(),
+            qtype: 1,
+            qclass: 1,
+            ecs_subnet: None,
+            dnssec_do: false,
+            upstream_scope: None,
+            wire_bytes: cached_resp.to_vec().unwrap(),
+            expires_at_unix_secs: now_secs - 1,
+            ttl_secs: 1,
+        }],
+        now_secs,
+    );
+    assert_eq!(imported, 1);
+
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let pool = Arc::new(UpstreamPool::new(&[format!("udp://{addr}")], 1000).unwrap());
+    let pipeline = DnsPipeline::new(filter, cache, pool, None);
+    let client: SocketAddr = "127.0.0.1:42000".parse().unwrap();
+
+    // First stale hit triggers background refresh #1 which gets SERVFAIL.
+    let r1 = Message::from_vec(
+        &pipeline
+            .handle_packet(
+                &build_query(0x7001, "stale-refresh.example.", RecordType::A),
+                client,
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r1.answers[0].data, RData::A(A(Ipv4Addr::new(1, 2, 3, 4))));
+    wait_for_refresh_idle(&pipeline, &calls, 1).await;
+
+    // Because RefreshGuard cleared inflight after SERVFAIL, second stale hit triggers refresh #2.
+    let r2 = Message::from_vec(
+        &pipeline
+            .handle_packet(
+                &build_query(0x7002, "stale-refresh.example.", RecordType::A),
+                client,
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r2.answers[0].data, RData::A(A(Ipv4Addr::new(1, 2, 3, 4))));
+    wait_for_refresh_idle(&pipeline, &calls, 2).await;
+
+    // Third hit serves refreshed 5.6.7.8 record from cache.
+    let r3 = Message::from_vec(
+        &pipeline
+            .handle_packet(
+                &build_query(0x7003, "stale-refresh.example.", RecordType::A),
+                client,
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r3.answers[0].data, RData::A(A(Ipv4Addr::new(5, 6, 7, 8))));
+}
+
+#[tokio::test]
+async fn test_log_dropped_metric_and_monotonic_pause() {
+    let filter = Arc::new(FilterEngine::new(&["||blocked.test^".to_string()]));
+    let cache = Arc::new(DnsCache::new(64, false));
+    let upstream = Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 50).unwrap());
+    let (tx, _rx_unpolled) = mpsc::channel(1);
+    let pipeline = DnsPipeline::new(filter, cache, upstream, Some(tx));
+    let client: SocketAddr = "127.0.0.1:43000".parse().unwrap();
+
+    for i in 0_u16..8 {
+        let q = build_query(0x8000 + i, "blocked.test.", RecordType::A);
+        let _ = pipeline.handle_packet(&q, client).await.unwrap();
+    }
+    let metrics = pipeline.runtime_metrics();
+    assert!(metrics.log_dropped > 0);
+    assert_eq!(metrics.singleflight_inflight, 0);
+
+    pipeline.pause_blocking(Some(60));
+    let (paused, rem) = pipeline.blocking_status();
+    assert!(paused);
+    assert!(rem.is_some_and(|s| s > 0 && s <= 60));
+    pipeline.resume_blocking();
+    assert_eq!(pipeline.blocking_status(), (false, None));
 }
