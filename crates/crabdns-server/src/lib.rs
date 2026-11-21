@@ -3,10 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use axum::serve::ListenerExt;
 use crabdns_core::{
-    Config, DdrConfig, DnsCache, DnsPipeline, FilterEngine, QueryEvent, UpstreamPool,
+    Config, DdrConfig, DnsCache, DnsPipeline, FilterEngine, QueryContext, QueryEvent,
+    QueryProtocol, UpstreamPool,
 };
 use crabdns_storage::{StorageEngine, spawn_log_sink};
+use crabdns_web::tls_api::TlsReloader;
 use crabdns_web::{AppState, build_router};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -14,10 +17,15 @@ use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 mod dot;
+mod tasks;
+mod tls;
+
+pub use tasks::prune_logs_once;
 
 pub struct RunningServer {
     pub dns_addr: SocketAddr,
     pub web_addr: SocketAddr,
+    pub web_tls_addr: Option<SocketAddr>,
     pub dot_addr: Option<SocketAddr>,
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
@@ -26,9 +34,14 @@ pub struct RunningServer {
     tcp_task: JoinHandle<()>,
     dot_task: Option<JoinHandle<()>>,
     web_task: JoinHandle<()>,
+    web_tls_accept_task: Option<JoinHandle<()>>,
+    web_tls_task: Option<JoinHandle<()>>,
     sub_refresh_task: JoinHandle<()>,
     hosts_watch_task: JoinHandle<()>,
     cache_persist_task: JoinHandle<()>,
+    log_prune_task: JoinHandle<()>,
+    tls_watch_task: Option<JoinHandle<()>>,
+    sighup_task: Option<JoinHandle<()>>,
     sink_handle: JoinHandle<()>,
 }
 
@@ -38,28 +51,34 @@ impl RunningServer {
             task.abort();
         }
         self.tcp_task.abort();
-        if let Some(dot_task) = &self.dot_task {
-            dot_task.abort();
-        }
+        abort_opt(self.dot_task.as_ref());
         self.web_task.abort();
+        abort_opt(self.web_tls_accept_task.as_ref());
+        abort_opt(self.web_tls_task.as_ref());
         self.sub_refresh_task.abort();
         self.hosts_watch_task.abort();
         self.cache_persist_task.abort();
+        self.log_prune_task.abort();
+        abort_opt(self.tls_watch_task.as_ref());
+        abort_opt(self.sighup_task.as_ref());
 
         for task in self.udp_tasks {
             let _ = task.await;
         }
         let _ = self.tcp_task.await;
-        if let Some(dot_task) = self.dot_task {
-            let _ = dot_task.await;
-        }
+        await_opt(self.dot_task).await;
         let _ = self.web_task.await;
+        await_opt(self.web_tls_accept_task).await;
+        await_opt(self.web_tls_task).await;
         let _ = self.sub_refresh_task.await;
         let _ = self.hosts_watch_task.await;
         let _ = self.cache_persist_task.await;
+        let _ = self.log_prune_task.await;
+        await_opt(self.tls_watch_task).await;
+        await_opt(self.sighup_task).await;
 
         if self.config.load().cache_persist_enabled {
-            let now_secs = current_unix_secs();
+            let now_secs = tasks::current_unix_secs();
             let snapshot = self.pipeline.cache().export_persisted(now_secs);
             if let Err(err) = self.storage.save_dns_cache(&snapshot) {
                 tracing::warn!(error = %err, "failed to persist dns cache on shutdown");
@@ -72,10 +91,16 @@ impl RunningServer {
     }
 }
 
-fn current_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+fn abort_opt(handle: Option<&JoinHandle<()>>) {
+    if let Some(h) = handle {
+        h.abort();
+    }
+}
+
+async fn await_opt(handle: Option<JoinHandle<()>>) {
+    if let Some(h) = handle {
+        let _ = h.await;
+    }
 }
 
 fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
@@ -115,36 +140,37 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.dns_rebinding_protection = saved_cfg.dns_rebinding_protection;
     config.block_any_queries = saved_cfg.block_any_queries;
     config.trusted_proxies = saved_cfg.trusted_proxies;
+    config.rdns_enabled = saved_cfg.rdns_enabled;
+    if saved_cfg.tls_cert_path.is_some() {
+        config.tls_cert_path = saved_cfg.tls_cert_path;
+    }
+    if saved_cfg.tls_key_path.is_some() {
+        config.tls_key_path = saved_cfg.tls_key_path;
+    }
 }
 
-#[allow(clippy::too_many_lines)]
-pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
-    let storage = Arc::new(StorageEngine::open(&config.data_dir)?);
-
-    if let Some(saved_cfg) = storage.load_config()? {
-        merge_saved_config(&mut config, saved_cfg);
-    }
-
-    let config = Arc::new(ArcSwap::from_pointee(config));
-    let current_cfg = config.load();
-
-    let filter = Arc::new(FilterEngine::new(&current_cfg.custom_rules));
+fn init_pipeline(
+    cfg: &Config,
+    storage: &StorageEngine,
+    log_tx: mpsc::Sender<QueryEvent>,
+) -> anyhow::Result<Arc<DnsPipeline>> {
+    let filter = Arc::new(FilterEngine::new(&cfg.custom_rules));
     let custom_rules_text = storage
         .load_custom_rules()?
-        .unwrap_or_else(|| current_cfg.custom_rules.join("\n"));
+        .unwrap_or_else(|| cfg.custom_rules.join("\n"));
     let custom_enabled = storage.load_custom_rules_enabled()?;
-    let sub_contents = storage.load_enabled_subscription_contents()?;
-    filter.reload_from_sources(&custom_rules_text, custom_enabled, &sub_contents);
+    let sub_contents = storage.load_enabled_named_subscription_contents()?;
+    filter.reload_from_named_sources(&custom_rules_text, custom_enabled, &sub_contents);
 
     let cache = Arc::new(DnsCache::with_options(
-        current_cfg.cache_size,
-        current_cfg.optimistic_cache,
-        current_cfg.cache_min_ttl_secs,
-        current_cfg.cache_max_ttl_secs,
-        current_cfg.cache_prefetch_enabled,
+        cfg.cache_size,
+        cfg.optimistic_cache,
+        cfg.cache_min_ttl_secs,
+        cfg.cache_max_ttl_secs,
+        cfg.cache_prefetch_enabled,
     ));
-    if current_cfg.cache_persist_enabled {
-        let now_secs = current_unix_secs();
+    if cfg.cache_persist_enabled {
+        let now_secs = tasks::current_unix_secs();
         match storage.load_dns_cache(now_secs, cache.stale_grace_secs()) {
             Ok(entries) => {
                 let restored = cache.import_persisted(entries, now_secs);
@@ -157,128 +183,156 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
             }
         }
     }
+
     let upstream = Arc::new(UpstreamPool::new_with_bootstrap(
-        &current_cfg.upstreams,
-        current_cfg.upstream_timeout_ms,
-        current_cfg.upstream_strategy,
-        &current_cfg.bootstrap_dns,
+        &cfg.upstreams,
+        cfg.upstream_timeout_ms,
+        cfg.upstream_strategy,
+        &cfg.bootstrap_dns,
     )?);
 
-    let (log_tx, log_rx) = mpsc::channel::<QueryEvent>(4096);
-    let (live_tx, _) = broadcast::channel::<QueryEvent>(512);
-    let sink_handle = spawn_log_sink(Arc::clone(&storage), log_rx, live_tx.clone());
-
     let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, Some(log_tx)));
-    pipeline.set_block_mode(current_cfg.block_mode);
-    pipeline.set_cname_cloaking(current_cfg.cname_cloaking_blocking);
-    pipeline.reload_acl(
-        &current_cfg.allow_cidrs,
-        &current_cfg.deny_cidrs,
-        current_cfg.rate_limit_qps,
-    )?;
+    configure_pipeline(&pipeline, cfg, storage)?;
+    Ok(pipeline)
+}
+
+fn configure_pipeline(
+    pipeline: &DnsPipeline,
+    cfg: &Config,
+    storage: &StorageEngine,
+) -> anyhow::Result<()> {
+    pipeline.set_block_mode(cfg.block_mode);
+    pipeline.set_cname_cloaking(cfg.cname_cloaking_blocking);
+    pipeline.set_rdns_enabled(cfg.rdns_enabled);
+    pipeline.reload_acl(&cfg.allow_cidrs, &cfg.deny_cidrs, cfg.rate_limit_qps)?;
     pipeline.reload_split_dns_with_bootstrap(
-        &current_cfg.split_dns,
-        current_cfg.upstream_timeout_ms,
-        current_cfg.upstream_strategy,
-        &current_cfg.bootstrap_dns,
+        &cfg.split_dns,
+        cfg.upstream_timeout_ms,
+        cfg.upstream_strategy,
+        &cfg.bootstrap_dns,
     )?;
     pipeline.reload_ecs(
-        current_cfg.ecs_enabled,
-        current_cfg.ecs_custom_ip.as_deref(),
-        current_cfg.ecs_ipv4_prefix,
-        current_cfg.ecs_ipv6_prefix,
+        cfg.ecs_enabled,
+        cfg.ecs_custom_ip.as_deref(),
+        cfg.ecs_ipv4_prefix,
+        cfg.ecs_ipv6_prefix,
     )?;
-    pipeline.set_dnssec_enabled(current_cfg.dnssec_enabled);
-    pipeline.set_hosts_enabled(current_cfg.hosts_enabled);
-    if current_cfg.hosts_enabled {
-        let resolved_hosts = current_cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");
+    pipeline.set_dnssec_enabled(cfg.dnssec_enabled);
+    pipeline.set_hosts_enabled(cfg.hosts_enabled);
+    if cfg.hosts_enabled {
+        let resolved_hosts = cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");
         if let Err(err) = pipeline.reload_hosts_from_path(std::path::Path::new(resolved_hosts)) {
             tracing::warn!(path = %resolved_hosts, error = %err, "failed to load hosts file");
         }
     }
     pipeline.reload_private_ptr(
-        current_cfg.private_ptr_enabled,
-        &current_cfg.private_ptr_upstreams,
-        current_cfg.upstream_timeout_ms,
-        current_cfg.upstream_strategy,
-        &current_cfg.bootstrap_dns,
+        cfg.private_ptr_enabled,
+        &cfg.private_ptr_upstreams,
+        cfg.upstream_timeout_ms,
+        cfg.upstream_strategy,
+        &cfg.bootstrap_dns,
     )?;
-    pipeline.reload_ddr(DdrConfig {
-        enabled: current_cfg.ddr_enabled,
-        hostname: current_cfg.ddr_hostname.clone(),
-        dot_port: current_cfg.listen_dot.map(|a| a.port()),
-        doh_enabled: current_cfg.doh_enabled,
-        doh_port: Some(current_cfg.listen_web.port()),
-    });
-    pipeline.set_dns_rebinding_protection(current_cfg.dns_rebinding_protection);
-    pipeline.set_block_any_queries(current_cfg.block_any_queries);
+    pipeline.set_dns_rebinding_protection(cfg.dns_rebinding_protection);
+    pipeline.set_block_any_queries(cfg.block_any_queries);
 
-    let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;
-    let dns_addr = tcp_listener.local_addr()?;
-    let udp_worker_count = std::thread::available_parallelism()
-        .map_or(2, std::num::NonZeroUsize::get)
-        .clamp(2, 16);
-    let udp_sockets = bind_udp_sockets(dns_addr, udp_worker_count)?;
+    let clients = storage.list_clients()?;
+    let groups = storage.list_client_groups()?;
+    pipeline.reload_clients(
+        &clients,
+        &groups,
+        cfg.upstream_timeout_ms,
+        cfg.upstream_strategy,
+        &cfg.bootstrap_dns,
+    )?;
+    Ok(())
+}
 
-    let tcp_max_connections = current_cfg.tcp_max_connections.max(1);
-    let tcp_idle_timeout = Duration::from_secs(current_cfg.tcp_idle_timeout_secs.max(1));
+struct WebAndTlsHandles {
+    dot_addr: Option<SocketAddr>,
+    dot_task: Option<JoinHandle<()>>,
+    web_addr: SocketAddr,
+    web_task: JoinHandle<()>,
+    web_tls_addr: Option<SocketAddr>,
+    web_tls_accept_task: Option<JoinHandle<()>>,
+    web_tls_task: Option<JoinHandle<()>>,
+}
 
-    let (dot_addr, dot_task) = match current_cfg.listen_dot {
-        Some(addr) => {
-            let cert_path = current_cfg.tls_cert_path.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("listen_dot requires tls_cert_path to be configured")
-            })?;
-            let key_path = current_cfg.tls_key_path.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("listen_dot requires tls_key_path to be configured")
-            })?;
-            let acceptor = dot::build_tls_acceptor(cert_path, key_path)?;
+async fn start_web_and_tls(
+    config: &Arc<ArcSwap<Config>>,
+    pipeline: &Arc<DnsPipeline>,
+    storage: &Arc<StorageEngine>,
+    tls_manager: &Arc<tls::TlsManager>,
+    live_tx: broadcast::Sender<QueryEvent>,
+    tcp_max_connections: usize,
+    tcp_idle_timeout: Duration,
+) -> anyhow::Result<WebAndTlsHandles> {
+    let current_cfg = config.load_full();
+
+    let (dot_addr, dot_task) = match (current_cfg.listen_dot, tls_manager.dot_acceptor()) {
+        (Some(addr), Some(acceptor)) => {
             let dot_listener = dot::bind_dot_listener(addr).await?;
             let bound_dot = dot_listener.local_addr()?;
-            let dot_pipe = Arc::clone(&pipeline);
             let task = tokio::spawn(dot::run_dot_server(
                 dot_listener,
                 acceptor,
-                dot_pipe,
+                Arc::clone(config),
+                Arc::clone(pipeline),
                 tcp_max_connections,
                 tcp_idle_timeout,
             ));
             (Some(bound_dot), Some(task))
         }
-        None => (None, None),
+        _ => (None, None),
     };
 
     let web_listener = TcpListener::bind(current_cfg.listen_web).await?;
     let web_addr = web_listener.local_addr()?;
 
-    tracing::info!(
-        dns = %dns_addr,
-        dot = ?dot_addr,
-        web = %web_addr,
-        "crabdns started"
-    );
+    let web_tls_listener = match current_cfg.listen_web_tls {
+        Some(addr) => Some(TcpListener::bind(addr).await?),
+        None => None,
+    };
+    let bound_web_tls = web_tls_listener.as_ref().and_then(|l| l.local_addr().ok());
+    tls_manager.update_bound_addrs(bound_web_tls, dot_addr);
 
-    let udp_tasks = udp_sockets
-        .into_iter()
-        .map(|sock| {
-            let udp_pipeline = Arc::clone(&pipeline);
-            tokio::spawn(run_udp_server(sock, udp_pipeline))
-        })
-        .collect();
-
-    let tcp_pipeline = Arc::clone(&pipeline);
-    let tcp_task = tokio::spawn(run_tcp_server(
-        tcp_listener,
-        tcp_pipeline,
-        tcp_max_connections,
-        tcp_idle_timeout,
-    ));
-
-    let app = build_router(AppState {
-        config: Arc::clone(&config),
-        pipeline: Arc::clone(&pipeline),
-        storage: Arc::clone(&storage),
-        live_tx,
+    pipeline.reload_ddr(DdrConfig {
+        enabled: current_cfg.ddr_enabled,
+        hostname: current_cfg.ddr_hostname.clone(),
+        dot_port: dot_addr.map(|a| a.port()),
+        doh_enabled: current_cfg.doh_enabled,
+        doh_port: bound_web_tls.map(|a| a.port()).or(Some(web_addr.port())),
     });
+
+    let tls_reloader: Option<Arc<dyn TlsReloader>> = Some(Arc::clone(tls_manager) as _);
+    let app = build_router(AppState {
+        config: Arc::clone(config),
+        pipeline: Arc::clone(pipeline),
+        storage: Arc::clone(storage),
+        live_tx,
+        tls_reloader,
+    });
+
+    let (web_tls_addr, web_tls_accept_task, web_tls_task) =
+        match (web_tls_listener, tls_manager.https_acceptor()) {
+            (Some(listener), Some(acceptor)) => {
+                let (https_listener, addr, accept_task) =
+                    tls::HttpsTlsListener::from_tcp_listener(listener, acceptor)?;
+                let tls_app = app.clone();
+                let serve_task = tokio::spawn(async move {
+                    if let Err(err) = axum::serve(
+                        https_listener.tap_io(|_| {}),
+                        tls_app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %err, "HTTPS web server error");
+                    }
+                });
+                (Some(addr), Some(accept_task), Some(serve_task))
+            }
+            _ => (None, None, None),
+        };
+
     let web_task = tokio::spawn(async move {
         if let Err(err) = axum::serve(
             web_listener,
@@ -290,94 +344,119 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         }
     });
 
-    let sub_storage = Arc::clone(&storage);
-    let sub_pipeline = Arc::clone(&pipeline);
-    let sub_config = Arc::clone(&config);
-    let sub_refresh_task = tokio::spawn(async move {
-        let client = crabdns_web::subscriptions::build_http_client();
-        let mut interval = tokio::time::interval(std::time::Duration::from_hours(24));
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            let allow_private = sub_config.load().allow_private_subscriptions;
-            if let Err(err) =
-                crabdns_web::subscriptions::refresh_enabled_subscriptions_job_with_policy(
-                    &client,
-                    &sub_storage,
-                    &sub_pipeline,
-                    allow_private,
-                )
-                .await
-            {
-                tracing::warn!(error = %err, "scheduled subscription refresh failed");
-            }
-        }
-    });
+    Ok(WebAndTlsHandles {
+        dot_addr,
+        dot_task,
+        web_addr,
+        web_task,
+        web_tls_addr,
+        web_tls_accept_task,
+        web_tls_task,
+    })
+}
 
-    let hosts_config = Arc::clone(&config);
-    let hosts_pipeline = Arc::clone(&pipeline);
-    let hosts_watch_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        let mut last_mtime: Option<std::time::SystemTime> = None;
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            let cfg = hosts_config.load();
-            if !cfg.hosts_enabled {
-                last_mtime = None;
-                continue;
-            }
-            let path_str = cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");
-            let path = std::path::Path::new(path_str);
-            let Ok(meta) = tokio::fs::metadata(path).await else {
-                continue;
-            };
-            let Ok(mtime) = meta.modified() else {
-                continue;
-            };
-            if last_mtime != Some(mtime) {
-                if let Err(err) = hosts_pipeline.reload_hosts_from_path(path) {
-                    tracing::warn!(path = %path_str, error = %err, "failed to reload hosts file");
-                } else {
-                    last_mtime = Some(mtime);
-                }
-            }
-        }
-    });
+pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
+    let storage = Arc::new(StorageEngine::open(&config.data_dir)?);
 
-    let cache_persist_config = Arc::clone(&config);
-    let cache_persist_pipeline = Arc::clone(&pipeline);
-    let cache_persist_storage = Arc::clone(&storage);
-    let cache_persist_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(300));
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            if !cache_persist_config.load().cache_persist_enabled {
-                continue;
-            }
-            let now_secs = current_unix_secs();
-            let snapshot = cache_persist_pipeline.cache().export_persisted(now_secs);
-            if let Err(err) = cache_persist_storage.save_dns_cache(&snapshot) {
-                tracing::warn!(error = %err, "periodic dns cache persistence failed");
-            }
-        }
-    });
+    if let Some(saved_cfg) = storage.load_config()? {
+        merge_saved_config(&mut config, saved_cfg);
+    }
+
+    let config = Arc::new(ArcSwap::from_pointee(config));
+    let current_cfg = config.load_full();
+
+    let (log_tx, log_rx) = mpsc::channel::<QueryEvent>(4096);
+    let (live_tx, _) = broadcast::channel::<QueryEvent>(512);
+    let sink_handle = spawn_log_sink(Arc::clone(&storage), log_rx, live_tx.clone());
+    let pipeline = init_pipeline(&current_cfg, &storage, log_tx)?;
+
+    let tls_manager = Arc::new(tls::TlsManager::new(
+        current_cfg.listen_web_tls,
+        current_cfg.listen_dot,
+        current_cfg.tls_cert_path.as_deref(),
+        current_cfg.tls_key_path.as_deref(),
+    )?);
+
+    let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;
+    let dns_addr = tcp_listener.local_addr()?;
+    let udp_worker_count = std::thread::available_parallelism()
+        .map_or(2, std::num::NonZeroUsize::get)
+        .clamp(2, 16);
+    let udp_sockets = bind_udp_sockets(dns_addr, udp_worker_count)?;
+
+    let tcp_max_connections = current_cfg.tcp_max_connections.max(1);
+    let tcp_idle_timeout = Duration::from_secs(current_cfg.tcp_idle_timeout_secs.max(1));
+
+    let web_tls = start_web_and_tls(
+        &config,
+        &pipeline,
+        &storage,
+        &tls_manager,
+        live_tx,
+        tcp_max_connections,
+        tcp_idle_timeout,
+    )
+    .await?;
+
+    tracing::info!(
+        dns = %dns_addr,
+        dot = ?web_tls.dot_addr,
+        web = %web_tls.web_addr,
+        web_tls = ?web_tls.web_tls_addr,
+        "crabdns started"
+    );
+
+    let udp_tasks = udp_sockets
+        .into_iter()
+        .map(|sock| {
+            let udp_pipeline = Arc::clone(&pipeline);
+            tokio::spawn(run_udp_server(sock, udp_pipeline))
+        })
+        .collect();
+
+    let tcp_task = tokio::spawn(run_tcp_server(
+        tcp_listener,
+        Arc::clone(&pipeline),
+        tcp_max_connections,
+        tcp_idle_timeout,
+    ));
+
+    let tls_active = web_tls.dot_addr.is_some() || web_tls.web_tls_addr.is_some();
+    let tls_watch_task = tls_active.then(|| tasks::spawn_tls_watch_task(Arc::clone(&tls_manager)));
+    let sighup_task = tasks::spawn_sighup_task(
+        Arc::clone(&config),
+        Arc::clone(&pipeline),
+        Arc::clone(&tls_manager),
+    );
 
     Ok(RunningServer {
         dns_addr,
-        web_addr,
-        dot_addr,
-        pipeline,
-        storage,
-        config,
+        web_addr: web_tls.web_addr,
+        web_tls_addr: web_tls.web_tls_addr,
+        dot_addr: web_tls.dot_addr,
+        pipeline: Arc::clone(&pipeline),
+        storage: Arc::clone(&storage),
+        config: Arc::clone(&config),
         udp_tasks,
         tcp_task,
-        dot_task,
-        web_task,
-        sub_refresh_task,
-        hosts_watch_task,
-        cache_persist_task,
+        dot_task: web_tls.dot_task,
+        web_task: web_tls.web_task,
+        web_tls_accept_task: web_tls.web_tls_accept_task,
+        web_tls_task: web_tls.web_tls_task,
+        sub_refresh_task: tasks::spawn_subscription_refresh_task(
+            Arc::clone(&config),
+            Arc::clone(&storage),
+            Arc::clone(&pipeline),
+        ),
+        hosts_watch_task: tasks::spawn_hosts_watch_task(Arc::clone(&config), Arc::clone(&pipeline)),
+        cache_persist_task: tasks::spawn_cache_persist_task(
+            Arc::clone(&config),
+            Arc::clone(&pipeline),
+            Arc::clone(&storage),
+        ),
+        log_prune_task: tasks::spawn_log_prune_task(config, storage),
+        tls_watch_task,
+        sighup_task,
         sink_handle,
     })
 }
@@ -450,18 +529,29 @@ async fn run_tcp_server(
         let pipe = Arc::clone(&pipeline);
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(err) = handle_dns_stream(stream, peer, pipe, idle_timeout).await {
+            if let Err(err) = handle_dns_stream_with_context(
+                stream,
+                peer,
+                pipe,
+                idle_timeout,
+                QueryProtocol::Tcp,
+                None,
+            )
+            .await
+            {
                 tracing::debug!(peer = %peer, error = %err, "TCP DNS connection closed");
             }
         });
     }
 }
 
-pub(crate) async fn handle_dns_stream<S>(
+pub(crate) async fn handle_dns_stream_with_context<S>(
     mut stream: S,
     peer: SocketAddr,
     pipeline: Arc<DnsPipeline>,
     idle_timeout: Duration,
+    protocol: QueryProtocol,
+    client_id: Option<String>,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -477,7 +567,16 @@ where
         }
         query.resize(len, 0);
         tokio::time::timeout(idle_timeout, stream.read_exact(&mut query)).await??;
-        let resp = pipeline.handle_packet(&query, peer).await?;
+        let resp = pipeline
+            .handle_packet_with_context(
+                &query,
+                QueryContext {
+                    client_addr: peer,
+                    protocol,
+                    client_id: client_id.clone(),
+                },
+            )
+            .await?;
         let resp_len = u16::try_from(resp.len())?;
         write_buf.clear();
         write_buf.extend_from_slice(&resp_len.to_be_bytes());

@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
 
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Extension, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use crabdns_core::{QueryContext, QueryProtocol, validate_client_id};
 use serde::Deserialize;
 
 use crate::RouterState;
@@ -23,6 +24,29 @@ pub async fn doh_get(
     headers: HeaderMap,
     Query(query): Query<DohQuery>,
 ) -> Response {
+    doh_get_inner(&state, connect_info, &headers, &query, None).await
+}
+
+pub async fn doh_get_client(
+    State(state): State<RouterState>,
+    Path(raw_client_id): Path<String>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    Query(query): Query<DohQuery>,
+) -> Response {
+    let Ok(client_id) = validate_client_id(&raw_client_id) else {
+        return (StatusCode::BAD_REQUEST, "invalid client_id").into_response();
+    };
+    doh_get_inner(&state, connect_info, &headers, &query, Some(client_id)).await
+}
+
+async fn doh_get_inner(
+    state: &RouterState,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+    query: &DohQuery,
+    client_id: Option<String>,
+) -> Response {
     if !state.app.config.load().doh_enabled {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -32,8 +56,8 @@ pub async fn doh_get(
     let Some(packet) = decode_base64url(encoded) else {
         return (StatusCode::BAD_REQUEST, "invalid base64url 'dns' parameter").into_response();
     };
-    let client = client_addr(&state, connect_info, &headers);
-    handle_doh_packet(&state, &packet, client).await
+    let client = client_addr(state, connect_info, headers);
+    handle_doh_packet(state, &packet, client, client_id).await
 }
 
 pub async fn doh_post(
@@ -41,6 +65,29 @@ pub async fn doh_post(
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    doh_post_inner(&state, connect_info, &headers, &body, None).await
+}
+
+pub async fn doh_post_client(
+    State(state): State<RouterState>,
+    Path(raw_client_id): Path<String>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Ok(client_id) = validate_client_id(&raw_client_id) else {
+        return (StatusCode::BAD_REQUEST, "invalid client_id").into_response();
+    };
+    doh_post_inner(&state, connect_info, &headers, &body, Some(client_id)).await
+}
+
+async fn doh_post_inner(
+    state: &RouterState,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+    body: &Bytes,
+    client_id: Option<String>,
 ) -> Response {
     if !state.app.config.load().doh_enabled {
         return StatusCode::NOT_FOUND.into_response();
@@ -58,15 +105,30 @@ pub async fn doh_post(
                 .into_response();
         }
     }
-    let client = client_addr(&state, connect_info, &headers);
-    handle_doh_packet(&state, &body, client).await
+    let client = client_addr(state, connect_info, headers);
+    handle_doh_packet(state, body, client, client_id).await
 }
 
-async fn handle_doh_packet(state: &RouterState, packet: &[u8], client: SocketAddr) -> Response {
+async fn handle_doh_packet(
+    state: &RouterState,
+    packet: &[u8],
+    client: SocketAddr,
+    client_id: Option<String>,
+) -> Response {
     if packet.is_empty() || packet.len() > MAX_DOH_PACKET_BYTES {
         return (StatusCode::BAD_REQUEST, "invalid DNS message size").into_response();
     }
-    match state.app.pipeline.handle_packet(packet, client).await {
+    let ctx = QueryContext {
+        client_addr: client,
+        protocol: QueryProtocol::Doh,
+        client_id,
+    };
+    match state
+        .app
+        .pipeline
+        .handle_packet_with_context(packet, ctx)
+        .await
+    {
         Ok(resp) => (
             StatusCode::OK,
             [

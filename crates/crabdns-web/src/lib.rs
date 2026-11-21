@@ -20,12 +20,14 @@ use tower_http::cors::CorsLayer;
 use ts_rs::TS;
 
 pub mod auth;
+pub mod clients_api;
 pub mod config_api;
 pub mod controls;
 pub mod doh;
 pub mod metrics;
 pub mod proxy;
 pub mod subscriptions;
+pub mod tls_api;
 
 #[derive(Embed)]
 #[folder = "../../webui/dist"]
@@ -37,12 +39,14 @@ pub struct AppState {
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
     pub live_tx: broadcast::Sender<QueryEvent>,
+    pub tls_reloader: Option<Arc<dyn tls_api::TlsReloader>>,
 }
 
 #[derive(Clone)]
 pub struct RouterState {
     pub app: AppState,
     pub sub_lock: Arc<Mutex<()>>,
+    pub client_lock: Arc<Mutex<()>>,
     pub http_client: reqwest::Client,
     pub sessions: Arc<auth::SessionStore>,
     pub login_limiter: Arc<auth::LoginRateLimiter>,
@@ -105,6 +109,7 @@ pub fn build_router(state: AppState) -> Router {
     let router_state = RouterState {
         app: state,
         sub_lock: Arc::new(Mutex::new(())),
+        client_lock: Arc::new(Mutex::new(())),
         http_client: subscriptions::build_http_client(),
         sessions: Arc::new(auth::SessionStore::default()),
         login_limiter: Arc::new(auth::LoginRateLimiter::default()),
@@ -138,6 +143,21 @@ pub fn build_router(state: AppState) -> Router {
             post(subscriptions::refresh_subscription),
         )
         .route(
+            "/api/clients",
+            get(clients_api::list_clients_overview).post(clients_api::create_client),
+        )
+        .route(
+            "/api/clients/{id}",
+            put(clients_api::update_client).delete(clients_api::delete_client),
+        )
+        .route("/api/client-groups", post(clients_api::create_group))
+        .route(
+            "/api/client-groups/{id}",
+            put(clients_api::update_group).delete(clients_api::delete_group),
+        )
+        .route("/api/tls/status", get(tls_api::get_tls_status))
+        .route("/api/tls/reload", post(tls_api::reload_tls))
+        .route(
             "/api/config",
             get(config_api::get_config).put(config_api::update_config),
         )
@@ -156,6 +176,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/metrics", get(metrics::prometheus_metrics))
         .route("/dns-query", get(doh::doh_get).post(doh::doh_post))
+        .route(
+            "/dns-query/{client_id}",
+            get(doh::doh_get_client).post(doh::doh_post_client),
+        )
         .route("/api/auth/status", get(auth::auth_status))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
@@ -365,6 +389,7 @@ mod tests {
             pipeline: Arc::clone(&pipeline),
             storage,
             live_tx,
+            tls_reloader: None,
         });
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -485,6 +510,7 @@ mod tests {
             pipeline: Arc::clone(&pipeline),
             storage,
             live_tx,
+            tls_reloader: None,
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -589,6 +615,7 @@ mod tests {
             pipeline,
             storage,
             live_tx,
+            tls_reloader: None,
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -693,6 +720,7 @@ mod tests {
             pipeline,
             storage,
             live_tx,
+            tls_reloader: None,
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");

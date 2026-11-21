@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use chrono::Utc;
-use crabdns_core::{QueryEvent, QueryOutcome};
+use crabdns_core::{QueryEvent, QueryOutcome, QueryProtocol};
 use crabdns_storage::StorageEngine;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tempfile::TempDir;
@@ -12,6 +12,8 @@ fn sample_events(count: usize) -> Vec<QueryEvent> {
         .map(|i| QueryEvent {
             timestamp: now,
             client_ip: format!("192.168.1.{}", (i % 250) + 1),
+            client_name: None,
+            protocol: QueryProtocol::Udp,
             domain: format!("host-{}.example.com", i % 500),
             qtype: "A".to_string(),
             outcome: match i % 4 {
@@ -25,6 +27,7 @@ fn sample_events(count: usize) -> Vec<QueryEvent> {
             } else {
                 None
             },
+            matched_list: None,
             upstream: if i % 4 == 3 {
                 Some("127.0.0.1:5353".to_string())
             } else {
@@ -32,6 +35,7 @@ fn sample_events(count: usize) -> Vec<QueryEvent> {
             },
             elapsed_us: 120 + (i as u64 % 500),
             rcode: "NoError".to_string(),
+            answers: Vec::new(),
         })
         .collect()
 }

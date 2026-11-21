@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -50,6 +52,10 @@ pub struct QuickRuleResponse {
 #[ts(export)]
 pub struct TestRulePayload {
     pub domain: String,
+    #[serde(default)]
+    pub client_ip: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -58,6 +64,7 @@ pub struct TestRuleResponse {
     pub domain: String,
     pub action: String,
     pub matched_rule: Option<String>,
+    pub matched_list: Option<String>,
     pub rewrite: Option<String>,
 }
 
@@ -176,7 +183,28 @@ pub async fn test_rule(
         return Err(err_response(StatusCode::BAD_REQUEST, "Invalid domain name"));
     }
 
-    let decision = state.app.pipeline.filter().evaluate(&clean);
+    let parsed_ip = match payload
+        .client_ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => Some(
+            raw.parse::<IpAddr>()
+                .map_err(|_| err_response(StatusCode::BAD_REQUEST, "Invalid client_ip"))?,
+        ),
+        None => None,
+    };
+    let client_id = payload
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let decision = state
+        .app
+        .pipeline
+        .evaluate_filter_for_client(&clean, parsed_ip, client_id);
     let (action, rewrite) = match decision.action {
         FilterAction::Block => ("block".to_string(), None),
         FilterAction::Allow => {
@@ -200,6 +228,7 @@ pub async fn test_rule(
         domain: clean,
         action,
         matched_rule: decision.matched_rule,
+        matched_list: decision.matched_list,
         rewrite,
     }))
 }

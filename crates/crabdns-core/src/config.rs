@@ -40,6 +40,8 @@ pub struct Config {
     pub listen_dns: SocketAddr,
     #[serde(default = "default_listen_web")]
     pub listen_web: SocketAddr,
+    #[serde(default)]
+    pub listen_web_tls: Option<SocketAddr>,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
     #[serde(default = "default_upstreams")]
@@ -126,6 +128,8 @@ pub struct Config {
     pub block_any_queries: bool,
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    #[serde(default = "default_true")]
+    pub rdns_enabled: bool,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -196,6 +200,7 @@ impl Default for Config {
         Self {
             listen_dns: default_listen_dns(),
             listen_web: default_listen_web(),
+            listen_web_tls: None,
             data_dir: default_data_dir(),
             upstreams: default_upstreams(),
             bootstrap_dns: Vec::new(),
@@ -239,6 +244,7 @@ impl Default for Config {
             dns_rebinding_protection: false,
             block_any_queries: false,
             trusted_proxies: Vec::new(),
+            rdns_enabled: true,
         }
     }
 }

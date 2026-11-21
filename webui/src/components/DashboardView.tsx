@@ -5,6 +5,7 @@ import type { TopItem } from "../types/TopItem";
 
 interface DashboardViewProps {
   stats: StatsResponse | null;
+  clientNameMap?: Record<string, string>;
   onFlushCache?: () => Promise<void> | void;
   cacheFlushedMsg?: string;
 }
@@ -158,6 +159,7 @@ export function DashboardView(props: DashboardViewProps) {
           delay={280}
           title={t("topClients")}
           items={s()?.top_clients ?? []}
+          nameMap={props.clientNameMap}
           barColor="bg-emerald-500/12 dark:bg-emerald-500/15"
         />
       </div>
@@ -208,7 +210,13 @@ function LegendItem(props: { color: string; label: string; count: number }) {
   );
 }
 
-function TopListCard(props: { title: string; items: TopItem[]; barColor: string; delay: number }) {
+function TopListCard(props: {
+  title: string;
+  items: TopItem[];
+  barColor: string;
+  delay: number;
+  nameMap?: Record<string, string>;
+}) {
   const maxCount = () => Math.max(1, ...props.items.map((item) => item.count));
 
   return (
@@ -227,14 +235,25 @@ function TopListCard(props: { title: string; items: TopItem[]; barColor: string;
           <For each={props.items}>
             {(item) => {
               const widthPct = () => `${Math.max(4, (item.count / maxCount()) * 100)}%`;
+              const mappedName = () => props.nameMap?.[item.name];
               return (
                 <div class="relative overflow-hidden rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-3 text-xs group">
                   <div
                     class={`absolute inset-y-0 left-0 rounded-lg transition-[width] duration-500 ease-out ${props.barColor}`}
                     style={{ width: widthPct() }}
                   />
-                  <span class="relative font-mono text-[#171717] dark:text-[#ededed] truncate">
-                    {item.name}
+                  <span
+                    class="relative font-mono text-[#171717] dark:text-[#ededed] truncate"
+                    title={item.name}
+                  >
+                    <Show when={mappedName()} fallback={item.name}>
+                      {(name) => (
+                        <>
+                          <span class="font-sans font-medium">{name()}</span>{" "}
+                          <span class="text-[#8f8f8f] dark:text-[#71717a]">({item.name})</span>
+                        </>
+                      )}
+                    </Show>
                   </span>
                   <span class="relative font-mono text-[#666666] dark:text-[#a1a1aa] tabular-nums shrink-0">
                     {item.count.toLocaleString()}

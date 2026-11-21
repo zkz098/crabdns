@@ -110,10 +110,12 @@ export function LogsView(props: LogsViewProps) {
               <thead class="bg-[#fafafa] dark:bg-[#111111] border-b border-[#eaeaea] dark:border-[#262626] text-[#666666] dark:text-[#a1a1aa] text-[11px] font-medium uppercase tracking-wider">
                 <tr>
                   <th class="px-4 py-2.5">{t("logsColTime")}</th>
+                  <th class="px-4 py-2.5">{t("logsColProtocol")}</th>
                   <th class="px-4 py-2.5">{t("logsColClient")}</th>
                   <th class="px-4 py-2.5">{t("logsColDomain")}</th>
                   <th class="px-4 py-2.5">{t("logsColType")}</th>
                   <th class="px-4 py-2.5">{t("logsColStatus")}</th>
+                  <th class="px-4 py-2.5">{t("logsColAnswers")}</th>
                   <th class="px-4 py-2.5 text-right">{t("logsColLatency")}</th>
                   <Show when={props.onQuickRule}>
                     <th class="px-4 py-2.5 text-right" />
@@ -127,20 +129,56 @@ export function LogsView(props: LogsViewProps) {
                       <td class="px-4 py-2.5 text-xs text-[#666666] dark:text-[#8f8f8f] whitespace-nowrap tabular-nums">
                         {new Date(entry.timestamp).toLocaleTimeString()}
                       </td>
-                      <td class="px-4 py-2.5 font-mono text-xs text-[#666666] dark:text-[#a1a1aa] whitespace-nowrap tabular-nums">
-                        {entry.client_ip}
+                      <td class="px-4 py-2.5 whitespace-nowrap">
+                        <span class="px-1.5 py-0.5 rounded font-mono text-[10px] font-medium uppercase bg-[#f4f4f5] dark:bg-[#1a1a1a] text-[#666666] dark:text-[#a1a1aa]">
+                          {entry.protocol}
+                        </span>
+                      </td>
+                      <td class="px-4 py-2.5 text-xs whitespace-nowrap">
+                        <Show when={entry.client_name}>
+                          {(name) => (
+                            <div class="font-medium text-[#171717] dark:text-[#ededed] leading-tight">
+                              {name()}
+                            </div>
+                          )}
+                        </Show>
+                        <div class="font-mono text-[#666666] dark:text-[#a1a1aa] tabular-nums">
+                          {entry.client_ip}
+                        </div>
                       </td>
                       <td
-                        class="px-4 py-2.5 font-mono text-xs text-[#171717] dark:text-[#ededed] max-w-xs lg:max-w-md truncate"
+                        class="px-4 py-2.5 text-xs text-[#171717] dark:text-[#ededed] max-w-xs lg:max-w-md"
                         title={entry.matched_rule ?? entry.upstream ?? entry.domain}
                       >
-                        {entry.domain}
+                        <div class="font-mono truncate">{entry.domain}</div>
+                        <Show when={entry.matched_list || entry.matched_rule}>
+                          <div class="flex items-center gap-1.5 mt-0.5 text-[10px] text-[#8f8f8f] dark:text-[#71717a] truncate">
+                            <Show when={entry.matched_list}>
+                              {(listName) => (
+                                <span class="px-1.5 py-0.2 rounded bg-rose-500/10 text-rose-700 dark:text-rose-400 border border-rose-500/20 shrink-0">
+                                  {t("logsMatchedList")}: {listName()}
+                                </span>
+                              )}
+                            </Show>
+                            <Show when={entry.matched_rule}>
+                              {(rule) => <span class="font-mono truncate">{rule()}</span>}
+                            </Show>
+                          </div>
+                        </Show>
                       </td>
                       <td class="px-4 py-2.5 font-mono text-xs text-[#666666] dark:text-[#8f8f8f]">
                         {entry.qtype}
                       </td>
                       <td class="px-4 py-2.5 whitespace-nowrap">
                         <OutcomeBadge outcome={entry.outcome} />
+                      </td>
+                      <td
+                        class="px-4 py-2.5 font-mono text-[11px] text-[#666666] dark:text-[#a1a1aa] max-w-[12rem] truncate"
+                        title={entry.answers.join(", ")}
+                      >
+                        <Show when={entry.answers.length > 0} fallback="-">
+                          {entry.answers.join(", ")}
+                        </Show>
                       </td>
                       <td class="px-4 py-2.5 text-right font-mono text-xs text-[#666666] dark:text-[#a1a1aa] whitespace-nowrap tabular-nums">
                         {(entry.elapsed_us / 1000).toFixed(2)} ms
@@ -179,16 +217,39 @@ export function LogsView(props: LogsViewProps) {
             {(entry) => (
               <div class="animate-row-enter rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-3.5 space-y-2 shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:shadow-none">
                 <div class="flex items-start justify-between gap-2">
-                  <span class="font-mono text-xs font-medium text-[#171717] dark:text-[#ededed] break-all leading-relaxed">
-                    {entry.domain}
-                  </span>
-                  <div class="shrink-0">
+                  <div class="min-w-0">
+                    <span class="font-mono text-xs font-medium text-[#171717] dark:text-[#ededed] break-all leading-relaxed">
+                      {entry.domain}
+                    </span>
+                    <Show when={entry.matched_list}>
+                      {(listName) => (
+                        <div class="mt-0.5">
+                          <span class="px-1.5 py-0.5 rounded text-[10px] bg-rose-500/10 text-rose-700 dark:text-rose-400 border border-rose-500/20">
+                            {t("logsMatchedList")}: {listName()}
+                          </span>
+                        </div>
+                      )}
+                    </Show>
+                  </div>
+                  <div class="shrink-0 flex items-center gap-1.5">
+                    <span class="px-1.5 py-0.5 rounded font-mono text-[10px] uppercase bg-[#f4f4f5] dark:bg-[#1a1a1a] text-[#666666] dark:text-[#a1a1aa]">
+                      {entry.protocol}
+                    </span>
                     <OutcomeBadge outcome={entry.outcome} />
                   </div>
                 </div>
+                <Show when={entry.answers.length > 0}>
+                  <div class="font-mono text-[11px] text-[#666666] dark:text-[#a1a1aa] break-all">
+                    {entry.answers.join(", ")}
+                  </div>
+                </Show>
                 <div class="flex items-center justify-between text-[11px] text-[#666666] dark:text-[#8f8f8f] tabular-nums">
                   <div class="flex items-center gap-2 font-mono truncate">
-                    <span>{entry.client_ip}</span>
+                    <span>
+                      {entry.client_name
+                        ? `${entry.client_name} (${entry.client_ip})`
+                        : entry.client_ip}
+                    </span>
                     <span class="text-[#d4d4d8] dark:text-[#333333]">·</span>
                     <span>{entry.qtype}</span>
                   </div>

@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { t } from "../i18n";
 import type { BlockMode } from "../types/BlockMode";
 import type { ConfigResponse } from "../types/ConfigResponse";
+import type { TlsStatusResponse } from "../types/TlsStatusResponse";
 import type { UpstreamCapabilities } from "../types/UpstreamCapabilities";
 import type { UpstreamStatus } from "../types/UpstreamStatus";
 import type { UpstreamStrategy } from "../types/UpstreamStrategy";
@@ -82,6 +83,17 @@ interface SettingsViewProps {
   onBlockAnyQueriesChange: (val: boolean) => void;
   trustedProxiesText: string;
   onTrustedProxiesChange: (val: string) => void;
+  rdnsEnabled: boolean;
+  onRdnsEnabledChange: (val: boolean) => void;
+  tlsCertPath: string;
+  onTlsCertPathChange: (val: string) => void;
+  tlsKeyPath: string;
+  onTlsKeyPathChange: (val: string) => void;
+  tlsStatus: TlsStatusResponse | null;
+  reloadingTls: boolean;
+  tlsMessage: string;
+  tlsIsError: boolean;
+  onReloadTls: () => void;
   configMessage: string;
   configIsError: boolean;
   onSave: () => void;
@@ -786,7 +798,7 @@ export function SettingsView(props: SettingsViewProps) {
           <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
             {t("settingsLanTitle")}
           </p>
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
               <input
                 type="checkbox"
@@ -813,6 +825,15 @@ export function SettingsView(props: SettingsViewProps) {
                 class="rounded border-[#eaeaea] dark:border-[#262626]"
               />
               {t("settingsDdrLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.rdnsEnabled}
+                onChange={(e) => props.onRdnsEnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsRdnsLabel")}
             </label>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -854,6 +875,101 @@ export function SettingsView(props: SettingsViewProps) {
               class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-2.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
             />
           </div>
+        </div>
+
+        {/* Native TLS & Certificate Hot Reload */}
+        <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+              {t("settingsTlsTitle")}
+            </p>
+            <div class="flex items-center gap-2">
+              <Show when={props.tlsMessage}>
+                <span
+                  class={`text-xs font-medium ${
+                    props.tlsIsError
+                      ? "text-rose-600 dark:text-rose-400"
+                      : "text-emerald-600 dark:text-emerald-400"
+                  }`}
+                >
+                  {props.tlsMessage}
+                </span>
+              </Show>
+              <button
+                type="button"
+                disabled={
+                  props.reloadingTls ||
+                  !(props.tlsStatus?.https_enabled || props.tlsStatus?.dot_enabled)
+                }
+                onClick={props.onReloadTls}
+                class="h-8 px-3 rounded-lg text-xs font-medium border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#171717] dark:text-[#ededed] cursor-pointer disabled:opacity-50"
+              >
+                {props.reloadingTls ? t("settingsTlsReloading") : t("settingsTlsReloadBtn")}
+              </button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsTlsCertPathLabel")}
+              </label>
+              <input
+                type="text"
+                placeholder="/etc/crabdns/cert.pem"
+                value={props.tlsCertPath}
+                onInput={(e) => props.onTlsCertPathChange(e.currentTarget.value)}
+                class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+              />
+            </div>
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsTlsKeyPathLabel")}
+              </label>
+              <input
+                type="text"
+                placeholder="/etc/crabdns/key.pem"
+                value={props.tlsKeyPath}
+                onInput={(e) => props.onTlsKeyPathChange(e.currentTarget.value)}
+                class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+              />
+            </div>
+          </div>
+
+          <Show
+            when={props.tlsStatus && (props.tlsStatus.https_enabled || props.tlsStatus.dot_enabled)}
+            fallback={
+              <p class="text-[11px] text-[#8f8f8f] dark:text-[#71717a]">
+                {t("settingsTlsInactive")}
+              </p>
+            }
+          >
+            <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+              <div>
+                <span class="text-[#8f8f8f] dark:text-[#71717a] block mb-0.5">
+                  {t("settingsTlsFingerprint")}
+                </span>
+                <span class="font-mono text-[11px] text-[#171717] dark:text-[#ededed] break-all">
+                  {props.tlsStatus?.cert_fingerprint_sha256 ?? "-"}
+                </span>
+              </div>
+              <div>
+                <span class="text-[#8f8f8f] dark:text-[#71717a] block mb-0.5">
+                  {t("settingsTlsLastLoaded")}
+                </span>
+                <span class="font-mono text-[11px] text-[#171717] dark:text-[#ededed] break-all">
+                  {props.tlsStatus?.last_loaded_at ?? "-"}
+                </span>
+              </div>
+              <Show when={props.tlsStatus?.last_error}>
+                {(err) => (
+                  <div class="sm:col-span-2 text-rose-600 dark:text-rose-400 font-mono text-[11px] break-all">
+                    {err()}
+                  </div>
+                )}
+              </Show>
+            </div>
+          </Show>
         </div>
 
         {/* Web UI Authentication */}
@@ -941,7 +1057,7 @@ export function SettingsView(props: SettingsViewProps) {
             <p class="text-xs font-medium text-[#666666] dark:text-[#a1a1aa]">
               {t("settingsReadonlyTitle")}
             </p>
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
               <div class="bg-[#fafafa] dark:bg-[#050505] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3">
                 <span class="text-[#8f8f8f] dark:text-[#71717a] block mb-0.5">
                   {t("settingsDnsListen")}
@@ -956,6 +1072,22 @@ export function SettingsView(props: SettingsViewProps) {
                 </span>
                 <span class="font-mono text-[#171717] dark:text-[#ededed] break-all">
                   {cfg().listen_web}
+                </span>
+              </div>
+              <div class="bg-[#fafafa] dark:bg-[#050505] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3">
+                <span class="text-[#8f8f8f] dark:text-[#71717a] block mb-0.5">
+                  {t("settingsWebTlsListen")}
+                </span>
+                <span class="font-mono text-[#171717] dark:text-[#ededed] break-all">
+                  {cfg().listen_web_tls ?? "-"}
+                </span>
+              </div>
+              <div class="bg-[#fafafa] dark:bg-[#050505] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3">
+                <span class="text-[#8f8f8f] dark:text-[#71717a] block mb-0.5">
+                  {t("settingsDotListen")}
+                </span>
+                <span class="font-mono text-[#171717] dark:text-[#ededed] break-all">
+                  {cfg().listen_dot ?? "-"}
                 </span>
               </div>
               <div class="bg-[#fafafa] dark:bg-[#050505] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3">

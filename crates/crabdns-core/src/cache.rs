@@ -8,10 +8,13 @@ use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::wire::{patch_wire_ttls, scan_rr_ttl_offsets};
+
 pub const DEFAULT_MIN_TTL_SECS: u32 = 10;
 pub const DEFAULT_MAX_TTL_SECS: u32 = 86_400;
 const PREFETCH_MIN_HITS: u32 = 2;
 const PREFETCH_ELAPSED_RATIO: f64 = 0.85;
+const STALE_RESPONSE_TTL_SECS: u32 = 30;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CacheKey {
@@ -20,6 +23,7 @@ pub struct CacheKey {
     pub qclass: u16,
     pub ecs_subnet: Option<(IpAddr, u8)>,
     pub dnssec_do: bool,
+    pub upstream_scope: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +31,7 @@ pub struct CachedEntry {
     pub wire_bytes: Vec<u8>,
     pub inserted_at: Instant,
     pub ttl: Duration,
+    pub ttl_offsets: Arc<[(usize, u32)]>,
     pub hit_count: Arc<AtomicU32>,
     pub refresh_inflight: Arc<AtomicBool>,
 }
@@ -45,6 +50,8 @@ pub struct PersistedCacheEntry {
     pub qclass: u16,
     pub ecs_subnet: Option<(IpAddr, u8)>,
     pub dnssec_do: bool,
+    #[serde(default)]
+    pub upstream_scope: Option<String>,
     pub wire_bytes: Vec<u8>,
     pub expires_at_unix_secs: i64,
     pub ttl_secs: u32,
@@ -152,6 +159,8 @@ impl DnsCache {
             }
             let mut bytes = entry.wire_bytes;
             patch_tx_id(&mut bytes, query_id);
+            let elapsed_secs = u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX);
+            patch_wire_ttls(&mut bytes, &entry.ttl_offsets, elapsed_secs, None);
             return Some(CacheHit {
                 wire_bytes: bytes,
                 is_stale: false,
@@ -168,6 +177,12 @@ impl DnsCache {
                 .is_ok();
             let mut bytes = entry.wire_bytes;
             patch_tx_id(&mut bytes, query_id);
+            patch_wire_ttls(
+                &mut bytes,
+                &entry.ttl_offsets,
+                0,
+                Some(STALE_RESPONSE_TTL_SECS),
+            );
             return Some(CacheHit {
                 wire_bytes: bytes,
                 is_stale: true,
@@ -181,13 +196,16 @@ impl DnsCache {
     }
 
     pub fn insert(&self, key: CacheKey, wire_bytes: Vec<u8>, ttl_secs: u32) {
-        let clamped_ttl = u64::from(ttl_secs.clamp(self.min_ttl_secs, self.max_ttl_secs));
+        let clamped_ttl = ttl_secs.clamp(self.min_ttl_secs, self.max_ttl_secs);
+        let ttl_offsets: Arc<[(usize, u32)]> =
+            scan_rr_ttl_offsets(&wire_bytes, self.min_ttl_secs, clamped_ttl).into();
         self.inner.insert(
             key,
             CachedEntry {
                 wire_bytes,
                 inserted_at: Instant::now(),
-                ttl: Duration::from_secs(clamped_ttl),
+                ttl: Duration::from_secs(u64::from(clamped_ttl)),
+                ttl_offsets,
                 hit_count: Arc::new(AtomicU32::new(0)),
                 refresh_inflight: Arc::new(AtomicBool::new(false)),
             },
@@ -219,6 +237,7 @@ impl DnsCache {
                 qclass: key.qclass,
                 ecs_subnet: key.ecs_subnet,
                 dnssec_do: key.dnssec_do,
+                upstream_scope: key.upstream_scope.clone(),
                 wire_bytes: entry.wire_bytes.clone(),
                 expires_at_unix_secs: expires_at,
                 ttl_secs,
@@ -258,13 +277,22 @@ impl DnsCache {
                 qclass: item.qclass,
                 ecs_subnet: item.ecs_subnet,
                 dnssec_do: item.dnssec_do,
+                upstream_scope: item.upstream_scope,
             };
+            let effective_ttl = item.ttl_secs.max(1);
+            let ttl_offsets: Arc<[(usize, u32)]> = scan_rr_ttl_offsets(
+                &item.wire_bytes,
+                self.min_ttl_secs.min(effective_ttl),
+                effective_ttl,
+            )
+            .into();
             self.inner.insert(
                 key,
                 CachedEntry {
                     wire_bytes: item.wire_bytes,
                     inserted_at,
                     ttl,
+                    ttl_offsets,
                     hit_count: Arc::new(AtomicU32::new(0)),
                     refresh_inflight: Arc::new(AtomicBool::new(false)),
                 },
@@ -327,6 +355,7 @@ mod tests {
             qclass: 1,
             ecs_subnet: None,
             dnssec_do: false,
+            upstream_scope: None,
         };
         cache.insert(key.clone(), vec![0x00, 0x01, 0x81, 0x80], 60);
 
@@ -345,6 +374,7 @@ mod tests {
             qclass: 1,
             ecs_subnet: None,
             dnssec_do: false,
+            upstream_scope: None,
         };
         let expired = CachedEntry {
             wire_bytes: vec![0x00, 0x01, 0x81, 0x80],
@@ -352,6 +382,7 @@ mod tests {
                 .checked_sub(Duration::from_secs(120))
                 .expect("valid instant"),
             ttl: Duration::from_secs(30),
+            ttl_offsets: Arc::from([]),
             hit_count: Arc::new(AtomicU32::new(0)),
             refresh_inflight: Arc::new(AtomicBool::new(false)),
         };
@@ -382,6 +413,7 @@ mod tests {
             qclass: 1,
             ecs_subnet: None,
             dnssec_do: false,
+            upstream_scope: None,
         };
         // TTL below min (5s -> clamped to 30s)
         cache.insert(key.clone(), vec![0x00, 0x01, 0x81, 0x80], 5);
@@ -397,6 +429,7 @@ mod tests {
                     .checked_sub(Duration::from_secs(27))
                     .expect("valid instant"),
                 ttl: Duration::from_secs(30),
+                ttl_offsets: Arc::from([]),
                 hit_count: Arc::new(AtomicU32::new(1)),
                 refresh_inflight: Arc::new(AtomicBool::new(false)),
             },
@@ -421,6 +454,7 @@ mod tests {
             qclass: 1,
             ecs_subnet: None,
             dnssec_do: false,
+            upstream_scope: None,
         };
         cache1.insert(key.clone(), vec![0x12, 0x34, 0x81, 0x80], 120);
         let exported = cache1.export_persisted(1_700_000_000);
@@ -432,5 +466,128 @@ mod tests {
         let hit = cache2.get(&key, 0x9999).expect("restored hit");
         assert!(!hit.is_stale);
         assert_eq!(&hit.wire_bytes[0..2], &[0x99, 0x99]);
+    }
+
+    #[test]
+    fn test_cache_ttl_decrement_opt_preservation_and_soa_negative_ttl() {
+        use std::net::Ipv4Addr;
+
+        use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query};
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::{Name, RData, Record, RecordType};
+
+        let name = Name::from_ascii("ttl.example.com.").unwrap();
+        let mut msg = Message::new(0x1111, MessageType::Response, OpCode::Query);
+        msg.metadata.recursion_desired = true;
+        msg.metadata.recursion_available = true;
+        msg.add_query(Query::query(name.clone(), RecordType::A));
+        msg.add_answer(Record::from_rdata(
+            name.clone(),
+            120,
+            RData::A(A(Ipv4Addr::new(93, 184, 216, 34))),
+        ));
+        let mut edns = Edns::new();
+        edns.set_max_payload(1232);
+        edns.set_dnssec_ok(true);
+        msg.edns = Some(edns);
+        let wire = msg.to_vec().unwrap();
+
+        let cache = DnsCache::with_options(64, true, 10, 86_400, false);
+        let key = CacheKey {
+            qname: "ttl.example.com.".to_string(),
+            qtype: 1,
+            qclass: 1,
+            ecs_subnet: None,
+            dnssec_do: true,
+            upstream_scope: None,
+        };
+        let offsets: Arc<[(usize, u32)]> = scan_rr_ttl_offsets(&wire, 10, 86_400).into();
+        assert_eq!(offsets.len(), 1);
+        cache.inner.insert(
+            key.clone(),
+            CachedEntry {
+                wire_bytes: wire.clone(),
+                inserted_at: Instant::now().checked_sub(Duration::from_secs(40)).unwrap(),
+                ttl: Duration::from_secs(120),
+                ttl_offsets: Arc::clone(&offsets),
+                hit_count: Arc::new(AtomicU32::new(0)),
+                refresh_inflight: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
+        let hit = cache.get(&key, 0x2222).unwrap();
+        assert!(!hit.is_stale);
+        let parsed_hit = Message::from_vec(&hit.wire_bytes).unwrap();
+        assert_eq!(parsed_hit.id, 0x2222);
+        assert!(parsed_hit.answers[0].ttl <= 80 && parsed_hit.answers[0].ttl >= 79);
+        assert!(
+            parsed_hit
+                .edns
+                .as_ref()
+                .is_some_and(|e| e.flags().dnssec_ok)
+        );
+
+        // Stale hit returns RFC 8767 fixed stale TTL = 30
+        cache.inner.insert(
+            key.clone(),
+            CachedEntry {
+                wire_bytes: wire,
+                inserted_at: Instant::now()
+                    .checked_sub(Duration::from_secs(200))
+                    .unwrap(),
+                ttl: Duration::from_secs(120),
+                ttl_offsets: offsets,
+                hit_count: Arc::new(AtomicU32::new(0)),
+                refresh_inflight: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let stale_hit = cache.get(&key, 0x3333).unwrap();
+        assert!(stale_hit.is_stale);
+        let parsed_stale = Message::from_vec(&stale_hit.wire_bytes).unwrap();
+        assert_eq!(parsed_stale.answers[0].ttl, 30);
+    }
+
+    #[test]
+    fn test_cache_soa_negative_ttl() {
+        use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+        use hickory_proto::rr::rdata::SOA;
+        use hickory_proto::rr::{Name, RData, Record};
+
+        use crate::wire::compute_response_cache_ttl;
+
+        // RFC 2308 negative caching SOA minimum TTL
+        let mut nx_msg = Message::new(1, MessageType::Response, OpCode::Query);
+        nx_msg.metadata.response_code = ResponseCode::NXDomain;
+        nx_msg.add_authority(Record::from_rdata(
+            Name::from_ascii("example.com.").unwrap(),
+            300,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns1.example.com.").unwrap(),
+                Name::from_ascii("hostmaster.example.com.").unwrap(),
+                1,
+                3600,
+                600,
+                86400,
+                45,
+            )),
+        ));
+        assert_eq!(compute_response_cache_ttl(&nx_msg), Some(45));
+
+        let mut nodata_msg = Message::new(2, MessageType::Response, OpCode::Query);
+        nodata_msg.metadata.response_code = ResponseCode::NoError;
+        nodata_msg.add_authority(Record::from_rdata(
+            Name::from_ascii("example.com.").unwrap(),
+            25,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns1.example.com.").unwrap(),
+                Name::from_ascii("hostmaster.example.com.").unwrap(),
+                1,
+                3600,
+                600,
+                86400,
+                90,
+            )),
+        ));
+        assert_eq!(compute_response_cache_ttl(&nodata_msg), Some(25));
     }
 }

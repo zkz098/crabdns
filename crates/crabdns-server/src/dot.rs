@@ -1,35 +1,35 @@
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crabdns_core::DnsPipeline;
-use rustls::ServerConfig;
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use arc_swap::ArcSwap;
+use crabdns_core::{Config, DnsPipeline, QueryProtocol, validate_client_id};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 
-use crate::handle_dns_stream;
+use crate::handle_dns_stream_with_context;
 
-pub fn build_tls_acceptor(cert_path: &Path, key_path: &Path) -> anyhow::Result<TlsAcceptor> {
-    let certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_file_iter(cert_path)?.collect::<std::result::Result<Vec<_>, _>>()?;
-    if certs.is_empty() {
-        anyhow::bail!("no certificates found in {}", cert_path.display());
+fn extract_dot_client_id(sni: Option<&str>, base_hostname: Option<&str>) -> Option<String> {
+    let sni = sni?.trim().trim_end_matches('.');
+    let base = base_hostname?.trim().trim_end_matches('.');
+    if sni.is_empty() || base.is_empty() {
+        return None;
     }
-    let key = PrivateKeyDer::from_pem_file(key_path)?;
-    let mut server_config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    server_config.alpn_protocols = vec![b"dot".to_vec()];
-    Ok(TlsAcceptor::from(Arc::new(server_config)))
+    let lower_sni = sni.to_ascii_lowercase();
+    let lower_base = base.to_ascii_lowercase();
+    let suffix = format!(".{lower_base}");
+    let label = lower_sni.strip_suffix(&suffix)?;
+    if label.contains('.') {
+        return None;
+    }
+    validate_client_id(label).ok()
 }
 
 pub async fn run_dot_server(
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    acceptor: Arc<ArcSwap<TlsAcceptor>>,
+    config: Arc<ArcSwap<Config>>,
     pipeline: Arc<DnsPipeline>,
     max_connections: usize,
     idle_timeout: Duration,
@@ -45,13 +45,25 @@ pub async fn run_dot_server(
             drop(stream);
             continue;
         };
-        let tls = acceptor.clone();
+        let tls = acceptor.load_full();
+        let cfg = Arc::clone(&config);
         let pipe = Arc::clone(&pipeline);
         tokio::spawn(async move {
             let _permit = permit;
             match tokio::time::timeout(idle_timeout, tls.accept(stream)).await {
                 Ok(Ok(tls_stream)) => {
-                    if let Err(err) = handle_dns_stream(tls_stream, peer, pipe, idle_timeout).await
+                    let sni = tls_stream.get_ref().1.server_name().map(str::to_string);
+                    let ddr_host = cfg.load().ddr_hostname.clone();
+                    let client_id = extract_dot_client_id(sni.as_deref(), ddr_host.as_deref());
+                    if let Err(err) = handle_dns_stream_with_context(
+                        tls_stream,
+                        peer,
+                        pipe,
+                        idle_timeout,
+                        QueryProtocol::Dot,
+                        client_id,
+                    )
+                    .await
                     {
                         tracing::debug!(peer = %peer, error = %err, "DoT DNS connection closed");
                     }
@@ -69,4 +81,29 @@ pub async fn run_dot_server(
 
 pub async fn bind_dot_listener(addr: SocketAddr) -> anyhow::Result<TcpListener> {
     Ok(TcpListener::bind(addr).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_dot_client_id() {
+        assert_eq!(
+            extract_dot_client_id(Some("kid-phone.dns.home.arpa"), Some("dns.home.arpa")),
+            Some("kid-phone".to_string())
+        );
+        assert_eq!(
+            extract_dot_client_id(Some("dns.home.arpa"), Some("dns.home.arpa")),
+            None
+        );
+        assert_eq!(
+            extract_dot_client_id(Some("a.b.dns.home.arpa"), Some("dns.home.arpa")),
+            None
+        );
+        assert_eq!(
+            extract_dot_client_id(Some("bad!id.dns.home.arpa"), Some("dns.home.arpa")),
+            None
+        );
+    }
 }

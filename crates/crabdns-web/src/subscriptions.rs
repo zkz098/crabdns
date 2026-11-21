@@ -198,12 +198,12 @@ pub fn rebuild_filter_engine(
         .load_custom_rules_enabled()
         .map_err(|e| e.to_string())?;
     let sub_contents = storage
-        .load_enabled_subscription_contents()
+        .load_enabled_named_subscription_contents()
         .map_err(|e| e.to_string())?;
 
     pipeline
         .filter()
-        .reload_from_sources(&custom_rules, custom_enabled, &sub_contents);
+        .reload_from_named_sources(&custom_rules, custom_enabled, &sub_contents);
     Ok(())
 }
 

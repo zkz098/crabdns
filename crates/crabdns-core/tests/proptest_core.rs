@@ -192,6 +192,7 @@ proptest! {
                 qclass: 1,
                 ecs_subnet: None,
                 dnssec_do: false,
+                upstream_scope: None,
             };
             cache.insert(key.clone(), wire.clone(), ttl);
             let hit = cache.get(&key, query_id.wrapping_add(1)).expect("fresh cache hit");

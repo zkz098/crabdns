@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crabdns_core::{Config, PersistedCacheEntry, QueryEvent, QueryOutcome};
+use crabdns_core::{
+    ClientGroup, ClientProfile, Config, PersistedCacheEntry, QueryEvent, QueryOutcome,
+    QueryProtocol,
+};
 use dashmap::DashMap;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use foldhash::fast::RandomState;
@@ -66,6 +69,8 @@ const KEY_CUSTOM_RULES_ENABLED: &[u8] = b"custom_rules_enabled";
 const KEY_SUBSCRIPTIONS: &[u8] = b"subscriptions";
 const KEY_COUNTERS: &[u8] = b"counters";
 const KEY_RUNTIME_CONFIG: &[u8] = b"runtime_config";
+const KEY_CLIENTS: &[u8] = b"clients";
+const KEY_CLIENT_GROUPS: &[u8] = b"client_groups";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PersistedCounters {
@@ -188,8 +193,7 @@ impl StorageEngine {
                 continue;
             };
             if let Some(ref q) = needle
-                && !event.domain.to_ascii_lowercase().contains(q)
-                && !event.client_ip.contains(q)
+                && !event_matches_search(&event, q)
             {
                 continue;
             }
@@ -277,16 +281,57 @@ impl StorageEngine {
     }
 
     pub fn load_enabled_subscription_contents(&self) -> Result<Vec<String>> {
+        let named = self.load_enabled_named_subscription_contents()?;
+        Ok(named.into_iter().map(|(_, text)| text).collect())
+    }
+
+    pub fn load_enabled_named_subscription_contents(&self) -> Result<Vec<(String, String)>> {
         let subs = self.list_subscriptions()?;
         let mut contents = Vec::new();
         for sub in subs {
             if sub.enabled
                 && let Some(text) = self.load_subscription_content(&sub.id)?
             {
-                contents.push(text);
+                contents.push((sub.name, text));
             }
         }
         Ok(contents)
+    }
+
+    pub fn list_clients(&self) -> Result<Vec<ClientProfile>> {
+        match self.meta.get(KEY_CLIENTS)? {
+            Some(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn save_clients(&self, clients: &[ClientProfile]) -> Result<()> {
+        let bytes = serde_json::to_vec(clients)?;
+        self.meta.insert(KEY_CLIENTS, bytes)?;
+        Ok(())
+    }
+
+    pub fn list_client_groups(&self) -> Result<Vec<ClientGroup>> {
+        match self.meta.get(KEY_CLIENT_GROUPS)? {
+            Some(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn save_client_groups(&self, groups: &[ClientGroup]) -> Result<()> {
+        let bytes = serde_json::to_vec(groups)?;
+        self.meta.insert(KEY_CLIENT_GROUPS, bytes)?;
+        Ok(())
+    }
+
+    pub fn client_query_counts(&self) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = self
+            .client_counts
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect();
+        out.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        out
     }
 
     pub fn save_config(&self, config: &Config) -> Result<()> {
@@ -303,16 +348,30 @@ impl StorageEngine {
     }
 
     pub fn prune_older_than(&self, cutoff_ms: u64) -> Result<usize> {
+        const CHUNK_SIZE: usize = 4096;
         let end_key = encode_log_key(cutoff_ms, 0);
-        let mut batch = self.db.batch();
         let mut removed = 0_usize;
-        for guard in self.logs.range(..end_key) {
-            let k = guard.key()?;
-            batch.remove(&self.logs, k);
-            removed += 1;
-        }
-        if removed > 0 {
+        loop {
+            let mut keys = Vec::new();
+            for guard in self.logs.range(..end_key) {
+                keys.push(guard.key()?);
+                if keys.len() >= CHUNK_SIZE {
+                    break;
+                }
+            }
+            let chunk_len = keys.len();
+            if chunk_len == 0 {
+                break;
+            }
+            let mut batch = self.db.batch();
+            for k in keys {
+                batch.remove(&self.logs, k);
+            }
             batch.commit()?;
+            removed += chunk_len;
+            if chunk_len < CHUNK_SIZE {
+                break;
+            }
         }
         Ok(removed)
     }
@@ -390,6 +449,33 @@ fn top_n(map: &DashMap<String, u64, RandomState>, limit: usize) -> Vec<TopItem> 
     items
 }
 
+fn protocol_label(protocol: QueryProtocol) -> &'static str {
+    match protocol {
+        QueryProtocol::Udp => "udp",
+        QueryProtocol::Tcp => "tcp",
+        QueryProtocol::Dot => "dot",
+        QueryProtocol::Doh => "doh",
+    }
+}
+
+fn event_matches_search(event: &QueryEvent, needle: &str) -> bool {
+    event.domain.to_ascii_lowercase().contains(needle)
+        || event.client_ip.contains(needle)
+        || event
+            .client_name
+            .as_deref()
+            .is_some_and(|n| n.to_ascii_lowercase().contains(needle))
+        || event
+            .matched_list
+            .as_deref()
+            .is_some_and(|l| l.to_ascii_lowercase().contains(needle))
+        || event
+            .answers
+            .iter()
+            .any(|a| a.to_ascii_lowercase().contains(needle))
+        || protocol_label(event.protocol).contains(needle)
+}
+
 fn outcome_label(outcome: &QueryOutcome) -> &'static str {
     match outcome {
         QueryOutcome::Forwarded => "forwarded",
@@ -455,24 +541,32 @@ mod tests {
             QueryEvent {
                 timestamp: Utc::now(),
                 client_ip: "127.0.0.1".to_string(),
+                client_name: None,
+                protocol: QueryProtocol::Udp,
                 domain: "ads.example.com".to_string(),
                 qtype: "A".to_string(),
                 outcome: QueryOutcome::Blocked,
                 matched_rule: Some("||ads.example.com^".to_string()),
+                matched_list: Some("custom".to_string()),
                 upstream: None,
                 elapsed_us: 42,
                 rcode: "NOERROR".to_string(),
+                answers: vec!["0.0.0.0".to_string()],
             },
             QueryEvent {
                 timestamp: Utc::now(),
                 client_ip: "127.0.0.1".to_string(),
+                client_name: Some("nas-box".to_string()),
+                protocol: QueryProtocol::Doh,
                 domain: "rust-lang.org".to_string(),
                 qtype: "AAAA".to_string(),
                 outcome: QueryOutcome::Forwarded,
                 matched_rule: None,
+                matched_list: None,
                 upstream: Some("udp://1.1.1.1:53".to_string()),
                 elapsed_us: 1200,
                 rcode: "NOERROR".to_string(),
+                answers: vec!["2606:4700::1".to_string()],
             },
         ];
 
@@ -520,13 +614,17 @@ mod tests {
         tx.send(QueryEvent {
             timestamp: Utc::now(),
             client_ip: "10.0.0.5".to_string(),
+            client_name: None,
+            protocol: QueryProtocol::Udp,
             domain: "sink.example.com".to_string(),
             qtype: "A".to_string(),
             outcome: QueryOutcome::Cached,
             matched_rule: None,
+            matched_list: None,
             upstream: Some("cache".to_string()),
             elapsed_us: 10,
             rcode: "NOERROR".to_string(),
+            answers: vec!["1.2.3.4".to_string()],
         })
         .await
         .expect("send");
@@ -538,5 +636,75 @@ mod tests {
         handle.await.expect("sink join");
         let logs = storage.query_logs(10, Some("sink"), None).expect("logs");
         assert_eq!(logs.len(), 1);
+    }
+
+    #[test]
+    fn test_clients_groups_persistence_and_selective_pruning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = StorageEngine::open(dir.path()).expect("open fjall");
+
+        let groups = vec![ClientGroup {
+            id: "grp-1".to_string(),
+            name: "Family".to_string(),
+            description: "Home devices".to_string(),
+            blocking_enabled: true,
+            use_global_rules: true,
+            custom_rules: "||ads.test^".to_string(),
+            upstreams: vec![],
+            block_mode: None,
+            cname_cloaking_blocking: None,
+        }];
+        let clients = vec![ClientProfile {
+            id: "cli-1".to_string(),
+            name: "Living Room TV".to_string(),
+            identifiers: vec!["192.168.1.55".to_string()],
+            group_id: Some("grp-1".to_string()),
+            blocking_enabled: None,
+            use_global_rules: None,
+            custom_rules: String::new(),
+            upstreams: vec![],
+            block_mode: None,
+            tags: vec!["tv".to_string()],
+        }];
+        storage.save_client_groups(&groups).expect("save groups");
+        storage.save_clients(&clients).expect("save clients");
+        assert_eq!(storage.list_client_groups().unwrap(), groups);
+        assert_eq!(storage.list_clients().unwrap(), clients);
+
+        let now = Utc::now();
+        let old_event = QueryEvent {
+            timestamp: now - chrono::TimeDelta::hours(48),
+            client_ip: "192.168.1.55".to_string(),
+            client_name: Some("Living Room TV".to_string()),
+            protocol: QueryProtocol::Udp,
+            domain: "old.example.com".to_string(),
+            qtype: "A".to_string(),
+            outcome: QueryOutcome::Forwarded,
+            matched_rule: None,
+            matched_list: None,
+            upstream: None,
+            elapsed_us: 100,
+            rcode: "NOERROR".to_string(),
+            answers: vec!["93.184.216.34".to_string()],
+        };
+        let fresh_event = QueryEvent {
+            timestamp: now - chrono::TimeDelta::hours(1),
+            domain: "fresh.example.com".to_string(),
+            ..old_event.clone()
+        };
+        storage
+            .record_batch(&[old_event, fresh_event])
+            .expect("record");
+
+        let cutoff_ms = (now - chrono::TimeDelta::hours(24))
+            .timestamp_millis()
+            .max(0)
+            .cast_unsigned();
+        let pruned = storage.prune_older_than(cutoff_ms).expect("prune");
+        assert_eq!(pruned, 1);
+
+        let remaining = storage.query_logs(10, None, None).expect("logs");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].domain, "fresh.example.com");
     }
 }

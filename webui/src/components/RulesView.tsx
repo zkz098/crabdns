@@ -22,7 +22,11 @@ interface RulesViewProps {
   onRefreshSubscription: (id: string) => void;
   onRefreshAllSubscriptions: () => void;
   onDeleteSubscription: (id: string) => void;
-  onTestRule?: (domain: string) => Promise<TestRuleResponse | null>;
+  onTestRule?: (
+    domain: string,
+    clientIp?: string | null,
+    clientId?: string | null,
+  ) => Promise<TestRuleResponse | null>;
 }
 
 const PRESETS = [
@@ -60,6 +64,7 @@ export function RulesView(props: RulesViewProps) {
   const [newEnabled, setNewEnabled] = createSignal(true);
   const [formError, setFormError] = createSignal("");
   const [testDomain, setTestDomain] = createSignal("");
+  const [testClient, setTestClient] = createSignal("");
   const [testResult, setTestResult] = createSignal<TestRuleResponse | null>(null);
   const [testing, setTesting] = createSignal(false);
 
@@ -67,9 +72,19 @@ export function RulesView(props: RulesViewProps) {
     e.preventDefault();
     const d = testDomain().trim();
     if (!d || !props.onTestRule) return;
+    const rawClient = testClient().trim();
+    let clientIp: string | null = null;
+    let clientId: string | null = null;
+    if (rawClient.length > 0) {
+      if (rawClient.includes(":") || /^\d{1,3}(\.\d{1,3}){3}$/.test(rawClient)) {
+        clientIp = rawClient;
+      } else {
+        clientId = rawClient;
+      }
+    }
     setTesting(true);
     try {
-      setTestResult(await props.onTestRule(d));
+      setTestResult(await props.onTestRule(d, clientIp, clientId));
     } finally {
       setTesting(false);
     }
@@ -123,6 +138,13 @@ export function RulesView(props: RulesViewProps) {
               placeholder={t("rulesTesterPlaceholder")}
               class="flex-1 h-9 bg-white dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none focus:border-[#171717] dark:focus:border-[#ededed]"
             />
+            <input
+              type="text"
+              value={testClient()}
+              onInput={(e) => setTestClient(e.currentTarget.value)}
+              placeholder={t("rulesTesterClientPlaceholder")}
+              class="sm:w-56 h-9 bg-white dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none focus:border-[#171717] dark:focus:border-[#ededed]"
+            />
             <button
               type="submit"
               disabled={testing()}
@@ -137,6 +159,13 @@ export function RulesView(props: RulesViewProps) {
                 <span class="font-semibold uppercase text-[#171717] dark:text-[#ededed]">
                   {res().action}
                 </span>
+                <Show when={res().matched_list}>
+                  {(listName) => (
+                    <span class="px-1.5 py-0.5 rounded text-[11px] font-sans bg-sky-500/10 text-sky-700 dark:text-sky-400 border border-sky-500/20">
+                      {t("logsMatchedList")}: {listName()}
+                    </span>
+                  )}
+                </Show>
                 <Show
                   when={res().matched_rule}
                   fallback={

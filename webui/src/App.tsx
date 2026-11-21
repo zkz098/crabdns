@@ -1,4 +1,5 @@
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { ClientsView } from "./components/ClientsView";
 import { DashboardView } from "./components/DashboardView";
 import { Header } from "./components/Header";
 import { LoginView } from "./components/LoginView";
@@ -11,6 +12,9 @@ import { t } from "./i18n";
 import type { AuthStatusResponse } from "./types/AuthStatusResponse";
 import type { BlockMode } from "./types/BlockMode";
 import type { BlockingStatusResponse } from "./types/BlockingStatusResponse";
+import type { ClientGroupPayload } from "./types/ClientGroupPayload";
+import type { ClientProfilePayload } from "./types/ClientProfilePayload";
+import type { ClientsOverviewResponse } from "./types/ClientsOverviewResponse";
 import type { ConfigResponse } from "./types/ConfigResponse";
 import type { ConfigUpdatePayload } from "./types/ConfigUpdatePayload";
 import type { CreateSubscriptionPayload } from "./types/CreateSubscriptionPayload";
@@ -21,6 +25,7 @@ import type { RulesPayload } from "./types/RulesPayload";
 import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { StatsResponse } from "./types/StatsResponse";
 import type { TestRuleResponse } from "./types/TestRuleResponse";
+import type { TlsStatusResponse } from "./types/TlsStatusResponse";
 import type { UpstreamCapabilities } from "./types/UpstreamCapabilities";
 import type { UpstreamStatus } from "./types/UpstreamStatus";
 import type { UpstreamStrategy } from "./types/UpstreamStrategy";
@@ -84,6 +89,17 @@ export default function App() {
   const [dnsRebindingProtection, setDnsRebindingProtection] = createSignal(false);
   const [blockAnyQueries, setBlockAnyQueries] = createSignal(false);
   const [trustedProxiesText, setTrustedProxiesText] = createSignal("");
+  const [tlsCertPath, setTlsCertPath] = createSignal("");
+  const [tlsKeyPath, setTlsKeyPath] = createSignal("");
+  const [rdnsEnabled, setRdnsEnabled] = createSignal(true);
+  const [tlsStatus, setTlsStatus] = createSignal<TlsStatusResponse | null>(null);
+  const [reloadingTls, setReloadingTls] = createSignal(false);
+  const [tlsMessage, setTlsMessage] = createSignal("");
+  const [tlsIsError, setTlsIsError] = createSignal(false);
+  const [clientsOverview, setClientsOverview] = createSignal<ClientsOverviewResponse | null>(null);
+  const [clientsMessage, setClientsMessage] = createSignal("");
+  const [clientsIsError, setClientsIsError] = createSignal(false);
+  const [clientsSaving, setClientsSaving] = createSignal(false);
   const [blockingStatus, setBlockingStatus] = createSignal<BlockingStatusResponse | null>(null);
   const [cacheFlushedMsg, setCacheFlushedMsg] = createSignal("");
   const [quickRuleMsg, setQuickRuleMsg] = createSignal("");
@@ -294,6 +310,130 @@ export default function App() {
     setDnsRebindingProtection(data.dns_rebinding_protection);
     setBlockAnyQueries(data.block_any_queries);
     setTrustedProxiesText((data.trusted_proxies ?? []).join("\n"));
+    setTlsCertPath(data.tls_cert_path ?? "");
+    setTlsKeyPath(data.tls_key_path ?? "");
+    setRdnsEnabled(data.rdns_enabled);
+  }
+
+  const clientNameMap = createMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = {};
+    const ov = clientsOverview();
+    if (!ov) return map;
+    for (const d of ov.discovered) {
+      if (d.resolved_name) {
+        map[d.ip] = d.resolved_name;
+      }
+    }
+    for (const c of ov.clients) {
+      for (const ident of c.identifiers) {
+        if (!ident.includes("/") && (ident.includes(".") || ident.includes(":"))) {
+          map[ident] = c.name;
+        }
+      }
+    }
+    return map;
+  });
+
+  function showClientsToast(msg: string, isError = false) {
+    setClientsIsError(isError);
+    setClientsMessage(msg);
+    setTimeout(() => setClientsMessage(""), 3000);
+  }
+
+  async function fetchClients() {
+    try {
+      const res = await fetch("/api/clients");
+      if (res.ok) setClientsOverview(await res.json());
+    } catch {
+      // ignore
+    }
+  }
+
+  async function mutateClientsApi(url: string, method: string, body?: unknown): Promise<boolean> {
+    setClientsSaving(true);
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      if (res.ok) {
+        await fetchClients();
+        showClientsToast(t("rulesSaved"));
+        return true;
+      }
+      const errBody = await res.json().catch(() => null);
+      showClientsToast(errBody?.error ?? t("rulesFailed"), true);
+      return false;
+    } catch {
+      showClientsToast(t("rulesNetworkError"), true);
+      return false;
+    } finally {
+      setClientsSaving(false);
+    }
+  }
+
+  async function createClientGroup(payload: ClientGroupPayload): Promise<boolean> {
+    return mutateClientsApi("/api/client-groups", "POST", payload);
+  }
+
+  async function updateClientGroup(id: string, payload: ClientGroupPayload): Promise<boolean> {
+    return mutateClientsApi(`/api/client-groups/${encodeURIComponent(id)}`, "PUT", payload);
+  }
+
+  async function deleteClientGroup(id: string): Promise<void> {
+    await mutateClientsApi(`/api/client-groups/${encodeURIComponent(id)}`, "DELETE");
+  }
+
+  async function createClientProfile(payload: ClientProfilePayload): Promise<boolean> {
+    return mutateClientsApi("/api/clients", "POST", payload);
+  }
+
+  async function updateClientProfile(id: string, payload: ClientProfilePayload): Promise<boolean> {
+    return mutateClientsApi(`/api/clients/${encodeURIComponent(id)}`, "PUT", payload);
+  }
+
+  async function deleteClientProfile(id: string): Promise<void> {
+    await mutateClientsApi(`/api/clients/${encodeURIComponent(id)}`, "DELETE");
+  }
+
+  async function fetchTlsStatus() {
+    try {
+      const res = await fetch("/api/tls/status");
+      if (res.ok) setTlsStatus(await res.json());
+    } catch {
+      // ignore
+    }
+  }
+
+  async function reloadTls() {
+    setReloadingTls(true);
+    setTlsIsError(false);
+    setTlsMessage("");
+    try {
+      const res = await fetch("/api/tls/reload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cert_path: tlsCertPath().trim() || null,
+          key_path: tlsKeyPath().trim() || null,
+        }),
+      });
+      if (res.ok) {
+        setTlsStatus(await res.json());
+        setTlsMessage(t("settingsTlsReloaded"));
+        setTimeout(() => setTlsMessage(""), 3000);
+      } else {
+        setTlsIsError(true);
+        const errBody = await res.json().catch(() => null);
+        setTlsMessage(errBody?.error ?? t("rulesFailed"));
+      }
+    } catch {
+      setTlsIsError(true);
+      setTlsMessage(t("rulesNetworkError"));
+    } finally {
+      setReloadingTls(false);
+    }
   }
 
   async function fetchBlockingStatus() {
@@ -358,12 +498,20 @@ export default function App() {
     }
   }
 
-  async function testRule(domain: string): Promise<TestRuleResponse | null> {
+  async function testRule(
+    domain: string,
+    clientIp?: string | null,
+    clientId?: string | null,
+  ): Promise<TestRuleResponse | null> {
     try {
       const res = await fetch("/api/rules/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain }),
+        body: JSON.stringify({
+          domain,
+          client_ip: clientIp ?? null,
+          client_id: clientId ?? null,
+        }),
       });
       if (res.ok) return await res.json();
     } catch {
@@ -472,6 +620,8 @@ export default function App() {
           fetchSubscriptions(),
           fetchConfig(),
           fetchUpstreamHealth(),
+          fetchClients(),
+          fetchTlsStatus(),
         ]);
         return null;
       }
@@ -607,6 +757,9 @@ export default function App() {
       dns_rebinding_protection: dnsRebindingProtection(),
       block_any_queries: blockAnyQueries(),
       trusted_proxies: parseLines(trustedProxiesText()),
+      tls_cert_path: tlsCertPath().trim(),
+      tls_key_path: tlsKeyPath().trim(),
+      rdns_enabled: rdnsEnabled(),
     };
 
     try {
@@ -620,7 +773,7 @@ export default function App() {
         applyConfigToForm(updated);
         setConfigIsError(false);
         setConfigMessage(t("settingsSaved"));
-        await fetchStats();
+        await Promise.all([fetchStats(), fetchTlsStatus()]);
       } else {
         setConfigIsError(true);
         const errBody = await res.json().catch(() => null);
@@ -635,14 +788,20 @@ export default function App() {
 
   function handleSelectTab(next: TabKey) {
     setTab(next);
-    if (next === "logs") {
+    if (next === "dashboard") {
+      fetchStats();
+      fetchClients();
+    } else if (next === "logs") {
       fetchLogs();
     } else if (next === "rules") {
       fetchRules();
       fetchSubscriptions();
+    } else if (next === "clients") {
+      fetchClients();
     } else if (next === "settings") {
       fetchConfig();
       fetchUpstreamHealth();
+      fetchTlsStatus();
     }
   }
 
@@ -656,6 +815,8 @@ export default function App() {
         fetchConfig();
         fetchUpstreamHealth();
         fetchBlockingStatus();
+        fetchClients();
+        fetchTlsStatus();
       }
     });
 
@@ -724,8 +885,25 @@ export default function App() {
           <Show when={tab() === "dashboard"}>
             <DashboardView
               stats={stats()}
+              clientNameMap={clientNameMap()}
               onFlushCache={flushCache}
               cacheFlushedMsg={cacheFlushedMsg()}
+            />
+          </Show>
+
+          <Show when={tab() === "clients"}>
+            <ClientsView
+              overview={clientsOverview()}
+              message={clientsMessage()}
+              isError={clientsIsError()}
+              saving={clientsSaving()}
+              onCreateGroup={createClientGroup}
+              onUpdateGroup={updateClientGroup}
+              onDeleteGroup={deleteClientGroup}
+              onCreateClient={createClientProfile}
+              onUpdateClient={updateClientProfile}
+              onDeleteClient={deleteClientProfile}
+              onRefresh={() => void fetchClients()}
             />
           </Show>
 
@@ -845,6 +1023,17 @@ export default function App() {
               onBlockAnyQueriesChange={setBlockAnyQueries}
               trustedProxiesText={trustedProxiesText()}
               onTrustedProxiesChange={setTrustedProxiesText}
+              rdnsEnabled={rdnsEnabled()}
+              onRdnsEnabledChange={setRdnsEnabled}
+              tlsCertPath={tlsCertPath()}
+              onTlsCertPathChange={setTlsCertPath}
+              tlsKeyPath={tlsKeyPath()}
+              onTlsKeyPathChange={setTlsKeyPath}
+              tlsStatus={tlsStatus()}
+              reloadingTls={reloadingTls()}
+              tlsMessage={tlsMessage()}
+              tlsIsError={tlsIsError()}
+              onReloadTls={() => void reloadTls()}
               configMessage={configMessage()}
               configIsError={configIsError()}
               onSave={saveConfig}

@@ -25,6 +25,7 @@ fn bench_cache_operations(c: &mut Criterion) {
                 qclass: 1,
                 ecs_subnet: None,
                 dnssec_do: false,
+                upstream_scope: None,
             },
             wire.clone(),
             300,
@@ -37,6 +38,7 @@ fn bench_cache_operations(c: &mut Criterion) {
         qclass: 1,
         ecs_subnet: None,
         dnssec_do: false,
+        upstream_scope: None,
     };
     let miss_key = CacheKey {
         qname: "uncached.example.org.".to_string(),
@@ -44,6 +46,7 @@ fn bench_cache_operations(c: &mut Criterion) {
         qclass: 1,
         ecs_subnet: None,
         dnssec_do: false,
+        upstream_scope: None,
     };
 
     let mut group = c.benchmark_group("dns_cache");

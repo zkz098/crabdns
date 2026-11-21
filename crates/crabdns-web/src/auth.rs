@@ -244,6 +244,35 @@ fn login_client_ip(
     crate::proxy::extract_client_ip(connect_info, headers, trusted_proxies)
 }
 
+fn is_https_request(
+    trusted_proxies: &[String],
+    connect_info: Option<&Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+) -> bool {
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
+        && origin.starts_with("https://")
+    {
+        return true;
+    }
+    if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok())
+        && referer.starts_with("https://")
+    {
+        return true;
+    }
+    if !trusted_proxies.is_empty()
+        && let Some(Extension(ci)) = connect_info
+        && let Ok(nets) = crabdns_core::acl::parse_cidr_list(trusted_proxies)
+        && nets.iter().any(|net| net.contains(ci.0.ip()))
+        && headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+    {
+        return true;
+    }
+    false
+}
+
 pub async fn login(
     State(state): State<RouterState>,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
@@ -259,6 +288,7 @@ pub async fn login(
             .into_response();
     }
 
+    let secure_cookie = is_https_request(&cfg.trusted_proxies, connect_info.as_ref(), &headers);
     let client_ip = login_client_ip(&cfg.trusted_proxies, connect_info, &headers);
     if let Some(retry_after) = state.login_limiter.check_locked(client_ip) {
         return (
@@ -290,8 +320,9 @@ pub async fn login(
             .into_response();
     };
 
+    let secure_attr = if secure_cookie { "; Secure" } else { "" };
     let cookie = format!(
-        "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{secure_attr}",
         SESSION_TTL.as_secs()
     );
     let mut resp = Json(LoginResponse {
@@ -305,11 +336,22 @@ pub async fn login(
     resp
 }
 
-pub async fn logout(State(state): State<RouterState>, headers: HeaderMap) -> Response {
+pub async fn logout(
+    State(state): State<RouterState>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+) -> Response {
     if let Some(token) = extract_token(&headers) {
         state.sessions.revoke(&token);
     }
-    let cookie = format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+    let cfg = state.app.config.load();
+    let secure_attr = if is_https_request(&cfg.trusted_proxies, connect_info.as_ref(), &headers) {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie =
+        format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{secure_attr}");
     let mut resp = Json(serde_json::json!({ "status": "logged_out" })).into_response();
     if let Ok(val) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, val);

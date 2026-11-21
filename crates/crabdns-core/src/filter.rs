@@ -24,6 +24,7 @@ pub enum FilterAction {
 pub struct FilterDecision {
     pub action: FilterAction,
     pub matched_rule: Option<String>,
+    pub matched_list: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -47,6 +48,7 @@ struct RuleMeta {
     rule_text: String,
     scope: MatchScope,
     rewrite: Option<RewriteAction>,
+    source_id: u32,
 }
 
 type TrieMap<K, V> = HashMap<K, V, foldhash::fast::RandomState>;
@@ -118,38 +120,51 @@ struct RuleSet {
     allows: TrieNode,
     blocks: TrieNode,
     rewrites: TrieNode,
+    list_names: Vec<String>,
     stats: FilterStats,
 }
 
 impl RuleSet {
-    fn from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Self {
+    fn from_named_lines<'a>(source_name: &str, lines: impl Iterator<Item = &'a str>) -> Self {
         let mut set = Self::default();
+        let sid = set.register_source(source_name);
         for raw_line in lines {
-            set.parse_and_insert(raw_line);
+            set.parse_and_insert_with_source(raw_line, sid);
         }
         set
     }
 
-    fn parse_and_insert(&mut self, raw_line: &str) {
+    fn register_source(&mut self, name: &str) -> u32 {
+        let id = u32::try_from(self.list_names.len()).unwrap_or(u32::MAX);
+        self.list_names.push(name.to_string());
+        id
+    }
+
+    fn source_name(&self, source_id: u32) -> Option<String> {
+        self.list_names.get(source_id as usize).cloned()
+    }
+
+    fn parse_and_insert_with_source(&mut self, raw_line: &str, source_id: u32) {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('!') || line.starts_with('#') {
             return;
         }
 
         if let Some(parsed) = parse_adguard_rule(line) {
-            self.insert_parsed(&parsed, line);
+            self.insert_parsed(&parsed, line, source_id);
             return;
         }
 
-        self.parse_hosts_or_bare(line);
+        self.parse_hosts_or_bare(line, source_id);
     }
 
-    fn insert_parsed(&mut self, parsed: &ParsedRule, raw: &str) {
+    fn insert_parsed(&mut self, parsed: &ParsedRule, raw: &str, source_id: u32) {
         self.stats.total_rules += 1;
         let meta = RuleMeta {
             rule_text: raw.to_string(),
             scope: parsed.scope,
             rewrite: parsed.rewrite.clone(),
+            source_id,
         };
 
         if parsed.rewrite.is_some() {
@@ -178,7 +193,7 @@ impl RuleSet {
         }
     }
 
-    fn parse_hosts_or_bare(&mut self, line: &str) {
+    fn parse_hosts_or_bare(&mut self, line: &str, source_id: u32) {
         let no_comment = line.split('#').next().unwrap_or(line).trim();
         let parts: Vec<&str> = no_comment.split_whitespace().collect();
         if parts.is_empty() {
@@ -202,6 +217,7 @@ impl RuleSet {
                         MatchScope::DomainAndSubdomains
                     },
                     rewrite: None,
+                    source_id,
                 };
                 self.blocks.insert(host, meta);
             }
@@ -221,6 +237,7 @@ impl RuleSet {
                     rule_text: line.to_string(),
                     scope,
                     rewrite: None,
+                    source_id,
                 };
                 self.blocks.insert(token, meta);
             }
@@ -233,6 +250,7 @@ impl RuleSet {
             return FilterDecision {
                 action: FilterAction::Allow,
                 matched_rule: None,
+                matched_list: None,
             };
         }
 
@@ -240,18 +258,21 @@ impl RuleSet {
             return FilterDecision {
                 action: FilterAction::Allow,
                 matched_rule: Some(meta.rule_text.clone()),
+                matched_list: self.source_name(meta.source_id),
             };
         }
         if let Some(meta) = self.important_blocks.match_domain(clean) {
             return FilterDecision {
                 action: FilterAction::Block,
                 matched_rule: Some(meta.rule_text.clone()),
+                matched_list: self.source_name(meta.source_id),
             };
         }
         if let Some(meta) = self.allows.match_domain(clean) {
             return FilterDecision {
                 action: FilterAction::Allow,
                 matched_rule: Some(meta.rule_text.clone()),
+                matched_list: self.source_name(meta.source_id),
             };
         }
         if let Some(meta) = self.rewrites.match_domain(clean)
@@ -260,18 +281,21 @@ impl RuleSet {
             return FilterDecision {
                 action: FilterAction::Rewrite(rewrite.clone()),
                 matched_rule: Some(meta.rule_text.clone()),
+                matched_list: self.source_name(meta.source_id),
             };
         }
         if let Some(meta) = self.blocks.match_domain(clean) {
             return FilterDecision {
                 action: FilterAction::Block,
                 matched_rule: Some(meta.rule_text.clone()),
+                matched_list: self.source_name(meta.source_id),
             };
         }
 
         FilterDecision {
             action: FilterAction::Allow,
             matched_rule: None,
+            matched_list: None,
         }
     }
 }
@@ -385,15 +409,19 @@ pub struct FilterEngine {
 impl FilterEngine {
     pub fn new(initial_rules: &[String]) -> Self {
         let joined = initial_rules.join("\n");
-        let ruleset = RuleSet::from_lines(joined.lines());
+        Self::from_named_text("custom", &joined)
+    }
+
+    pub fn from_named_text(source_name: &str, rules_text: &str) -> Self {
+        let ruleset = RuleSet::from_named_lines(source_name, rules_text.lines());
         Self {
             ruleset: ArcSwap::from_pointee(ruleset),
-            raw_rules: ArcSwap::from_pointee(joined),
+            raw_rules: ArcSwap::from_pointee(rules_text.to_string()),
         }
     }
 
     pub fn reload_from_text(&self, rules_text: &str) -> FilterStats {
-        let next_set = RuleSet::from_lines(rules_text.lines());
+        let next_set = RuleSet::from_named_lines("custom", rules_text.lines());
         let stats = next_set.stats.clone();
         self.ruleset.store(Arc::new(next_set));
         self.raw_rules.store(Arc::new(rules_text.to_string()));
@@ -406,15 +434,30 @@ impl FilterEngine {
         custom_enabled: bool,
         subscription_texts: &[String],
     ) -> FilterStats {
+        let named: Vec<(String, String)> = subscription_texts
+            .iter()
+            .map(|text| ("subscription".to_string(), text.clone()))
+            .collect();
+        self.reload_from_named_sources(custom_rules, custom_enabled, &named)
+    }
+
+    pub fn reload_from_named_sources(
+        &self,
+        custom_rules: &str,
+        custom_enabled: bool,
+        subscriptions: &[(String, String)],
+    ) -> FilterStats {
         let mut next_set = RuleSet::default();
-        for text in subscription_texts {
+        for (name, text) in subscriptions {
+            let sid = next_set.register_source(name);
             for line in text.lines() {
-                next_set.parse_and_insert(line);
+                next_set.parse_and_insert_with_source(line, sid);
             }
         }
         if custom_enabled {
+            let sid = next_set.register_source("custom");
             for line in custom_rules.lines() {
-                next_set.parse_and_insert(line);
+                next_set.parse_and_insert_with_source(line, sid);
             }
         }
         let stats = next_set.stats.clone();
@@ -424,7 +467,7 @@ impl FilterEngine {
     }
 
     pub fn count_rules_in_text(rules_text: &str) -> FilterStats {
-        RuleSet::from_lines(rules_text.lines()).stats
+        RuleSet::from_named_lines("count", rules_text.lines()).stats
     }
 
     pub fn evaluate(&self, domain: &str) -> FilterDecision {

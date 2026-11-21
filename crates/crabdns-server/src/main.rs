@@ -21,6 +21,12 @@ struct Cli {
 
     #[arg(long)]
     web_listen: Option<SocketAddr>,
+
+    #[arg(long)]
+    web_tls_listen: Option<SocketAddr>,
+
+    #[arg(long)]
+    dot_listen: Option<SocketAddr>,
 }
 
 #[tokio::main]
@@ -38,6 +44,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(addr) = cli.web_listen {
         config.listen_web = addr;
+    }
+    if let Some(addr) = cli.web_tls_listen {
+        config.listen_web_tls = Some(addr);
+    }
+    if let Some(addr) = cli.dot_listen {
+        config.listen_dot = Some(addr);
     }
 
     let server = spawn_server(config).await?;

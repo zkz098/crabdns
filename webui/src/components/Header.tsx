@@ -19,6 +19,7 @@ const NAV_ITEMS: Array<{ key: TabKey; label: () => string; icon: string }> = [
   { key: "dashboard", label: () => t("navDashboard"), icon: "i-ri-dashboard-3-line" },
   { key: "logs", label: () => t("navLogs"), icon: "i-ri-terminal-box-line" },
   { key: "rules", label: () => t("navRules"), icon: "i-ri-shield-flash-line" },
+  { key: "clients", label: () => t("navClients"), icon: "i-ri-computer-line" },
   { key: "settings", label: () => t("navSettings"), icon: "i-ri-settings-3-line" },
 ];
 

@@ -8,43 +8,22 @@ use futures_util::future::select_ok;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use ts_rs::TS;
 
 use crate::config::UpstreamStrategy;
 use crate::error::{CoreError, Result};
+use crate::upstream_transport::{
+    ConnPool, UdpSocketPool, exchange_doh, exchange_dot_addrs, exchange_tcp, exchange_tcp_pooled,
+    exchange_udp, is_udp_truncated, parse_socket_addr, try_exchange_dot_pooled,
+};
+pub(crate) use crate::upstream_transport::{read_tcp_framed, send_tcp_framed, split_host_port};
 
 const UNHEALTHY_FAILURE_THRESHOLD: u32 = 3;
 const UNHEALTHY_COOLDOWN_MS: u64 = 15_000;
-const UDP_SOCKET_POOL_MAX_IDLE: usize = 128;
-
-#[derive(Debug, Default)]
-struct UdpSocketPool {
-    sockets: std::sync::Mutex<Vec<UdpSocket>>,
-}
-
-impl UdpSocketPool {
-    fn pop(&self) -> Option<UdpSocket> {
-        self.sockets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pop()
-    }
-
-    fn put(&self, sock: UdpSocket) {
-        let mut guard = self
-            .sockets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.len() < UDP_SOCKET_POOL_MAX_IDLE {
-            guard.push(sock);
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -152,27 +131,6 @@ impl UpstreamEndpoint {
         let addr = parse_socket_addr(trimmed, 53)?;
         Ok(Self::Udp(addr))
     }
-}
-
-fn parse_socket_addr(input: &str, default_port: u16) -> Result<SocketAddr> {
-    if let Ok(addr) = input.parse::<SocketAddr>() {
-        return Ok(addr);
-    }
-    if let Ok(ip) = input.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, default_port));
-    }
-    Err(CoreError::Config(format!(
-        "invalid upstream socket address: {input}"
-    )))
-}
-
-pub(crate) fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
-    if let Some((host, port_str)) = input.rsplit_once(':')
-        && let Ok(port) = port_str.parse::<u16>()
-    {
-        return (host.to_string(), port);
-    }
-    (input.to_string(), default_port)
 }
 
 #[derive(Debug, Clone)]
@@ -416,6 +374,8 @@ pub struct UpstreamPool {
     endpoints: Vec<UpstreamEndpoint>,
     health: Vec<EndpointHealth>,
     udp_pools: Vec<UdpSocketPool>,
+    tcp_pools: Vec<ConnPool<TcpStream>>,
+    dot_pools: Vec<ConnPool<TlsStream<TcpStream>>>,
     strategy: UpstreamStrategy,
     timeout: Duration,
     bootstrap: BootstrapResolver,
@@ -459,6 +419,8 @@ impl UpstreamPool {
         let udp_pools = (0..endpoints.len())
             .map(|_| UdpSocketPool::default())
             .collect();
+        let tcp_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
+        let dot_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
         let timeout = Duration::from_millis(timeout_ms);
         let bootstrap = BootstrapResolver::new(bootstrap_dns, timeout)?;
 
@@ -481,6 +443,8 @@ impl UpstreamPool {
             endpoints,
             health,
             udp_pools,
+            tcp_pools,
+            dot_pools,
             strategy,
             timeout,
             bootstrap,
@@ -491,6 +455,15 @@ impl UpstreamPool {
 
     pub fn strategy(&self) -> UpstreamStrategy {
         self.strategy
+    }
+
+    pub fn has_private_endpoint(&self) -> bool {
+        self.endpoints.iter().any(|ep| match ep {
+            UpstreamEndpoint::Udp(addr) | UpstreamEndpoint::Tcp(addr) => {
+                crate::security::is_private_or_special_ip(addr.ip())
+            }
+            UpstreamEndpoint::Dot { .. } | UpstreamEndpoint::Doh { .. } => false,
+        })
     }
 
     pub fn health_snapshot(&self) -> Vec<UpstreamStatus> {
@@ -602,14 +575,35 @@ impl UpstreamPool {
     ) -> Result<Vec<u8>> {
         match endpoint {
             UpstreamEndpoint::Udp(addr) => {
-                exchange_udp(*addr, &self.udp_pools[idx], query_wire).await
+                let resp = exchange_udp(*addr, &self.udp_pools[idx], query_wire).await?;
+                if is_udp_truncated(&resp) {
+                    match exchange_tcp_pooled(*addr, &self.tcp_pools[idx], query_wire).await {
+                        Ok(tcp_resp) => return Ok(tcp_resp),
+                        Err(err) => {
+                            tracing::debug!(
+                                addr = %addr,
+                                error = %err,
+                                "UDP TC=1 fallback to TCP failed; returning truncated response"
+                            );
+                        }
+                    }
+                }
+                Ok(resp)
             }
-            UpstreamEndpoint::Tcp(addr) => exchange_tcp(*addr, query_wire).await,
+            UpstreamEndpoint::Tcp(addr) => {
+                exchange_tcp_pooled(*addr, &self.tcp_pools[idx], query_wire).await
+            }
             UpstreamEndpoint::Dot { addr, server_name } => {
-                exchange_dot(
+                if let Some(resp) = try_exchange_dot_pooled(&self.dot_pools[idx], query_wire).await
+                {
+                    return Ok(resp);
+                }
+                let (host, port) = split_host_port(addr, 853);
+                let addrs = self.bootstrap.resolve_socket_addrs(&host, port).await?;
+                exchange_dot_addrs(
                     &self.tls_connector,
-                    &self.bootstrap,
-                    addr,
+                    &addrs,
+                    &self.dot_pools[idx],
                     server_name,
                     query_wire,
                 )
@@ -627,104 +621,6 @@ pub(crate) fn endpoint_label(endpoint: &UpstreamEndpoint) -> String {
         UpstreamEndpoint::Dot { addr, .. } => format!("tls://{addr}"),
         UpstreamEndpoint::Doh { url } => url.clone(),
     }
-}
-
-async fn exchange_udp(
-    addr: SocketAddr,
-    pool: &UdpSocketPool,
-    query_wire: &[u8],
-) -> Result<Vec<u8>> {
-    let socket = if let Some(sock) = pool.pop() {
-        sock
-    } else {
-        let bind_addr = if addr.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        };
-        let sock = UdpSocket::bind(bind_addr).await?;
-        sock.connect(addr).await?;
-        sock
-    };
-
-    socket.send(query_wire).await?;
-
-    let mut buf = vec![0_u8; 4096];
-    let n = socket.recv(&mut buf).await?;
-    buf.truncate(n);
-    pool.put(socket);
-    Ok(buf)
-}
-
-async fn exchange_tcp(addr: SocketAddr, query_wire: &[u8]) -> Result<Vec<u8>> {
-    let mut stream = TcpStream::connect(addr).await?;
-    send_tcp_framed(&mut stream, query_wire).await?;
-    read_tcp_framed(&mut stream).await
-}
-
-async fn exchange_dot(
-    connector: &TlsConnector,
-    bootstrap: &BootstrapResolver,
-    addr: &str,
-    server_name: &str,
-    query_wire: &[u8],
-) -> Result<Vec<u8>> {
-    let (host, port) = split_host_port(addr, 853);
-    let addrs = bootstrap.resolve_socket_addrs(&host, port).await?;
-    let stream = TcpStream::connect(addrs.as_slice()).await?;
-    let clean_sni = server_name.trim_start_matches('[').trim_end_matches(']');
-    let name = ServerName::try_from(clean_sni.to_string())
-        .map_err(|e| CoreError::Upstream(format!("invalid TLS server name: {e}")))?;
-    let mut tls_stream = connector
-        .connect(name, stream)
-        .await
-        .map_err(|e| CoreError::Upstream(format!("TLS handshake failed: {e}")))?;
-    send_tcp_framed(&mut tls_stream, query_wire).await?;
-    read_tcp_framed(&mut tls_stream).await
-}
-
-async fn exchange_doh(client: &reqwest::Client, url: &str, query_wire: &[u8]) -> Result<Vec<u8>> {
-    let resp = client
-        .post(url)
-        .header("content-type", "application/dns-message")
-        .header("accept", "application/dns-message")
-        .body(query_wire.to_vec())
-        .send()
-        .await
-        .map_err(|e| CoreError::Upstream(format!("DoH request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        return Err(CoreError::Upstream(format!(
-            "DoH HTTP status {}",
-            resp.status()
-        )));
-    }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| CoreError::Upstream(format!("DoH body read failed: {e}")))?;
-    Ok(bytes.to_vec())
-}
-
-pub(crate) async fn send_tcp_framed<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    payload: &[u8],
-) -> Result<()> {
-    let len = u16::try_from(payload.len())
-        .map_err(|_| CoreError::Protocol("DNS message exceeds 65535 bytes".to_string()))?;
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(payload).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-pub(crate) async fn read_tcp_framed<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
-    let mut len_buf = [0_u8; 2];
-    reader.read_exact(&mut len_buf).await?;
-    let len = usize::from(u16::from_be_bytes(len_buf));
-    let mut buf = vec![0_u8; len];
-    reader.read_exact(&mut buf).await?;
-    Ok(buf)
 }
 
 #[cfg(test)]

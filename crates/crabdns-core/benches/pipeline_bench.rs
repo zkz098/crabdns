@@ -51,6 +51,7 @@ fn bench_pipeline_handle_packet(c: &mut Criterion) {
             qclass: 1,
             ecs_subnet: None,
             dnssec_do: false,
+            upstream_scope: None,
         },
         build_cached_response("cached.example.com."),
         300,

@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Json;
@@ -16,7 +17,10 @@ use crate::RouterState;
 pub struct ConfigResponse {
     pub listen_dns: String,
     pub listen_web: String,
+    pub listen_web_tls: Option<String>,
     pub listen_dot: Option<String>,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
     pub data_dir: String,
     pub upstreams: Vec<String>,
     pub bootstrap_dns: Vec<String>,
@@ -56,6 +60,7 @@ pub struct ConfigResponse {
     pub dns_rebinding_protection: bool,
     pub block_any_queries: bool,
     pub trusted_proxies: Vec<String>,
+    pub rdns_enabled: bool,
 }
 
 impl From<&Config> for ConfigResponse {
@@ -63,7 +68,10 @@ impl From<&Config> for ConfigResponse {
         Self {
             listen_dns: cfg.listen_dns.to_string(),
             listen_web: cfg.listen_web.to_string(),
+            listen_web_tls: cfg.listen_web_tls.map(|addr| addr.to_string()),
             listen_dot: cfg.listen_dot.map(|addr| addr.to_string()),
+            tls_cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
+            tls_key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
             data_dir: cfg.data_dir.display().to_string(),
             upstreams: cfg.upstreams.clone(),
             bootstrap_dns: cfg.bootstrap_dns.clone(),
@@ -100,6 +108,7 @@ impl From<&Config> for ConfigResponse {
             dns_rebinding_protection: cfg.dns_rebinding_protection,
             block_any_queries: cfg.block_any_queries,
             trusted_proxies: cfg.trusted_proxies.clone(),
+            rdns_enabled: cfg.rdns_enabled,
         }
     }
 }
@@ -172,6 +181,12 @@ pub struct ConfigUpdatePayload {
     pub block_any_queries: Option<bool>,
     #[serde(default)]
     pub trusted_proxies: Option<Vec<String>>,
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
+    #[serde(default)]
+    pub rdns_enabled: Option<bool>,
 }
 
 pub async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
@@ -198,6 +213,20 @@ fn merge_opt_string(incoming: Option<String>, existing: Option<&str>) -> Option<
             }
         }
         None => existing.map(str::to_string),
+    }
+}
+
+fn merge_opt_path(incoming: Option<String>, existing: Option<&Path>) -> Option<PathBuf> {
+    match incoming {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            }
+        }
+        None => existing.map(Path::to_path_buf),
     }
 }
 
@@ -292,6 +321,9 @@ pub async fn update_config(
             .trusted_proxies
             .unwrap_or_else(|| current.trusted_proxies.clone()),
     );
+    let tls_cert_path = merge_opt_path(payload.tls_cert_path, current.tls_cert_path.as_deref());
+    let tls_key_path = merge_opt_path(payload.tls_key_path, current.tls_key_path.as_deref());
+    let rdns_enabled = payload.rdns_enabled.unwrap_or(current.rdns_enabled);
 
     if let Err(err) = parse_cidr_list(&trusted_proxies) {
         return Err(bad_request(err.to_string()));
@@ -342,6 +374,20 @@ pub async fn update_config(
         return Err(bad_request(err.to_string()));
     }
 
+    reload_clients_for_config(
+        &state,
+        payload.upstream_timeout_ms,
+        strategy,
+        &bootstrap_dns,
+    )?;
+
+    if (tls_cert_path != current.tls_cert_path || tls_key_path != current.tls_key_path)
+        && let Some(reloader) = &state.app.tls_reloader
+        && let Err(err) = reloader.reload(tls_cert_path.as_deref(), tls_key_path.as_deref())
+    {
+        return Err(bad_request(err));
+    }
+
     if hosts_enabled {
         let resolved_hosts = hosts_path.as_deref().unwrap_or("/etc/hosts");
         if let Err(err) = state
@@ -365,12 +411,16 @@ pub async fn update_config(
         .pipeline
         .set_dns_rebinding_protection(dns_rebinding_protection);
     state.app.pipeline.set_block_any_queries(block_any_queries);
+    state.app.pipeline.set_rdns_enabled(rdns_enabled);
     state.app.pipeline.reload_ddr(DdrConfig {
         enabled: ddr_enabled,
         hostname: ddr_hostname.clone(),
         dot_port: current.listen_dot.map(|a| a.port()),
         doh_enabled,
-        doh_port: Some(current.listen_web.port()),
+        doh_port: current
+            .listen_web_tls
+            .map(|a| a.port())
+            .or(Some(current.listen_web.port())),
     });
 
     let cache_min_ttl_secs = payload
@@ -441,6 +491,9 @@ pub async fn update_config(
     next.dns_rebinding_protection = dns_rebinding_protection;
     next.block_any_queries = block_any_queries;
     next.trusted_proxies = trusted_proxies;
+    next.tls_cert_path = tls_cert_path;
+    next.tls_key_path = tls_key_path;
+    next.rdns_enabled = rdns_enabled;
 
     state.app.storage.save_config(&next).map_err(|err| {
         (
@@ -452,4 +505,29 @@ pub async fn update_config(
     let response = ConfigResponse::from(&next);
     state.app.config.store(Arc::new(next));
     Ok(Json(response))
+}
+
+fn reload_clients_for_config(
+    state: &RouterState,
+    timeout_ms: u64,
+    strategy: UpstreamStrategy,
+    bootstrap_dns: &[String],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let clients = state.app.storage.list_clients().map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+    })?;
+    let groups = state.app.storage.list_client_groups().map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+    })?;
+    state
+        .app
+        .pipeline
+        .reload_clients(&clients, &groups, timeout_ms, strategy, bootstrap_dns)
+        .map_err(|err| bad_request(err.to_string()))
 }

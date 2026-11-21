@@ -1,5 +1,5 @@
 use chrono::Utc;
-use crabdns_core::{QueryEvent, QueryOutcome};
+use crabdns_core::{QueryEvent, QueryOutcome, QueryProtocol};
 use crabdns_storage::StorageEngine;
 use proptest::prelude::*;
 
@@ -33,13 +33,17 @@ fn arb_event() -> impl Strategy<Value = QueryEvent> {
             |(client_ip, domain, qtype, outcome, elapsed_us)| QueryEvent {
                 timestamp: Utc::now(),
                 client_ip,
+                client_name: None,
+                protocol: QueryProtocol::Udp,
                 domain,
                 qtype,
                 outcome,
                 matched_rule: None,
+                matched_list: None,
                 upstream: None,
                 elapsed_us,
                 rcode: "NOERROR".to_string(),
+                answers: Vec::new(),
             },
         )
 }
