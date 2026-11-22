@@ -12,10 +12,12 @@ pub mod edns;
 pub mod error;
 pub mod filter;
 pub mod filter_rules;
+mod filter_trie;
 pub mod lan;
 pub mod pipeline;
 mod pipeline_cache;
 mod pipeline_exec;
+mod pipeline_fast;
 mod pipeline_post;
 mod pipeline_types;
 pub mod rrl;
@@ -29,6 +31,7 @@ pub mod upstream_probe;
 mod upstream_probe_wire;
 mod upstream_transport;
 mod wire;
+mod wire_fast;
 
 pub use acl::{AccessController, AclDecision, IpNet};
 pub use cache::{CacheHit, CacheStats, DnsCache, PersistedCacheEntry};
@@ -55,6 +58,7 @@ pub use pipeline::{
     DnsPipeline, LatencyHistogramSnapshot, PipelineRuntimeMetrics, QueryContext, QueryEvent,
     QueryOutcome, QueryProtocol,
 };
+pub use pipeline_fast::UdpFastOutcome;
 pub use rrl::{ResponseRateLimiter, RrlCategory, RrlConfig, RrlDecision};
 pub use safesearch::SafeSearchConfig;
 pub use split_dns::SplitUpstreamRouter;

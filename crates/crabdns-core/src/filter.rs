@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -11,6 +10,7 @@ use crate::filter_rules::{
     FilterQueryContext, RewriteAction, RuleConditions, compile_safe_regex, is_valid_domain_token,
     parse_modifiers, parse_regex_rule,
 };
+use crate::filter_trie::{FlatTrie, LabelInterner, MatchScope, RuleMeta, TrieBuilder};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilterAction {
@@ -35,22 +35,6 @@ pub struct FilterStats {
     pub rewrite_rules: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MatchScope {
-    Exact,
-    DomainAndSubdomains,
-    SubdomainsOnly,
-}
-
-#[derive(Debug, Clone)]
-struct RuleMeta {
-    rule_text: String,
-    scope: MatchScope,
-    rewrite: Option<RewriteAction>,
-    conditions: RuleConditions,
-    source_id: u32,
-}
-
 #[derive(Debug, Clone)]
 struct RegexRule {
     regex: Regex,
@@ -58,85 +42,6 @@ struct RegexRule {
     rewrite: Option<RewriteAction>,
     conditions: RuleConditions,
     source_id: u32,
-}
-
-type TrieMap<K, V> = HashMap<K, V, foldhash::fast::RandomState>;
-
-fn lookup_child<'a>(children: &'a TrieMap<String, TrieNode>, label: &str) -> Option<&'a TrieNode> {
-    if !label.bytes().any(|b| b.is_ascii_uppercase()) {
-        return children.get(label);
-    }
-    if label.len() <= 128 {
-        let mut buf = [0u8; 128];
-        let slice = &mut buf[..label.len()];
-        slice.copy_from_slice(label.as_bytes());
-        slice.make_ascii_lowercase();
-        if let Ok(lower) = std::str::from_utf8(slice) {
-            return children.get(lower);
-        }
-    }
-    children.get(&label.to_ascii_lowercase())
-}
-
-#[derive(Debug, Default)]
-struct TrieNode {
-    children: TrieMap<String, TrieNode>,
-    rules: Vec<RuleMeta>,
-}
-
-impl TrieNode {
-    fn insert(&mut self, domain: &str, meta: RuleMeta) {
-        let mut current = self;
-        for label in domain.rsplit('.').filter(|s| !s.is_empty()) {
-            current = current
-                .children
-                .entry(label.to_ascii_lowercase())
-                .or_default();
-        }
-        current.rules.push(meta);
-    }
-
-    fn match_domain<'a>(
-        &'a self,
-        clean_domain: &str,
-        ctx: &FilterQueryContext<'_>,
-        prefer_rewrite_qtype: bool,
-    ) -> Option<&'a RuleMeta> {
-        let mut labels = clean_domain
-            .rsplit('.')
-            .filter(|s| !s.is_empty())
-            .peekable();
-        let mut current = self;
-        let mut best: Option<&RuleMeta> = None;
-        let mut best_qtype_hit = false;
-
-        while let Some(label) = labels.next() {
-            let Some(next) = lookup_child(&current.children, label) else {
-                break;
-            };
-            current = next;
-            let is_exact = labels.peek().is_none();
-            for meta in &current.rules {
-                let scope_matches = match meta.scope {
-                    MatchScope::Exact => is_exact,
-                    MatchScope::DomainAndSubdomains => true,
-                    MatchScope::SubdomainsOnly => !is_exact,
-                };
-                if !scope_matches || !meta.conditions.matches(ctx, clean_domain) {
-                    continue;
-                }
-                let qtype_hit = prefer_rewrite_qtype
-                    && ctx.qtype.is_some_and(|qt| {
-                        meta.rewrite.as_ref().is_some_and(|r| r.matches_qtype(qt))
-                    });
-                if best.is_none() || qtype_hit || !best_qtype_hit {
-                    best = Some(meta);
-                    best_qtype_hit = qtype_hit;
-                }
-            }
-        }
-        best
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -272,12 +177,13 @@ fn parse_hosts_or_bare_line(line: &str) -> Vec<ParsedLine> {
 }
 
 #[derive(Debug, Default)]
-struct RuleSet {
-    important_allows: TrieNode,
-    important_blocks: TrieNode,
-    allows: TrieNode,
-    blocks: TrieNode,
-    rewrites: TrieNode,
+struct RuleSetBuilder {
+    interner: LabelInterner,
+    important_allows: TrieBuilder,
+    important_blocks: TrieBuilder,
+    allows: TrieBuilder,
+    blocks: TrieBuilder,
+    rewrites: TrieBuilder,
     regex_important_allows: Vec<RegexRule>,
     regex_important_blocks: Vec<RegexRule>,
     regex_allows: Vec<RegexRule>,
@@ -287,24 +193,28 @@ struct RuleSet {
     stats: FilterStats,
 }
 
-impl RuleSet {
-    fn from_named_lines<'a>(source_name: &str, lines: impl Iterator<Item = &'a str>) -> Self {
-        let mut set = Self::default();
-        let sid = set.register_source(source_name);
-        for raw_line in lines {
-            set.parse_and_insert_with_source(raw_line, sid);
-        }
-        set
-    }
+#[derive(Debug, Default)]
+struct RuleSet {
+    interner: LabelInterner,
+    important_allows: FlatTrie,
+    important_blocks: FlatTrie,
+    allows: FlatTrie,
+    blocks: FlatTrie,
+    rewrites: FlatTrie,
+    regex_important_allows: Vec<RegexRule>,
+    regex_important_blocks: Vec<RegexRule>,
+    regex_allows: Vec<RegexRule>,
+    regex_blocks: Vec<RegexRule>,
+    regex_rewrites: Vec<RegexRule>,
+    list_names: Vec<String>,
+    stats: FilterStats,
+}
 
+impl RuleSetBuilder {
     fn register_source(&mut self, name: &str) -> u32 {
         let id = u32::try_from(self.list_names.len()).unwrap_or(u32::MAX);
         self.list_names.push(name.to_string());
         id
-    }
-
-    fn source_name(&self, source_id: u32) -> Option<String> {
-        self.list_names.get(source_id as usize).cloned()
     }
 
     fn parse_and_insert_with_source(&mut self, raw_line: &str, source_id: u32) {
@@ -327,11 +237,23 @@ impl RuleSet {
                         source_id,
                     };
                     match bucket {
-                        RuleBucket::ImportantAllow => self.important_allows.insert(&domain, meta),
-                        RuleBucket::Allow => self.allows.insert(&domain, meta),
-                        RuleBucket::ImportantBlock => self.important_blocks.insert(&domain, meta),
-                        RuleBucket::Block => self.blocks.insert(&domain, meta),
-                        RuleBucket::Rewrite => self.rewrites.insert(&domain, meta),
+                        RuleBucket::ImportantAllow => {
+                            self.important_allows
+                                .insert(&mut self.interner, &domain, meta);
+                        }
+                        RuleBucket::Allow => {
+                            self.allows.insert(&mut self.interner, &domain, meta);
+                        }
+                        RuleBucket::ImportantBlock => {
+                            self.important_blocks
+                                .insert(&mut self.interner, &domain, meta);
+                        }
+                        RuleBucket::Block => {
+                            self.blocks.insert(&mut self.interner, &domain, meta);
+                        }
+                        RuleBucket::Rewrite => {
+                            self.rewrites.insert(&mut self.interner, &domain, meta);
+                        }
                     }
                 }
                 ParsedLine::Regex {
@@ -373,6 +295,39 @@ impl RuleSet {
         }
     }
 
+    fn finish(self) -> RuleSet {
+        RuleSet {
+            interner: self.interner,
+            important_allows: self.important_allows.freeze(),
+            important_blocks: self.important_blocks.freeze(),
+            allows: self.allows.freeze(),
+            blocks: self.blocks.freeze(),
+            rewrites: self.rewrites.freeze(),
+            regex_important_allows: self.regex_important_allows,
+            regex_important_blocks: self.regex_important_blocks,
+            regex_allows: self.regex_allows,
+            regex_blocks: self.regex_blocks,
+            regex_rewrites: self.regex_rewrites,
+            list_names: self.list_names,
+            stats: self.stats,
+        }
+    }
+}
+
+impl RuleSet {
+    fn from_named_lines<'a>(source_name: &str, lines: impl Iterator<Item = &'a str>) -> Self {
+        let mut builder = RuleSetBuilder::default();
+        let sid = builder.register_source(source_name);
+        for raw_line in lines {
+            builder.parse_and_insert_with_source(raw_line, sid);
+        }
+        builder.finish()
+    }
+
+    fn source_name(&self, source_id: u32) -> Option<String> {
+        self.list_names.get(source_id as usize).cloned()
+    }
+
     fn match_regex<'a>(
         rules: &'a [RegexRule],
         clean_domain: &str,
@@ -399,13 +354,14 @@ impl RuleSet {
 
     fn match_bucket(
         &self,
-        trie: &TrieNode,
+        trie: &FlatTrie,
+        label_ids: &[Option<u32>],
         regexes: &[RegexRule],
         clean: &str,
         ctx: &FilterQueryContext<'_>,
         action: FilterAction,
     ) -> Option<FilterDecision> {
-        if let Some(meta) = trie.match_domain(clean, ctx, false) {
+        if let Some(meta) = trie.match_label_ids(label_ids, clean, ctx, false) {
             return Some(FilterDecision {
                 action,
                 matched_rule: Some(meta.rule_text.clone()),
@@ -422,8 +378,13 @@ impl RuleSet {
         None
     }
 
-    fn match_rewrite(&self, clean: &str, ctx: &FilterQueryContext<'_>) -> Option<FilterDecision> {
-        let trie_hit = self.rewrites.match_domain(clean, ctx, true);
+    fn match_rewrite(
+        &self,
+        label_ids: &[Option<u32>],
+        clean: &str,
+        ctx: &FilterQueryContext<'_>,
+    ) -> Option<FilterDecision> {
+        let trie_hit = self.rewrites.match_label_ids(label_ids, clean, ctx, true);
         let regex_hit = Self::match_regex(&self.regex_rewrites, clean, ctx, true);
         let trie_exact_qt = trie_hit.is_some_and(|m| {
             ctx.qtype
@@ -461,8 +422,30 @@ impl RuleSet {
             };
         }
 
+        let mut stack_ids = [None; 32];
+        let mut heap_ids = Vec::new();
+        let mut count = 0_usize;
+        for label in clean.rsplit('.').filter(|s| !s.is_empty()) {
+            let id = self.interner.lookup(label);
+            if count < stack_ids.len() {
+                stack_ids[count] = id;
+                count += 1;
+            } else {
+                if heap_ids.is_empty() {
+                    heap_ids.extend_from_slice(&stack_ids);
+                }
+                heap_ids.push(id);
+            }
+        }
+        let label_ids: &[Option<u32>] = if heap_ids.is_empty() {
+            &stack_ids[..count]
+        } else {
+            &heap_ids
+        };
+
         if let Some(dec) = self.match_bucket(
             &self.important_allows,
+            label_ids,
             &self.regex_important_allows,
             clean,
             ctx,
@@ -472,6 +455,7 @@ impl RuleSet {
         }
         if let Some(dec) = self.match_bucket(
             &self.important_blocks,
+            label_ids,
             &self.regex_important_blocks,
             clean,
             ctx,
@@ -481,6 +465,7 @@ impl RuleSet {
         }
         if let Some(dec) = self.match_bucket(
             &self.allows,
+            label_ids,
             &self.regex_allows,
             clean,
             ctx,
@@ -488,11 +473,12 @@ impl RuleSet {
         ) {
             return dec;
         }
-        if let Some(dec) = self.match_rewrite(clean, ctx) {
+        if let Some(dec) = self.match_rewrite(label_ids, clean, ctx) {
             return dec;
         }
         if let Some(dec) = self.match_bucket(
             &self.blocks,
+            label_ids,
             &self.regex_blocks,
             clean,
             ctx,
@@ -609,19 +595,20 @@ impl FilterEngine {
         custom_enabled: bool,
         subscriptions: &[(String, String)],
     ) -> FilterStats {
-        let mut next_set = RuleSet::default();
+        let mut builder = RuleSetBuilder::default();
         for (name, text) in subscriptions {
-            let sid = next_set.register_source(name);
+            let sid = builder.register_source(name);
             for line in text.lines() {
-                next_set.parse_and_insert_with_source(line, sid);
+                builder.parse_and_insert_with_source(line, sid);
             }
         }
         if custom_enabled {
-            let sid = next_set.register_source("custom");
+            let sid = builder.register_source("custom");
             for line in custom_rules.lines() {
-                next_set.parse_and_insert_with_source(line, sid);
+                builder.parse_and_insert_with_source(line, sid);
             }
         }
+        let next_set = builder.finish();
         let stats = next_set.stats.clone();
         self.ruleset.store(Arc::new(next_set));
         self.raw_rules.store(Arc::new(custom_rules.to_string()));

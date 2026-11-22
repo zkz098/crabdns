@@ -665,6 +665,7 @@ dependencies = [
  "crabdns-core",
  "crabdns-storage",
  "crabdns-web",
+ "dashmap",
  "futures-util",
  "hdrhistogram",
  "hickory-proto",

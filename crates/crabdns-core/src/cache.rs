@@ -4,11 +4,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use foldhash::fast::RandomState;
+use hickory_proto::op::Message;
+use hickory_proto::rr::RData;
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::wire::{patch_wire_ttls, scan_rr_ttl_offsets};
+use crate::security::contains_rebinding_ip_msg;
+use crate::wire::{extract_answer_summaries_msg, patch_wire_ttls, scan_rr_ttl_offsets};
 
 pub const DEFAULT_MIN_TTL_SECS: u32 = 10;
 pub const DEFAULT_MAX_TTL_SECS: u32 = 86_400;
@@ -26,14 +29,70 @@ pub struct CacheKey {
     pub upstream_scope: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CachedEntry {
-    pub wire_bytes: Vec<u8>,
+    pub wire_bytes: Box<[u8]>,
     pub inserted_at: Instant,
     pub ttl: Duration,
-    pub ttl_offsets: Arc<[(usize, u32)]>,
-    pub hit_count: Arc<AtomicU32>,
-    pub refresh_inflight: Arc<AtomicBool>,
+    pub ttl_offsets: Box<[(usize, u32)]>,
+    pub answer_summaries: Box<[String]>,
+    pub cname_targets: Box<[Box<str>]>,
+    pub rcode_str: &'static str,
+    pub has_rebinding_ip: bool,
+    pub hit_count: AtomicU32,
+    pub refresh_inflight: AtomicBool,
+}
+
+fn rcode_from_wire(wire: &[u8]) -> &'static str {
+    if wire.len() < 4 {
+        return "NOERROR";
+    }
+    match wire[3] & 0x0F {
+        0 => "NOERROR",
+        1 => "FORMERR",
+        2 => "SERVFAIL",
+        3 => "NXDOMAIN",
+        4 => "NOTIMP",
+        5 => "REFUSED",
+        _ => "OTHER",
+    }
+}
+
+struct ExtractedMeta {
+    answer_summaries: Box<[String]>,
+    cname_targets: Box<[Box<str>]>,
+    rcode_str: &'static str,
+    has_rebinding_ip: bool,
+}
+
+fn extract_cached_meta(wire: &[u8]) -> ExtractedMeta {
+    let rcode_str = rcode_from_wire(wire);
+    let Ok(msg) = Message::from_vec(wire) else {
+        return ExtractedMeta {
+            answer_summaries: Box::from([]),
+            cname_targets: Box::from([]),
+            rcode_str,
+            has_rebinding_ip: false,
+        };
+    };
+    let answer_summaries = extract_answer_summaries_msg(&msg).into_boxed_slice();
+    let mut cnames = Vec::new();
+    for answer in &msg.answers {
+        if let RData::CNAME(cname) = &answer.data {
+            let target = cname.to_utf8();
+            let clean = target.trim_end_matches('.');
+            if !clean.is_empty() {
+                cnames.push(clean.to_string().into_boxed_str());
+            }
+        }
+    }
+    let has_rebinding_ip = contains_rebinding_ip_msg(&msg);
+    ExtractedMeta {
+        answer_summaries,
+        cname_targets: cnames.into_boxed_slice(),
+        rcode_str,
+        has_rebinding_ip,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +133,7 @@ pub struct CacheStats {
 }
 
 pub struct DnsCache {
-    inner: Cache<CacheKey, CachedEntry, RandomState>,
+    inner: Cache<CacheKey, Arc<CachedEntry>, RandomState>,
     optimistic: bool,
     min_ttl_secs: u32,
     max_ttl_secs: u32,
@@ -136,6 +195,35 @@ impl DnsCache {
     }
 
     pub fn get(&self, key: &CacheKey, query_id: u16) -> Option<CacheHit> {
+        let mut wire_bytes = Vec::new();
+        let (is_stale, needs_refresh) = self.get_into(key, query_id, &mut wire_bytes)?;
+        Some(CacheHit {
+            wire_bytes,
+            is_stale,
+            needs_refresh,
+        })
+    }
+
+    /// Looks up a cached entry and writes the patched wire response into `out`,
+    /// returning `(is_stale, needs_refresh)` on hit.
+    pub fn get_into(
+        &self,
+        key: &CacheKey,
+        query_id: u16,
+        out: &mut Vec<u8>,
+    ) -> Option<(bool, bool)> {
+        let (_entry, is_stale, needs_refresh) = self.get_entry_into(key, query_id, out)?;
+        Some((is_stale, needs_refresh))
+    }
+
+    /// Looks up a cached entry, writes the patched wire response into `out`,
+    /// and returns `(entry, is_stale, needs_refresh)` for zero-parse metadata access.
+    pub fn get_entry_into(
+        &self,
+        key: &CacheKey,
+        query_id: u16,
+        out: &mut Vec<u8>,
+    ) -> Option<(Arc<CachedEntry>, bool, bool)> {
         let Some(entry) = self.inner.get(key) else {
             self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -157,15 +245,12 @@ impl DnsCache {
                 needs_refresh = true;
                 self.prefetches.fetch_add(1, Ordering::Relaxed);
             }
-            let mut bytes = entry.wire_bytes;
-            patch_tx_id(&mut bytes, query_id);
+            out.clear();
+            out.extend_from_slice(&entry.wire_bytes);
+            patch_tx_id(out, query_id);
             let elapsed_secs = u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX);
-            patch_wire_ttls(&mut bytes, &entry.ttl_offsets, elapsed_secs, None);
-            return Some(CacheHit {
-                wire_bytes: bytes,
-                is_stale: false,
-                needs_refresh,
-            });
+            patch_wire_ttls(out, &entry.ttl_offsets, elapsed_secs, None);
+            return Some((entry, false, needs_refresh));
         }
 
         if self.optimistic && elapsed <= entry.ttl.saturating_add(self.stale_grace) {
@@ -175,19 +260,11 @@ impl DnsCache {
                 .refresh_inflight
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok();
-            let mut bytes = entry.wire_bytes;
-            patch_tx_id(&mut bytes, query_id);
-            patch_wire_ttls(
-                &mut bytes,
-                &entry.ttl_offsets,
-                0,
-                Some(STALE_RESPONSE_TTL_SECS),
-            );
-            return Some(CacheHit {
-                wire_bytes: bytes,
-                is_stale: true,
-                needs_refresh,
-            });
+            out.clear();
+            out.extend_from_slice(&entry.wire_bytes);
+            patch_tx_id(out, query_id);
+            patch_wire_ttls(out, &entry.ttl_offsets, 0, Some(STALE_RESPONSE_TTL_SECS));
+            return Some((entry, true, needs_refresh));
         }
 
         self.inner.invalidate(key);
@@ -197,18 +274,23 @@ impl DnsCache {
 
     pub fn insert(&self, key: CacheKey, wire_bytes: Vec<u8>, ttl_secs: u32) {
         let clamped_ttl = ttl_secs.clamp(self.min_ttl_secs, self.max_ttl_secs);
-        let ttl_offsets: Arc<[(usize, u32)]> =
-            scan_rr_ttl_offsets(&wire_bytes, self.min_ttl_secs, clamped_ttl).into();
+        let ttl_offsets: Box<[(usize, u32)]> =
+            scan_rr_ttl_offsets(&wire_bytes, self.min_ttl_secs, clamped_ttl).into_boxed_slice();
+        let meta = extract_cached_meta(&wire_bytes);
         self.inner.insert(
             key,
-            CachedEntry {
-                wire_bytes,
+            Arc::new(CachedEntry {
+                wire_bytes: wire_bytes.into_boxed_slice(),
                 inserted_at: Instant::now(),
                 ttl: Duration::from_secs(u64::from(clamped_ttl)),
                 ttl_offsets,
-                hit_count: Arc::new(AtomicU32::new(0)),
-                refresh_inflight: Arc::new(AtomicBool::new(false)),
-            },
+                answer_summaries: meta.answer_summaries,
+                cname_targets: meta.cname_targets,
+                rcode_str: meta.rcode_str,
+                has_rebinding_ip: meta.has_rebinding_ip,
+                hit_count: AtomicU32::new(0),
+                refresh_inflight: AtomicBool::new(false),
+            }),
         );
     }
 
@@ -239,7 +321,7 @@ impl DnsCache {
                 ecs_subnet: key.ecs_subnet,
                 dnssec_do: key.dnssec_do,
                 upstream_scope: key.upstream_scope.clone(),
-                wire_bytes: entry.wire_bytes.clone(),
+                wire_bytes: entry.wire_bytes.to_vec(),
                 expires_at_unix_secs: expires_at,
                 ttl_secs,
             });
@@ -281,22 +363,27 @@ impl DnsCache {
                 upstream_scope: item.upstream_scope,
             };
             let effective_ttl = item.ttl_secs.max(1);
-            let ttl_offsets: Arc<[(usize, u32)]> = scan_rr_ttl_offsets(
+            let ttl_offsets: Box<[(usize, u32)]> = scan_rr_ttl_offsets(
                 &item.wire_bytes,
                 self.min_ttl_secs.min(effective_ttl),
                 effective_ttl,
             )
-            .into();
+            .into_boxed_slice();
+            let meta = extract_cached_meta(&item.wire_bytes);
             self.inner.insert(
                 key,
-                CachedEntry {
-                    wire_bytes: item.wire_bytes,
+                Arc::new(CachedEntry {
+                    wire_bytes: item.wire_bytes.into_boxed_slice(),
                     inserted_at,
                     ttl,
                     ttl_offsets,
-                    hit_count: Arc::new(AtomicU32::new(0)),
-                    refresh_inflight: Arc::new(AtomicBool::new(false)),
-                },
+                    answer_summaries: meta.answer_summaries,
+                    cname_targets: meta.cname_targets,
+                    rcode_str: meta.rcode_str,
+                    has_rebinding_ip: meta.has_rebinding_ip,
+                    hit_count: AtomicU32::new(0),
+                    refresh_inflight: AtomicBool::new(false),
+                }),
             );
             imported += 1;
         }
@@ -381,19 +468,23 @@ mod tests {
             dnssec_do: false,
             upstream_scope: None,
         };
-        let expired = CachedEntry {
-            wire_bytes: vec![0x00, 0x01, 0x81, 0x80],
+        let expired = Arc::new(CachedEntry {
+            wire_bytes: vec![0x00, 0x01, 0x81, 0x80].into_boxed_slice(),
             inserted_at: Instant::now()
                 .checked_sub(Duration::from_secs(120))
                 .expect("valid instant"),
             ttl: Duration::from_secs(30),
-            ttl_offsets: Arc::from([]),
-            hit_count: Arc::new(AtomicU32::new(0)),
-            refresh_inflight: Arc::new(AtomicBool::new(false)),
-        };
+            ttl_offsets: Box::from([]),
+            answer_summaries: Box::from([]),
+            cname_targets: Box::from([]),
+            rcode_str: "NOERROR",
+            has_rebinding_ip: false,
+            hit_count: AtomicU32::new(0),
+            refresh_inflight: AtomicBool::new(false),
+        });
 
         let opt_cache = DnsCache::new(10, true);
-        opt_cache.inner.insert(key.clone(), expired.clone());
+        opt_cache.inner.insert(key.clone(), Arc::clone(&expired));
         let hit1 = opt_cache.get(&key, 0x1122).expect("optimistic stale hit");
         assert!(hit1.is_stale);
         assert!(hit1.needs_refresh);
@@ -428,16 +519,20 @@ mod tests {
         // Simulate 90% elapsed (27s of 30s)
         cache.inner.insert(
             key.clone(),
-            CachedEntry {
-                wire_bytes: vec![0x00, 0x01, 0x81, 0x80],
+            Arc::new(CachedEntry {
+                wire_bytes: vec![0x00, 0x01, 0x81, 0x80].into_boxed_slice(),
                 inserted_at: Instant::now()
                     .checked_sub(Duration::from_secs(27))
                     .expect("valid instant"),
                 ttl: Duration::from_secs(30),
-                ttl_offsets: Arc::from([]),
-                hit_count: Arc::new(AtomicU32::new(1)),
-                refresh_inflight: Arc::new(AtomicBool::new(false)),
-            },
+                ttl_offsets: Box::from([]),
+                answer_summaries: Box::from([]),
+                cname_targets: Box::from([]),
+                rcode_str: "NOERROR",
+                has_rebinding_ip: false,
+                hit_count: AtomicU32::new(1),
+                refresh_inflight: AtomicBool::new(false),
+            }),
         );
 
         let hit1 = cache.get(&key, 0x0002).expect("prefetch hit");
@@ -506,18 +601,23 @@ mod tests {
             dnssec_do: true,
             upstream_scope: None,
         };
-        let offsets: Arc<[(usize, u32)]> = scan_rr_ttl_offsets(&wire, 10, 86_400).into();
+        let offsets: Box<[(usize, u32)]> =
+            scan_rr_ttl_offsets(&wire, 10, 86_400).into_boxed_slice();
         assert_eq!(offsets.len(), 1);
         cache.inner.insert(
             key.clone(),
-            CachedEntry {
-                wire_bytes: wire.clone(),
+            Arc::new(CachedEntry {
+                wire_bytes: wire.clone().into_boxed_slice(),
                 inserted_at: Instant::now().checked_sub(Duration::from_secs(40)).unwrap(),
                 ttl: Duration::from_secs(120),
-                ttl_offsets: Arc::clone(&offsets),
-                hit_count: Arc::new(AtomicU32::new(0)),
-                refresh_inflight: Arc::new(AtomicBool::new(false)),
-            },
+                ttl_offsets: offsets.clone(),
+                answer_summaries: Box::from([]),
+                cname_targets: Box::from([]),
+                rcode_str: "NOERROR",
+                has_rebinding_ip: false,
+                hit_count: AtomicU32::new(0),
+                refresh_inflight: AtomicBool::new(false),
+            }),
         );
 
         let hit = cache.get(&key, 0x2222).unwrap();
@@ -535,16 +635,20 @@ mod tests {
         // Stale hit returns RFC 8767 fixed stale TTL = 30
         cache.inner.insert(
             key.clone(),
-            CachedEntry {
-                wire_bytes: wire,
+            Arc::new(CachedEntry {
+                wire_bytes: wire.into_boxed_slice(),
                 inserted_at: Instant::now()
                     .checked_sub(Duration::from_secs(200))
                     .unwrap(),
                 ttl: Duration::from_secs(120),
                 ttl_offsets: offsets,
-                hit_count: Arc::new(AtomicU32::new(0)),
-                refresh_inflight: Arc::new(AtomicBool::new(false)),
-            },
+                answer_summaries: Box::from([]),
+                cname_targets: Box::from([]),
+                rcode_str: "NOERROR",
+                has_rebinding_ip: false,
+                hit_count: AtomicU32::new(0),
+                refresh_inflight: AtomicBool::new(false),
+            }),
         );
         let stale_hit = cache.get(&key, 0x3333).unwrap();
         assert!(stale_hit.is_stale);

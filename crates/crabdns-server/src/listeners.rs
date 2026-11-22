@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crabdns_core::{DnsPipeline, QueryContext, QueryProtocol, build_raw_formerr};
+use crabdns_core::{DnsPipeline, QueryContext, QueryProtocol, UdpFastOutcome, build_raw_formerr};
+use dashmap::DashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -50,28 +50,22 @@ impl Drop for ActiveConnGuard {
 
 pub(crate) struct IpConnLimiter {
     global: Arc<Semaphore>,
-    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    per_ip: Arc<DashMap<IpAddr, usize>>,
     max_per_ip: usize,
 }
 
 pub(crate) struct IpConnGuard {
     _global: OwnedSemaphorePermit,
-    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    per_ip: Arc<DashMap<IpAddr, usize>>,
     ip: IpAddr,
 }
 
 impl Drop for IpConnGuard {
     fn drop(&mut self) {
-        let mut guard = self
-            .per_ip
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(count) = guard.get_mut(&self.ip) {
+        self.per_ip.remove_if_mut(&self.ip, |_, count| {
             *count = count.saturating_sub(1);
-            if *count == 0 {
-                guard.remove(&self.ip);
-            }
-        }
+            *count == 0
+        });
     }
 }
 
@@ -79,25 +73,23 @@ impl IpConnLimiter {
     pub(crate) fn new(max_global: usize, max_per_ip: usize) -> Self {
         Self {
             global: Arc::new(Semaphore::new(max_global.max(1))),
-            per_ip: Arc::new(Mutex::new(HashMap::new())),
+            per_ip: Arc::new(DashMap::new()),
             max_per_ip: max_per_ip.max(1),
         }
     }
 
     pub(crate) fn try_acquire(&self, ip: IpAddr) -> Option<IpConnGuard> {
         let global = Arc::clone(&self.global).try_acquire_owned().ok()?;
-        let mut guard = self
-            .per_ip
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = guard.entry(ip).or_insert(0);
+        let mut entry = self.per_ip.entry(ip).or_insert(0);
         if *entry >= self.max_per_ip {
             if *entry == 0 {
-                guard.remove(&ip);
+                drop(entry);
+                self.per_ip.remove_if(&ip, |_, v| *v == 0);
             }
             return None;
         }
         *entry += 1;
+        drop(entry);
         Some(IpConnGuard {
             _global: global,
             per_ip: Arc::clone(&self.per_ip),
@@ -142,6 +134,7 @@ pub(crate) async fn run_udp_server(
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut buf = vec![0_u8; 4096];
+    let mut fast_resp = Vec::with_capacity(512);
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
@@ -160,6 +153,17 @@ pub(crate) async fn run_udp_server(
                         continue;
                     }
                 };
+                if pipeline.try_handle_udp_fast(&buf[..len], peer, &mut fast_resp)
+                    == UdpFastOutcome::Handled
+                {
+                    if !fast_resp.is_empty()
+                        && let Err(err) = socket.try_send_to(&fast_resp, peer)
+                        && err.kind() == std::io::ErrorKind::WouldBlock
+                    {
+                        let _ = socket.send_to(&fast_resp, peer).await;
+                    }
+                    continue;
+                }
                 let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
                     pipeline.record_udp_dropped();
                     tracing::warn!(peer = %peer, "UDP DNS query dropped: max inflight reached");

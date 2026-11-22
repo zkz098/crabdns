@@ -25,6 +25,7 @@ clap.workspace = true
 crabdns-core.workspace = true
 crabdns-storage.workspace = true
 crabdns-web.workspace = true
+dashmap.workspace = true
 mimalloc.workspace = true
 quinn.workspace = true
 reqwest.workspace = true

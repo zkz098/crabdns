@@ -508,7 +508,7 @@ impl DnsPipeline {
         )))
     }
 
-    fn build_upstream_query(
+    pub(crate) fn build_upstream_query(
         request: &Message,
         raw_query: &[u8],
         ecs_subnet: Option<(IpAddr, u8)>,
