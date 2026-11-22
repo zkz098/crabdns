@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::error::{CoreError, Result};
+use crate::safesearch::SafeSearchConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 #[serde(rename_all = "snake_case")]
@@ -140,6 +141,16 @@ pub struct Config {
     pub trusted_proxies: Vec<String>,
     #[serde(default = "default_true")]
     pub rdns_enabled: bool,
+    #[serde(default)]
+    pub safesearch: SafeSearchConfig,
+    #[serde(default)]
+    pub dns64_enabled: bool,
+    #[serde(default = "default_dns64_prefixes")]
+    pub dns64_prefixes: Vec<String>,
+    #[serde(default)]
+    pub svcb_strip_ech: bool,
+    #[serde(default)]
+    pub svcb_strip_hints: bool,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -205,6 +216,10 @@ fn default_ecs_ipv6_prefix() -> u8 {
     56
 }
 
+fn default_dns64_prefixes() -> Vec<String> {
+    vec![crate::dns64::DEFAULT_DNS64_PREFIX.to_string()]
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -260,6 +275,11 @@ impl Default for Config {
             block_any_queries: false,
             trusted_proxies: Vec::new(),
             rdns_enabled: true,
+            safesearch: SafeSearchConfig::default(),
+            dns64_enabled: false,
+            dns64_prefixes: default_dns64_prefixes(),
+            svcb_strip_ech: false,
+            svcb_strip_hints: false,
         }
     }
 }

@@ -6,9 +6,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
-    AccessController, BlockMode, ClientRegistry, Config, DdrConfig, DhcpLeaseTable, EcsConfig,
-    HostsTable, PrivatePtrRouter, SplitDnsRule, SplitUpstreamRouter, UpstreamPool,
-    UpstreamStrategy,
+    AccessController, BlockMode, ClientRegistry, Config, DdrConfig, DhcpLeaseTable, Dns64Config,
+    EcsConfig, HostsTable, PrivatePtrRouter, SafeSearchConfig, SplitDnsRule, SplitUpstreamRouter,
+    UpstreamPool, UpstreamStrategy,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -70,6 +70,11 @@ pub struct ConfigResponse {
     pub block_any_queries: bool,
     pub trusted_proxies: Vec<String>,
     pub rdns_enabled: bool,
+    pub safesearch: SafeSearchConfig,
+    pub dns64_enabled: bool,
+    pub dns64_prefixes: Vec<String>,
+    pub svcb_strip_ech: bool,
+    pub svcb_strip_hints: bool,
 }
 
 impl From<&Config> for ConfigResponse {
@@ -123,6 +128,11 @@ impl From<&Config> for ConfigResponse {
             block_any_queries: cfg.block_any_queries,
             trusted_proxies: cfg.trusted_proxies.clone(),
             rdns_enabled: cfg.rdns_enabled,
+            safesearch: cfg.safesearch.clone(),
+            dns64_enabled: cfg.dns64_enabled,
+            dns64_prefixes: cfg.dns64_prefixes.clone(),
+            svcb_strip_ech: cfg.svcb_strip_ech,
+            svcb_strip_hints: cfg.svcb_strip_hints,
         }
     }
 }
@@ -209,6 +219,16 @@ pub struct ConfigUpdatePayload {
     pub tls_key_path: Option<String>,
     #[serde(default)]
     pub rdns_enabled: Option<bool>,
+    #[serde(default)]
+    pub safesearch: Option<SafeSearchConfig>,
+    #[serde(default)]
+    pub dns64_enabled: Option<bool>,
+    #[serde(default)]
+    pub dns64_prefixes: Option<Vec<String>>,
+    #[serde(default)]
+    pub svcb_strip_ech: Option<bool>,
+    #[serde(default)]
+    pub svcb_strip_hints: Option<bool>,
 }
 
 pub async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
@@ -362,6 +382,17 @@ pub async fn update_config(
     let tls_cert_path = merge_opt_path(payload.tls_cert_path, current.tls_cert_path.as_deref());
     let tls_key_path = merge_opt_path(payload.tls_key_path, current.tls_key_path.as_deref());
     let rdns_enabled = payload.rdns_enabled.unwrap_or(current.rdns_enabled);
+    let safesearch = payload
+        .safesearch
+        .unwrap_or_else(|| current.safesearch.clone());
+    let dns64_enabled = payload.dns64_enabled.unwrap_or(current.dns64_enabled);
+    let dns64_prefixes = clean_string_list(
+        payload
+            .dns64_prefixes
+            .unwrap_or_else(|| current.dns64_prefixes.clone()),
+    );
+    let svcb_strip_ech = payload.svcb_strip_ech.unwrap_or(current.svcb_strip_ech);
+    let svcb_strip_hints = payload.svcb_strip_hints.unwrap_or(current.svcb_strip_hints);
 
     let cache_min_ttl_secs = payload
         .cache_min_ttl_secs
@@ -383,6 +414,8 @@ pub async fn update_config(
         .unwrap_or(current.cache_persist_enabled);
 
     // Phase 1: Validate and build all runtime objects without mutating live state.
+    Dns64Config::compile(dns64_enabled, &dns64_prefixes)
+        .map_err(|err| bad_request(err.to_string()))?;
     if let Err(err) = parse_cidr_list(&trusted_proxies) {
         return Err(bad_request(err.to_string()));
     }
@@ -519,6 +552,11 @@ pub async fn update_config(
     next.tls_cert_path = tls_cert_path;
     next.tls_key_path = tls_key_path;
     next.rdns_enabled = rdns_enabled;
+    next.safesearch = safesearch.clone();
+    next.dns64_enabled = dns64_enabled;
+    next.dns64_prefixes = dns64_prefixes.clone();
+    next.svcb_strip_ech = svcb_strip_ech;
+    next.svcb_strip_hints = svcb_strip_hints;
 
     // Phase 2: Persist config first, then atomically swap all runtime state.
     let storage = Arc::clone(&state.app.storage);
@@ -568,6 +606,15 @@ pub async fn update_config(
         .set_dns_rebinding_protection(dns_rebinding_protection);
     state.app.pipeline.set_block_any_queries(block_any_queries);
     state.app.pipeline.set_rdns_enabled(rdns_enabled);
+    state.app.pipeline.set_safesearch(safesearch);
+    let _ = state
+        .app
+        .pipeline
+        .reload_dns64(dns64_enabled, &dns64_prefixes);
+    state
+        .app
+        .pipeline
+        .set_svcb_sanitization(svcb_strip_ech, svcb_strip_hints);
     state.app.pipeline.reload_ddr(DdrConfig {
         enabled: ddr_enabled,
         hostname: ddr_hostname,

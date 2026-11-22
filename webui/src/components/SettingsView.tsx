@@ -2,11 +2,13 @@ import { For, Show } from "solid-js";
 import { t } from "../i18n";
 import type { BlockMode } from "../types/BlockMode";
 import type { ConfigResponse } from "../types/ConfigResponse";
+import type { SafeSearchConfig } from "../types/SafeSearchConfig";
 import type { TlsStatusResponse } from "../types/TlsStatusResponse";
 import type { UpdateStatusResponse } from "../types/UpdateStatusResponse";
 import type { UpstreamCapabilities } from "../types/UpstreamCapabilities";
 import type { UpstreamStatus } from "../types/UpstreamStatus";
 import type { UpstreamStrategy } from "../types/UpstreamStrategy";
+import { SetupGuideCard } from "./SetupGuideCard";
 
 interface SettingsViewProps {
   configData: ConfigResponse | null;
@@ -94,6 +96,16 @@ interface SettingsViewProps {
   onTrustedProxiesChange: (val: string) => void;
   rdnsEnabled: boolean;
   onRdnsEnabledChange: (val: boolean) => void;
+  safesearch: SafeSearchConfig;
+  onSafesearchChange: (val: SafeSearchConfig) => void;
+  dns64Enabled: boolean;
+  onDns64EnabledChange: (val: boolean) => void;
+  dns64PrefixesText: string;
+  onDns64PrefixesChange: (val: string) => void;
+  svcbStripEch: boolean;
+  onSvcbStripEchChange: (val: boolean) => void;
+  svcbStripHints: boolean;
+  onSvcbStripHintsChange: (val: boolean) => void;
   tlsCertPath: string;
   onTlsCertPathChange: (val: string) => void;
   tlsKeyPath: string;
@@ -940,6 +952,188 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
         </div>
 
+        {/* SafeSearch, DNS64 & HTTPS/SVCB Sanitization */}
+        <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-4">
+          <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+            {t("settingsSafeSearchTitle")}
+          </p>
+          <p class="text-xs text-[#666666] dark:text-[#a1a1aa]">{t("settingsSafeSearchDesc")}</p>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <label class="flex items-center gap-2 text-xs font-medium text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.enabled}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    enabled: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsSafeSearchEnabled")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.google}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    google: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              Google
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.bing}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    bing: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              Bing
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.youtube}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    youtube: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              YouTube
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.youtube_strict}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    youtube_strict: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsSafeSearchYoutubeStrict")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.duckduckgo}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    duckduckgo: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              DuckDuckGo
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.yandex}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    yandex: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              Yandex
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.pixabay}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    pixabay: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              Pixabay
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.safesearch.brave}
+                onChange={(e) =>
+                  props.onSafesearchChange({
+                    ...props.safesearch,
+                    brave: e.currentTarget.checked,
+                  })
+                }
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              Brave
+            </label>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.dns64Enabled}
+                onChange={(e) => props.onDns64EnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsDns64Label")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.svcbStripEch}
+                onChange={(e) => props.onSvcbStripEchChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsSvcbStripEchLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.svcbStripHints}
+                onChange={(e) => props.onSvcbStripHintsChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsSvcbStripHintsLabel")}
+            </label>
+          </div>
+
+          <Show when={props.dns64Enabled}>
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsDns64PrefixesLabel")}
+              </label>
+              <textarea
+                rows={2}
+                spellcheck={false}
+                placeholder="64:ff9b::/96"
+                value={props.dns64PrefixesText}
+                onInput={(e) => props.onDns64PrefixesChange(e.currentTarget.value)}
+                class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-2.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+              />
+            </div>
+          </Show>
+        </div>
+
         {/* Native TLS & Certificate Hot Reload */}
         <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1345,6 +1539,8 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
         )}
       </Show>
+
+      <SetupGuideCard configData={props.configData} />
     </div>
   );
 }

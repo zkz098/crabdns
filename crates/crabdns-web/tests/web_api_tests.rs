@@ -596,6 +596,7 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
             upstreams: Vec::new(),
             block_mode: None,
             cname_cloaking_blocking: None,
+            safesearch_enabled: None,
         }])
         .expect("save groups");
     storage
@@ -609,6 +610,7 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
             custom_rules: String::new(),
             upstreams: Vec::new(),
             block_mode: None,
+            safesearch_enabled: None,
             tags: vec!["tablet".to_string()],
         }])
         .expect("save clients");
@@ -943,4 +945,51 @@ async fn test_web_update_api_status_check_and_apply() {
     assert!(!applied_status.update_available);
     assert!(applied_status.restart_pending);
     assert_eq!(std::fs::read(&target_exe).unwrap(), binary_payload);
+}
+
+#[tokio::test]
+async fn test_setup_mobileconfig_endpoint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
+    let cfg = Config::default();
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, true));
+    let pool = Arc::new(UpstreamPool::new(&cfg.upstreams, 1000).unwrap());
+    let pipeline = Arc::new(DnsPipeline::new(filter, cache, pool, None));
+    let (live_tx, _) = tokio::sync::broadcast::channel(16);
+
+    let app = build_router(AppState {
+        config: Arc::new(ArcSwap::from_pointee(cfg)),
+        pipeline,
+        storage,
+        live_tx,
+        tls_reloader: None,
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!(
+            "http://{addr}/api/setup/mobileconfig?protocol=doh&hostname=dns.example.com&client_id=iphone"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.text().await.unwrap();
+    assert!(body.contains("<string>HTTPS</string>"));
+    assert!(body.contains("https://dns.example.com/dns-query/iphone"));
+
+    let bad = client
+        .get(format!(
+            "http://{addr}/api/setup/mobileconfig?protocol=ftp&hostname=dns.example.com"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
 }

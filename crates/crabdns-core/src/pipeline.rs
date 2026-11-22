@@ -15,15 +15,18 @@ use crate::clients::{
 use crate::clock::monotonic_now_ms;
 use crate::config::{BlockMode, SplitDnsRule, UpstreamStrategy};
 use crate::device_names::{DhcpLeaseTable, MdnsNameResolver};
+use crate::dns64::Dns64Config;
 use crate::dnssec::DnssecValidator;
 use crate::edns::EcsConfig;
 use crate::error::Result;
 use crate::filter::{FilterDecision, FilterEngine};
 use crate::filter_rules::FilterQueryContext;
 use crate::lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter, is_private_ptr_domain};
+use crate::safesearch::SafeSearchConfig;
 use crate::security::is_private_or_special_ip;
 use crate::singleflight::Singleflight;
 use crate::split_dns::SplitUpstreamRouter;
+use crate::svcb::SvcbSanitizeOptions;
 use crate::upstream::UpstreamPool;
 
 pub use crate::pipeline_types::{
@@ -64,6 +67,10 @@ pub struct DnsPipeline {
     pub(crate) ddr_config: ArcSwap<DdrConfig>,
     pub(crate) dns_rebinding_protection: AtomicBool,
     pub(crate) block_any_queries: AtomicBool,
+    pub(crate) safesearch: ArcSwap<SafeSearchConfig>,
+    pub(crate) dns64: ArcSwap<Dns64Config>,
+    pub(crate) svcb_strip_ech: AtomicBool,
+    pub(crate) svcb_strip_hints: AtomicBool,
     pub(crate) latency: QueryLatencyHistogram,
     counters: ServerRuntimeCounters,
 }
@@ -122,6 +129,10 @@ impl DnsPipeline {
             ddr_config: ArcSwap::from_pointee(DdrConfig::default()),
             dns_rebinding_protection: AtomicBool::new(false),
             block_any_queries: AtomicBool::new(false),
+            safesearch: ArcSwap::from_pointee(SafeSearchConfig::default()),
+            dns64: ArcSwap::from_pointee(Dns64Config::default()),
+            svcb_strip_ech: AtomicBool::new(false),
+            svcb_strip_hints: AtomicBool::new(false),
             latency: QueryLatencyHistogram::default(),
             counters: ServerRuntimeCounters::default(),
         }
@@ -512,6 +523,28 @@ impl DnsPipeline {
 
     pub fn set_block_any_queries(&self, enabled: bool) {
         self.block_any_queries.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_safesearch(&self, config: SafeSearchConfig) {
+        self.safesearch.store(Arc::new(config));
+    }
+
+    pub fn reload_dns64(&self, enabled: bool, prefixes: &[String]) -> Result<()> {
+        let compiled = Dns64Config::compile(enabled, prefixes)?;
+        self.dns64.store(Arc::new(compiled));
+        Ok(())
+    }
+
+    pub fn set_svcb_sanitization(&self, strip_ech: bool, strip_hints: bool) {
+        self.svcb_strip_ech.store(strip_ech, Ordering::Relaxed);
+        self.svcb_strip_hints.store(strip_hints, Ordering::Relaxed);
+    }
+
+    pub(crate) fn svcb_sanitize_options(&self) -> SvcbSanitizeOptions {
+        SvcbSanitizeOptions {
+            strip_ech: self.svcb_strip_ech.load(Ordering::Relaxed),
+            strip_hints: self.svcb_strip_hints.load(Ordering::Relaxed),
+        }
     }
 
     pub fn record_udp_dropped(&self) {

@@ -130,6 +130,11 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         tls_cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
         tls_key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
         rdns_enabled: Some(cfg.rdns_enabled),
+        safesearch: Some(cfg.safesearch.clone()),
+        dns64_enabled: Some(cfg.dns64_enabled),
+        dns64_prefixes: Some(cfg.dns64_prefixes.clone()),
+        svcb_strip_ech: Some(cfg.svcb_strip_ech),
+        svcb_strip_hints: Some(cfg.svcb_strip_hints),
     }
 }
 
@@ -396,6 +401,15 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
     next.tls_cert_path = merge_opt_path(payload.tls_cert_path, current.tls_cert_path.as_deref());
     next.tls_key_path = merge_opt_path(payload.tls_key_path, current.tls_key_path.as_deref());
     next.rdns_enabled = payload.rdns_enabled.unwrap_or(current.rdns_enabled);
+    if let Some(safesearch) = payload.safesearch {
+        next.safesearch = safesearch;
+    }
+    next.dns64_enabled = payload.dns64_enabled.unwrap_or(current.dns64_enabled);
+    if let Some(prefixes) = payload.dns64_prefixes {
+        next.dns64_prefixes = clean_string_list(prefixes);
+    }
+    next.svcb_strip_ech = payload.svcb_strip_ech.unwrap_or(current.svcb_strip_ech);
+    next.svcb_strip_hints = payload.svcb_strip_hints.unwrap_or(current.svcb_strip_hints);
 }
 
 struct CompiledRuntime {
@@ -493,6 +507,9 @@ fn apply_compiled_to_pipeline(
     pipe.set_dns_rebinding_protection(next.dns_rebinding_protection);
     pipe.set_block_any_queries(next.block_any_queries);
     pipe.set_rdns_enabled(next.rdns_enabled);
+    pipe.set_safesearch(next.safesearch.clone());
+    let _ = pipe.reload_dns64(next.dns64_enabled, &next.dns64_prefixes);
+    pipe.set_svcb_sanitization(next.svcb_strip_ech, next.svcb_strip_hints);
     pipe.reload_ddr(DdrConfig {
         enabled: next.ddr_enabled,
         hostname: next.ddr_hostname.clone(),

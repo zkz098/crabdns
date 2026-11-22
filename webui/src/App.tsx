@@ -25,6 +25,7 @@ import type { FilterSubscription } from "./types/FilterSubscription";
 import type { QueryEvent } from "./types/QueryEvent";
 import type { QuickRuleResponse } from "./types/QuickRuleResponse";
 import type { RulesPayload } from "./types/RulesPayload";
+import type { SafeSearchConfig } from "./types/SafeSearchConfig";
 import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { StatsResponse } from "./types/StatsResponse";
 import type { TestRuleResponse } from "./types/TestRuleResponse";
@@ -103,6 +104,21 @@ export default function App() {
   const [tlsCertPath, setTlsCertPath] = createSignal("");
   const [tlsKeyPath, setTlsKeyPath] = createSignal("");
   const [rdnsEnabled, setRdnsEnabled] = createSignal(true);
+  const [safesearch, setSafesearch] = createSignal<SafeSearchConfig>({
+    enabled: false,
+    google: true,
+    bing: true,
+    youtube: true,
+    youtube_strict: false,
+    duckduckgo: true,
+    yandex: true,
+    pixabay: true,
+    brave: true,
+  });
+  const [dns64Enabled, setDns64Enabled] = createSignal(false);
+  const [dns64PrefixesText, setDns64PrefixesText] = createSignal("64:ff9b::/96");
+  const [svcbStripEch, setSvcbStripEch] = createSignal(false);
+  const [svcbStripHints, setSvcbStripHints] = createSignal(false);
   const [tlsStatus, setTlsStatus] = createSignal<TlsStatusResponse | null>(null);
   const [reloadingTls, setReloadingTls] = createSignal(false);
   const [tlsMessage, setTlsMessage] = createSignal("");
@@ -522,6 +538,23 @@ export default function App() {
     setTlsCertPath(data.tls_cert_path ?? "");
     setTlsKeyPath(data.tls_key_path ?? "");
     setRdnsEnabled(data.rdns_enabled);
+    setSafesearch(
+      data.safesearch ?? {
+        enabled: false,
+        google: true,
+        bing: true,
+        youtube: true,
+        youtube_strict: false,
+        duckduckgo: true,
+        yandex: true,
+        pixabay: true,
+        brave: true,
+      },
+    );
+    setDns64Enabled(data.dns64_enabled);
+    setDns64PrefixesText((data.dns64_prefixes ?? ["64:ff9b::/96"]).join("\n"));
+    setSvcbStripEch(data.svcb_strip_ech);
+    setSvcbStripHints(data.svcb_strip_hints);
   }
 
   const clientNameMap = createMemo<Record<string, string>>(() => {
@@ -1042,6 +1075,11 @@ export default function App() {
       tls_cert_path: tlsCertPath().trim(),
       tls_key_path: tlsKeyPath().trim(),
       rdns_enabled: rdnsEnabled(),
+      safesearch: safesearch(),
+      dns64_enabled: dns64Enabled(),
+      dns64_prefixes: parseLines(dns64PrefixesText()),
+      svcb_strip_ech: svcbStripEch(),
+      svcb_strip_hints: svcbStripHints(),
     };
 
     try {
@@ -1343,6 +1381,16 @@ export default function App() {
               onTrustedProxiesChange={setTrustedProxiesText}
               rdnsEnabled={rdnsEnabled()}
               onRdnsEnabledChange={setRdnsEnabled}
+              safesearch={safesearch()}
+              onSafesearchChange={setSafesearch}
+              dns64Enabled={dns64Enabled()}
+              onDns64EnabledChange={setDns64Enabled}
+              dns64PrefixesText={dns64PrefixesText()}
+              onDns64PrefixesChange={setDns64PrefixesText}
+              svcbStripEch={svcbStripEch()}
+              onSvcbStripEchChange={setSvcbStripEch}
+              svcbStripHints={svcbStripHints()}
+              onSvcbStripHintsChange={setSvcbStripHints}
               tlsCertPath={tlsCertPath()}
               onTlsCertPathChange={setTlsCertPath}
               tlsKeyPath={tlsKeyPath()}

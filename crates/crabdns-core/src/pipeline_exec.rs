@@ -23,7 +23,6 @@ use crate::singleflight::{FlightGuard, FlightReceiver, FlightRole, wait_follower
 use crate::upstream::UpstreamPool;
 use crate::wire::{
     build_blocked_response, build_error_response, build_rewrite_response, extract_answer_summaries,
-    extract_answer_summaries_msg,
 };
 
 #[derive(Clone, Copy)]
@@ -93,27 +92,7 @@ impl DnsPipeline {
         let qtype = question.query_type();
         let qclass = u16::from(question.query_class());
 
-        let policy = self
-            .clients
-            .load()
-            .match_client(ctx.client_addr.ip(), ctx.client_id.as_deref());
-        let client_name = match &policy {
-            Some(p) => Some(p.client_name.clone()),
-            None => {
-                self.resolve_unconfigured_client_name(ctx.client_addr.ip())
-                    .0
-            }
-        };
-        let meta = LogMeta {
-            client_addr: ctx.client_addr,
-            client_name: client_name.clone(),
-            client_id: ctx.client_id.clone(),
-            profile_id: policy.as_deref().map(|p| p.profile_id.clone()),
-            protocol: ctx.protocol,
-            domain: clean_domain,
-            qtype,
-            start,
-        };
+        let (policy, meta) = self.resolve_query_meta(&ctx, clean_domain, qtype, start);
 
         if let Some(resp) = self.check_pre_routing(&request, &meta)? {
             return Ok(resp);
@@ -132,6 +111,15 @@ impl DnsPipeline {
             return Ok(resp);
         }
 
+        if !flags.explicitly_allowed {
+            let p = policy.as_deref();
+            if let Some(resp) =
+                self.check_safesearch_interceptor(&request, &meta, p, flags.blocking_disabled)?
+            {
+                return Ok(resp);
+            }
+        }
+
         if let Some(resp) = self.check_private_ptr_block(&request, &meta)? {
             return Ok(resp);
         }
@@ -148,16 +136,19 @@ impl DnsPipeline {
             upstream_scope,
         };
 
-        if let Some(resp) = self.try_serve_from_cache(
-            &request,
-            raw_query,
-            &meta,
-            policy.as_deref(),
-            &upstream,
-            &cache_key,
-            &decision,
-            flags,
-        )? {
+        if let Some(resp) = self
+            .try_serve_from_cache(
+                &request,
+                raw_query,
+                &meta,
+                policy.as_deref(),
+                &upstream,
+                &cache_key,
+                &decision,
+                flags,
+            )
+            .await?
+        {
             return Ok(resp);
         }
 
@@ -175,6 +166,37 @@ impl DnsPipeline {
             flags,
         )
         .await
+    }
+
+    fn resolve_query_meta(
+        &self,
+        ctx: &QueryContext,
+        domain: String,
+        qtype: RecordType,
+        start: Instant,
+    ) -> (Option<Arc<ResolvedClientPolicy>>, LogMeta) {
+        let policy = self
+            .clients
+            .load()
+            .match_client(ctx.client_addr.ip(), ctx.client_id.as_deref());
+        let client_name = match &policy {
+            Some(p) => Some(p.client_name.clone()),
+            None => {
+                self.resolve_unconfigured_client_name(ctx.client_addr.ip())
+                    .0
+            }
+        };
+        let meta = LogMeta {
+            client_addr: ctx.client_addr,
+            client_name,
+            client_id: ctx.client_id.clone(),
+            profile_id: policy.as_deref().map(|p| p.profile_id.clone()),
+            protocol: ctx.protocol,
+            domain,
+            qtype,
+            start,
+        };
+        (policy, meta)
     }
 
     fn evaluate_request_filter(
@@ -338,7 +360,7 @@ impl DnsPipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn try_serve_from_cache(
+    async fn try_serve_from_cache(
         &self,
         request: &Message,
         raw_query: &[u8],
@@ -391,24 +413,20 @@ impl DnsPipeline {
             return Ok(Some(blk.bytes));
         }
 
-        let (rcode_str, answers) = match parsed_hit.as_ref() {
-            Some(msg) => (
-                msg.response_code.to_string(),
-                extract_answer_summaries_msg(msg),
-            ),
-            None => ("UNKNOWN".to_string(), Vec::new()),
-        };
-
-        self.emit_log(
-            meta,
-            QueryOutcome::Cached,
-            decision.matched_rule.clone(),
-            decision.matched_list.clone(),
-            Some("cache".to_string()),
-            &rcode_str,
-            answers,
-        );
-        Ok(Some(hit.wire_bytes))
+        let resp = self
+            .post_process_and_log(
+                request,
+                meta,
+                upstream,
+                hit.wire_bytes,
+                parsed_hit,
+                QueryOutcome::Cached,
+                decision.matched_rule.clone(),
+                decision.matched_list.clone(),
+                "cache".to_string(),
+            )
+            .await?;
+        Ok(Some(resp))
     }
 
     fn enforce_acl(&self, request: &Message, meta: &LogMeta) -> Result<Option<Vec<u8>>> {
@@ -527,13 +545,15 @@ impl DnsPipeline {
             request,
             meta,
             policy,
+            upstream,
             is_local_route,
             decision,
             flags,
             resp_bytes,
             upstream_label,
-            parsed_msg.as_ref(),
+            parsed_msg,
         )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -670,23 +690,24 @@ impl DnsPipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn finalize_upstream_response(
+    async fn finalize_upstream_response(
         &self,
         request: &Message,
         meta: &LogMeta,
         policy: Option<&ResolvedClientPolicy>,
+        upstream: &UpstreamPool,
         is_local_route: bool,
         decision: &FilterDecision,
         flags: PolicyFlags,
         resp_bytes: Vec<u8>,
         upstream_label: String,
-        parsed_msg: Option<&Message>,
+        parsed_msg: Option<Message>,
     ) -> Result<Vec<u8>> {
         if !flags.blocking_disabled
             && !flags.explicitly_allowed
             && !is_local_route
             && self.dns_rebinding_protection.load(Ordering::Relaxed)
-            && parsed_msg.is_some_and(contains_rebinding_ip_msg)
+            && parsed_msg.as_ref().is_some_and(contains_rebinding_ip_msg)
         {
             let (blocked_bytes, rcode) =
                 build_blocked_response(request, meta.qtype, flags.block_mode)?;
@@ -705,7 +726,7 @@ impl DnsPipeline {
         if !flags.blocking_disabled
             && !flags.explicitly_allowed
             && flags.cname_cloaking_on
-            && let Some(msg) = parsed_msg
+            && let Some(ref msg) = parsed_msg
             && let Some(blk) =
                 self.check_cname_cloaking_msg(policy, meta, request, msg, flags.block_mode)?
         {
@@ -721,22 +742,17 @@ impl DnsPipeline {
             return Ok(blk.bytes);
         }
 
-        let (rcode_str, answers) = match parsed_msg {
-            Some(msg) => (
-                msg.response_code.to_string(),
-                extract_answer_summaries_msg(msg),
-            ),
-            None => ("UNKNOWN".to_string(), Vec::new()),
-        };
-        self.emit_log(
+        self.post_process_and_log(
+            request,
             meta,
+            upstream,
+            resp_bytes,
+            parsed_msg,
             QueryOutcome::Forwarded,
             decision.matched_rule.clone(),
             decision.matched_list.clone(),
-            Some(upstream_label),
-            &rcode_str,
-            answers,
-        );
-        Ok(resp_bytes)
+            upstream_label,
+        )
+        .await
     }
 }

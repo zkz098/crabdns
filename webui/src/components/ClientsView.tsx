@@ -132,6 +132,7 @@ export function ClientsView(props: ClientsViewProps) {
   const [groupUseGlobal, setGroupUseGlobal] = createSignal(true);
   const [groupBlockMode, setGroupBlockMode] = createSignal<OptBlockMode>("");
   const [groupCnameCloak, setGroupCnameCloak] = createSignal<TriState>("");
+  const [groupSafeSearch, setGroupSafeSearch] = createSignal<TriState>("");
   const [groupUpstreams, setGroupUpstreams] = createSignal("");
   const [groupRules, setGroupRules] = createSignal("");
 
@@ -144,6 +145,7 @@ export function ClientsView(props: ClientsViewProps) {
   const [clientBlocking, setClientBlocking] = createSignal<TriState>("");
   const [clientUseGlobal, setClientUseGlobal] = createSignal<TriState>("");
   const [clientBlockMode, setClientBlockMode] = createSignal<OptBlockMode>("");
+  const [clientSafeSearch, setClientSafeSearch] = createSignal<TriState>("");
   const [clientUpstreams, setClientUpstreams] = createSignal("");
   const [clientRules, setClientRules] = createSignal("");
   const [clientTags, setClientTags] = createSignal("");
@@ -201,6 +203,7 @@ export function ClientsView(props: ClientsViewProps) {
     setGroupUseGlobal(true);
     setGroupBlockMode("");
     setGroupCnameCloak("");
+    setGroupSafeSearch("");
     setGroupUpstreams("");
     setGroupRules("");
     setGroupFormOpen(true);
@@ -214,6 +217,7 @@ export function ClientsView(props: ClientsViewProps) {
     setGroupUseGlobal(g.use_global_rules);
     setGroupBlockMode(g.block_mode ?? "");
     setGroupCnameCloak(toTriState(g.cname_cloaking_blocking));
+    setGroupSafeSearch(toTriState(g.safesearch_enabled));
     setGroupUpstreams(g.upstreams.join("\n"));
     setGroupRules(g.custom_rules);
     setGroupFormOpen(true);
@@ -230,6 +234,7 @@ export function ClientsView(props: ClientsViewProps) {
       upstreams: parseLines(groupUpstreams()),
       block_mode: groupBlockMode() === "" ? null : (groupBlockMode() as BlockMode),
       cname_cloaking_blocking: fromTriState(groupCnameCloak()),
+      safesearch_enabled: fromTriState(groupSafeSearch()),
     };
     const editId = editingGroupId();
     const ok = editId
@@ -248,6 +253,7 @@ export function ClientsView(props: ClientsViewProps) {
     setClientBlocking("");
     setClientUseGlobal("");
     setClientBlockMode("");
+    setClientSafeSearch("");
     setClientUpstreams("");
     setClientRules("");
     setClientTags("");
@@ -262,6 +268,7 @@ export function ClientsView(props: ClientsViewProps) {
     setClientBlocking(toTriState(c.blocking_enabled));
     setClientUseGlobal(toTriState(c.use_global_rules));
     setClientBlockMode(c.block_mode ?? "");
+    setClientSafeSearch(toTriState(c.safesearch_enabled));
     setClientUpstreams(c.upstreams.join("\n"));
     setClientRules(c.custom_rules);
     setClientTags(c.tags.join(", "));
@@ -290,6 +297,7 @@ export function ClientsView(props: ClientsViewProps) {
       custom_rules: clientRules(),
       upstreams: parseLines(clientUpstreams()),
       block_mode: clientBlockMode() === "" ? null : (clientBlockMode() as BlockMode),
+      safesearch_enabled: fromTriState(clientSafeSearch()),
       tags: parseTags(clientTags()),
     };
     const editId = editingClientId();
@@ -419,6 +427,17 @@ export function ClientsView(props: ClientsViewProps) {
                   value={groupCnameCloak()}
                   options={TRI_OPTIONS}
                   onChange={(v) => setGroupCnameCloak(v as TriState)}
+                  class="w-full"
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
+                  {t("settingsSafeSearchTitle")}
+                </label>
+                <SelectMenu
+                  value={groupSafeSearch()}
+                  options={TRI_OPTIONS}
+                  onChange={(v) => setGroupSafeSearch(v as TriState)}
                   class="w-full"
                 />
               </div>
@@ -630,6 +649,17 @@ export function ClientsView(props: ClientsViewProps) {
                   value={clientBlockMode()}
                   options={BLOCK_MODE_OPTIONS}
                   onChange={(v) => setClientBlockMode(v as OptBlockMode)}
+                  class="w-full"
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
+                  {t("settingsSafeSearchTitle")}
+                </label>
+                <SelectMenu
+                  value={clientSafeSearch()}
+                  options={TRI_OPTIONS}
+                  onChange={(v) => setClientSafeSearch(v as TriState)}
                   class="w-full"
                 />
               </div>

@@ -4,6 +4,7 @@ pub mod clients;
 mod clock;
 pub mod config;
 pub mod device_names;
+pub mod dns64;
 pub mod dnssec;
 pub mod edns;
 pub mod error;
@@ -13,10 +14,13 @@ pub mod lan;
 pub mod pipeline;
 mod pipeline_cache;
 mod pipeline_exec;
+mod pipeline_post;
 mod pipeline_types;
+pub mod safesearch;
 pub mod security;
 pub mod singleflight;
 pub mod split_dns;
+pub mod svcb;
 pub mod upstream;
 pub mod upstream_probe;
 mod upstream_probe_wire;
@@ -31,6 +35,7 @@ pub use clients::{
 };
 pub use config::{BlockMode, Config, SplitDnsRule, UpstreamStrategy};
 pub use device_names::{DhcpLeaseTable, MdnsNameResolver};
+pub use dns64::{DEFAULT_DNS64_PREFIX, Dns64Config, Dns64Prefix};
 pub use dnssec::{DnssecValidator, ValidationOutcome};
 pub use edns::EcsConfig;
 pub use error::{CoreError, Result};
@@ -43,7 +48,9 @@ pub use pipeline::{
     DnsPipeline, LatencyHistogramSnapshot, PipelineRuntimeMetrics, QueryContext, QueryEvent,
     QueryOutcome, QueryProtocol,
 };
+pub use safesearch::SafeSearchConfig;
 pub use split_dns::SplitUpstreamRouter;
+pub use svcb::SvcbSanitizeOptions;
 pub use upstream::{UpstreamPool, UpstreamStatus};
 pub use upstream_probe::{UpstreamCapabilities, UpstreamProtocol, probe_upstreams};
 pub use wire::build_raw_formerr;

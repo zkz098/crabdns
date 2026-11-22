@@ -180,6 +180,11 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.block_any_queries = saved_cfg.block_any_queries;
     config.trusted_proxies = saved_cfg.trusted_proxies;
     config.rdns_enabled = saved_cfg.rdns_enabled;
+    config.safesearch = saved_cfg.safesearch;
+    config.dns64_enabled = saved_cfg.dns64_enabled;
+    config.dns64_prefixes = saved_cfg.dns64_prefixes;
+    config.svcb_strip_ech = saved_cfg.svcb_strip_ech;
+    config.svcb_strip_hints = saved_cfg.svcb_strip_hints;
     if saved_cfg.tls_cert_path.is_some() {
         config.tls_cert_path = saved_cfg.tls_cert_path;
     }
@@ -294,6 +299,9 @@ fn configure_pipeline(
     )?;
     pipeline.set_dns_rebinding_protection(cfg.dns_rebinding_protection);
     pipeline.set_block_any_queries(cfg.block_any_queries);
+    pipeline.set_safesearch(cfg.safesearch.clone());
+    pipeline.reload_dns64(cfg.dns64_enabled, &cfg.dns64_prefixes)?;
+    pipeline.set_svcb_sanitization(cfg.svcb_strip_ech, cfg.svcb_strip_hints);
 
     let clients = storage.list_clients()?;
     let groups = storage.list_client_groups()?;

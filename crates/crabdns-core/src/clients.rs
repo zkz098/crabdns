@@ -51,6 +51,8 @@ pub struct ClientGroup {
     pub block_mode: Option<BlockMode>,
     #[serde(default)]
     pub cname_cloaking_blocking: Option<bool>,
+    #[serde(default)]
+    pub safesearch_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -72,6 +74,8 @@ pub struct ClientProfile {
     pub upstreams: Vec<String>,
     #[serde(default)]
     pub block_mode: Option<BlockMode>,
+    #[serde(default)]
+    pub safesearch_enabled: Option<bool>,
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -133,6 +137,7 @@ pub struct ResolvedClientPolicy {
     pub use_global_rules: bool,
     pub block_mode: Option<BlockMode>,
     pub cname_cloaking_blocking: Option<bool>,
+    pub safesearch_enabled: Option<bool>,
     pub client_filter: Option<Arc<FilterEngine>>,
     pub group_filter: Option<Arc<FilterEngine>>,
     pub upstream_pool: Option<(String, Arc<UpstreamPool>)>,
@@ -319,6 +324,9 @@ fn build_resolved_policy(
         .block_mode
         .or_else(|| group_ref.and_then(|g| g.block_mode));
     let cname_cloaking_blocking = group_ref.and_then(|g| g.cname_cloaking_blocking);
+    let safesearch_enabled = client
+        .safesearch_enabled
+        .or_else(|| group_ref.and_then(|g| g.safesearch_enabled));
 
     let client_filter = (!client.custom_rules.trim().is_empty()).then(|| {
         Arc::new(FilterEngine::from_named_text(
@@ -349,6 +357,7 @@ fn build_resolved_policy(
         use_global_rules,
         block_mode,
         cname_cloaking_blocking,
+        safesearch_enabled,
         client_filter,
         group_filter,
         upstream_pool,
@@ -522,6 +531,7 @@ mod tests {
             upstreams: vec!["udp://9.9.9.9:53".to_string()],
             block_mode: Some(BlockMode::NxDomain),
             cname_cloaking_blocking: Some(false),
+            safesearch_enabled: None,
         }];
         let clients = vec![
             ClientProfile {
@@ -534,6 +544,7 @@ mod tests {
                 custom_rules: String::new(),
                 upstreams: Vec::new(),
                 block_mode: None,
+                safesearch_enabled: None,
                 tags: Vec::new(),
             },
             ClientProfile {
@@ -546,6 +557,7 @@ mod tests {
                 custom_rules: "@@||tiktok.com^\n||custom-block.test^".to_string(),
                 upstreams: vec!["udp://1.1.1.1:53".to_string()],
                 block_mode: Some(BlockMode::NoData),
+                safesearch_enabled: None,
                 tags: vec!["work".to_string()],
             },
         ];

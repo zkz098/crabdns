@@ -309,3 +309,144 @@ async fn test_ecs_and_dnssec_do_forwarded_to_upstream() {
     assert!(saw_do2);
     assert_eq!(saw_ecs2, Some(("203.0.113.0".parse().unwrap(), 24)));
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_safesearch_dns64_and_svcb_sanitization_pipeline() {
+    use crabdns_core::{ClientProfile, SafeSearchConfig, UpstreamStrategy};
+    use hickory_proto::rr::rdata::HTTPS;
+    use hickory_proto::rr::rdata::svcb::{
+        Alpn, EchConfigList, IpHint, SVCB, SvcParamKey, SvcParamValue,
+    };
+
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = sock.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 4096];
+        while let Ok((len, peer)) = sock.recv_from(&mut buf).await {
+            if let Ok(req) = Message::from_vec(&buf[..len])
+                && let Some(q) = req.queries.first()
+            {
+                let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+                resp.metadata.recursion_desired = true;
+                resp.metadata.recursion_available = true;
+                resp.metadata.response_code = ResponseCode::NoError;
+                resp.queries.clone_from(&req.queries);
+
+                match q.query_type() {
+                    RecordType::A => {
+                        resp.add_answer(Record::from_rdata(
+                            q.name().clone(),
+                            120,
+                            RData::A(A(Ipv4Addr::new(93, 184, 216, 34))),
+                        ));
+                    }
+                    RecordType::HTTPS => {
+                        let params = vec![
+                            (
+                                SvcParamKey::Alpn,
+                                SvcParamValue::Alpn(Alpn(vec!["h2".to_string()])),
+                            ),
+                            (
+                                SvcParamKey::Ipv4Hint,
+                                SvcParamValue::Ipv4Hint(IpHint(vec![
+                                    Ipv4Addr::new(93, 184, 216, 34).into(),
+                                ])),
+                            ),
+                            (
+                                SvcParamKey::EchConfigList,
+                                SvcParamValue::EchConfigList(EchConfigList(vec![1, 2, 3, 4])),
+                            ),
+                        ];
+                        resp.add_answer(Record::from_rdata(
+                            q.name().clone(),
+                            300,
+                            RData::HTTPS(HTTPS(SVCB::new(1, Name::root(), params))),
+                        ));
+                    }
+                    _ => {}
+                }
+                let _ = sock.send_to(&resp.to_vec().unwrap(), peer).await;
+            }
+        }
+    });
+
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, true));
+    let pool = Arc::new(UpstreamPool::new(&[format!("udp://{upstream_addr}")], 1000).unwrap());
+    let pipeline = DnsPipeline::new(filter, cache, pool, None);
+
+    // 1. SafeSearch global + per-client override
+    pipeline.set_safesearch(SafeSearchConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    pipeline
+        .reload_clients(
+            &[ClientProfile {
+                id: "bypass-ss".to_string(),
+                name: "Bypass".to_string(),
+                identifiers: vec!["192.168.1.99".to_string()],
+                group_id: None,
+                blocking_enabled: None,
+                use_global_rules: None,
+                custom_rules: String::new(),
+                upstreams: Vec::new(),
+                block_mode: None,
+                safesearch_enabled: Some(false),
+                tags: Vec::new(),
+            }],
+            &[],
+            1000,
+            UpstreamStrategy::Failover,
+            &[],
+        )
+        .unwrap();
+
+    let normal_client = SocketAddr::new("192.168.1.10".parse().unwrap(), 5353);
+    let bypass_client = SocketAddr::new("192.168.1.99".parse().unwrap(), 5353);
+
+    let q_ss = build_query(101, "www.google.com.", RecordType::A);
+    let r_ss =
+        Message::from_vec(&pipeline.handle_packet(&q_ss, normal_client).await.unwrap()).unwrap();
+    assert_eq!(r_ss.answers.len(), 1);
+    assert!(matches!(r_ss.answers[0].data, RData::CNAME(_)));
+
+    let r_bypass =
+        Message::from_vec(&pipeline.handle_packet(&q_ss, bypass_client).await.unwrap()).unwrap();
+    assert_eq!(r_bypass.answers.len(), 1);
+    assert!(matches!(r_bypass.answers[0].data, RData::A(_)));
+
+    // 2. DNS64 synthesis on empty NoError AAAA
+    pipeline
+        .reload_dns64(true, &["64:ff9b::/96".to_string()])
+        .unwrap();
+    let q_aaaa = build_query(102, "v4only.example.", RecordType::AAAA);
+    let r_aaaa = Message::from_vec(
+        &pipeline
+            .handle_packet(&q_aaaa, normal_client)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r_aaaa.response_code, ResponseCode::NoError);
+    assert_eq!(r_aaaa.answers.len(), 1);
+    assert_eq!(r_aaaa.answers[0].data.to_string(), "64:ff9b::5db8:d822");
+
+    // 3. HTTPS/SVCB sanitization strips ECH + IPv4Hint while preserving ALPN
+    pipeline.set_svcb_sanitization(true, true);
+    let q_https = build_query(103, "svcb.example.", RecordType::HTTPS);
+    let r_https = Message::from_vec(
+        &pipeline
+            .handle_packet(&q_https, normal_client)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let RData::HTTPS(https) = &r_https.answers[0].data else {
+        panic!("expected HTTPS record");
+    };
+    assert_eq!(https.0.svc_params.len(), 1);
+    assert_eq!(https.0.svc_params[0].0, SvcParamKey::Alpn);
+}

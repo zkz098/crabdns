@@ -366,6 +366,7 @@ async fn test_pipeline_client_policies_and_profiles() {
         upstreams: Vec::new(),
         block_mode: Some(BlockMode::NxDomain),
         cname_cloaking_blocking: None,
+        safesearch_enabled: None,
     }];
     let clients = vec![
         ClientProfile {
@@ -378,6 +379,7 @@ async fn test_pipeline_client_policies_and_profiles() {
             custom_rules: String::new(),
             upstreams: vec![format!("udp://{custom_upstream}")],
             block_mode: None,
+            safesearch_enabled: None,
             tags: Vec::new(),
         },
         ClientProfile {
@@ -390,6 +392,7 @@ async fn test_pipeline_client_policies_and_profiles() {
             custom_rules: String::new(),
             upstreams: Vec::new(),
             block_mode: None,
+            safesearch_enabled: None,
             tags: Vec::new(),
         },
     ];

@@ -28,6 +28,7 @@ pub mod doh;
 pub mod metrics;
 pub mod proxy;
 pub mod rewrites_api;
+pub mod setup_api;
 pub mod subscriptions;
 pub mod tls_api;
 pub mod update_api;
@@ -200,6 +201,10 @@ pub fn build_router_with_updater(
         )
         .route("/api/tls/status", get(tls_api::get_tls_status))
         .route("/api/tls/reload", post(tls_api::reload_tls))
+        .route(
+            "/api/setup/mobileconfig",
+            get(setup_api::download_mobileconfig),
+        )
         .route(
             "/api/config",
             get(config_api::get_config).put(config_api::update_config),
