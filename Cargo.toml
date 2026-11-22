@@ -67,3 +67,12 @@ tokio-tungstenite = "0.29"
 futures-util = "0.3"
 foldhash = "0.2"
 mimalloc = "0.1"
+tikv-jemallocator = "0.7"
+tikv-jemalloc-ctl = "0.7"
+jemalloc_pprof = "0.9"
+hdrhistogram = { version = "7.6", default-features = false }
+
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

@@ -12,6 +12,10 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = []
+prof-jemalloc = ["dep:tikv-jemallocator", "crabdns-web/prof-jemalloc"]
+
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
@@ -30,8 +34,12 @@ tokio-rustls.workspace = true
 tracing = { workspace = true }
 tracing-subscriber.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = { workspace = true, features = ["profiling", "stats"], optional = true }
+
 [dev-dependencies]
 futures-util.workspace = true
+hdrhistogram.workspace = true
 hickory-proto.workspace = true
 proptest.workspace = true
 reqwest.workspace = true

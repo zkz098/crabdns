@@ -157,7 +157,12 @@ async fn test_virtual_time_long_horizon_background_tasks() {
         .await
         .expect("create sub");
     assert_eq!(create_res.status(), StatusCode::CREATED);
-    assert_eq!(sub_hits.load(Ordering::SeqCst), 1);
+    let create_body = create_res.text().await.expect("create sub body");
+    assert_eq!(
+        sub_hits.load(Ordering::SeqCst),
+        1,
+        "unexpected initial sub hits; create_subscription body={create_body}"
+    );
 
     let dns_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind client");
     dns_sock.connect(server.dns_addr).await.expect("connect");

@@ -7,4 +7,7 @@
 /webui/dist
 *.db
 *.log
+/soak-results
+dhat-heap.json
+**/__pycache__/
 .DS_Store

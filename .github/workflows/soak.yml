@@ -1,0 +1,58 @@
+name: Endurance Soak & Heap Diff
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Soak duration preset (ci ~2.5m, weekend ~28m)"
+        required: true
+        default: "ci"
+        type: choice
+        options:
+          - ci
+          - weekend
+      memory_max:
+        description: "Soft-router cgroup MemoryMax limit"
+        required: true
+        default: "128M"
+        type: string
+  schedule:
+    - cron: "0 4 * * 6"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  soak:
+    name: Independent-Process Soak & Jemalloc Pprof Diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+      - name: Build Web UI dist
+        working-directory: webui
+        run: pnpm install --frozen-lockfile && pnpm build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run soak harness with prof-jemalloc
+        run: |
+          MODE="${{ github.event.inputs.mode || 'weekend' }}"
+          MEM_MAX="${{ github.event.inputs.memory_max || '128M' }}"
+          ./scripts/soak.sh \
+            --mode "$MODE" \
+            --memory-max "$MEM_MAX" \
+            --out-dir soak-results
+      - name: Upload soak metrics & heap profiles
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-results
+          path: soak-results

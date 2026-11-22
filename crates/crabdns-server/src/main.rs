@@ -4,11 +4,18 @@ use std::path::PathBuf;
 use clap::Parser;
 use crabdns_core::Config;
 use crabdns_server::spawn_server;
-use mimalloc::MiMalloc;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(all(feature = "prof-jemalloc", unix))]
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "prof-jemalloc", unix))]
+use mimalloc as _;
+
+#[cfg(not(all(feature = "prof-jemalloc", unix)))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Debug, Parser)]
 #[command(name = "crabdns", about = "High-performance Rust DNS ad-blocker")]

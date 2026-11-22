@@ -165,11 +165,15 @@ pub fn build_router(state: AppState) -> Router {
             get(get_upstream_health).post(probe_upstreams),
         )
         .route("/api/upstreams/probe", post(probe_upstream_capabilities))
-        .route("/api/auth/settings", put(auth::update_auth))
-        .layer(middleware::from_fn_with_state(
-            router_state.clone(),
-            auth::require_auth,
-        ));
+        .route("/api/auth/settings", put(auth::update_auth));
+
+    #[cfg(all(feature = "prof-jemalloc", unix))]
+    let protected_api = protected_api.route("/debug/pprof/heap", get(metrics::pprof_heap));
+
+    let protected_api = protected_api.layer(middleware::from_fn_with_state(
+        router_state.clone(),
+        auth::require_auth,
+    ));
 
     Router::new()
         .route("/api/health", get(health))

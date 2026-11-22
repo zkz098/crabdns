@@ -18,6 +18,14 @@ struct ProcessMetrics {
     threads: Option<u64>,
 }
 
+#[cfg(all(feature = "prof-jemalloc", unix))]
+#[derive(Debug, Default)]
+struct JemallocStats {
+    allocated: u64,
+    active: u64,
+    resident: u64,
+}
+
 pub async fn prometheus_metrics(State(state): State<RouterState>) -> Response {
     let query_stats = state.app.storage.stats_snapshot();
     let storage_entries = state.app.storage.tracked_stat_entries();
@@ -35,6 +43,10 @@ pub async fn prometheus_metrics(State(state): State<RouterState>) -> Response {
     write_cache_and_filter_metrics(&mut out, &cache_stats, &filter_stats, paused);
     write_upstream_metrics(&mut out, &upstreams);
     write_process_metrics(&mut out, &proc_metrics);
+    #[cfg(all(feature = "prof-jemalloc", unix))]
+    if let Some(jstats) = read_jemalloc_stats() {
+        write_jemalloc_metrics(&mut out, &jstats);
+    }
     write_runtime_metrics(
         &mut out,
         &runtime,
@@ -260,4 +272,72 @@ fn parse_status_u64(line: &str, prefix: &str) -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn read_process_metrics() -> ProcessMetrics {
     ProcessMetrics::default()
+}
+
+#[cfg(all(feature = "prof-jemalloc", unix))]
+fn read_jemalloc_stats() -> Option<JemallocStats> {
+    use tikv_jemalloc_ctl::{epoch, stats};
+
+    epoch::advance().ok()?;
+    let allocated = stats::allocated::read().ok()? as u64;
+    let active = stats::active::read().ok()? as u64;
+    let resident = stats::resident::read().ok()? as u64;
+    Some(JemallocStats {
+        allocated,
+        active,
+        resident,
+    })
+}
+
+#[cfg(all(feature = "prof-jemalloc", unix))]
+fn write_jemalloc_metrics(out: &mut String, jstats: &JemallocStats) {
+    let _ = writeln!(
+        out,
+        "# HELP crabdns_jemalloc_allocated_bytes Total bytes allocated by the application via jemalloc.\n\
+         # TYPE crabdns_jemalloc_allocated_bytes gauge\n\
+         crabdns_jemalloc_allocated_bytes {}\n\
+         # HELP crabdns_jemalloc_active_bytes Total bytes in active pages allocated by the application via jemalloc.\n\
+         # TYPE crabdns_jemalloc_active_bytes gauge\n\
+         crabdns_jemalloc_active_bytes {}\n\
+         # HELP crabdns_jemalloc_resident_bytes Maximum bytes in physically resident data pages mapped by jemalloc.\n\
+         # TYPE crabdns_jemalloc_resident_bytes gauge\n\
+         crabdns_jemalloc_resident_bytes {}",
+        jstats.allocated, jstats.active, jstats.resident,
+    );
+}
+
+#[cfg(all(feature = "prof-jemalloc", unix))]
+pub async fn pprof_heap() -> Response {
+    let Some(ctl) = jemalloc_pprof::PROF_CTL.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "jemalloc heap profiling is not active (set _RJEM_MALLOC_CONF=prof:true)",
+        )
+            .into_response();
+    };
+
+    let mut guard = ctl.lock().await;
+    if !guard.activated()
+        && let Err(err) = guard.activate()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to activate jemalloc profiling: {err}"),
+        )
+            .into_response();
+    }
+
+    match guard.dump_pprof() {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to dump pprof heap profile: {err}"),
+        )
+            .into_response(),
+    }
 }
