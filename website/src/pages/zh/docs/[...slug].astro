@@ -1,0 +1,19 @@
+---
+import DocsPage from "../../../components/DocsPage.astro";
+import { docsContent, type DocPage } from "../../../data/docs";
+
+export function getStaticPaths() {
+  return docsContent.zh.map((page) => ({
+    params: { slug: page.slug === "getting-started" ? undefined : page.slug },
+    props: { page },
+  }));
+}
+
+interface Props {
+  page: DocPage;
+}
+
+const { page } = Astro.props;
+---
+
+<DocsPage lang="zh" page={page} />

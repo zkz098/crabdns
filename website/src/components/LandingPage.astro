@@ -1,0 +1,203 @@
+---
+import Layout from "../layouts/Layout.astro";
+import { Navbar } from "./Navbar";
+import { CopyCommand } from "./CopyCommand";
+import { DashboardPreview } from "./DashboardPreview";
+import { QuickStartTabs } from "./QuickStartTabs";
+import { translations, type Locale } from "../i18n/translations";
+
+interface Props {
+  lang: Locale;
+}
+
+const { lang } = Astro.props;
+const t = translations[lang];
+---
+
+<Layout title={t.metaTitle} description={t.metaDescription} lang={lang}>
+  <Navbar client:load lang={lang} />
+
+  <main class="max-w-6xl mx-auto px-4 sm:px-6">
+    <!-- Hero Section -->
+    <section class="pt-14 pb-16 sm:pt-20 sm:pb-24 space-y-10 animate-view-enter">
+      <div class="max-w-3xl space-y-5">
+        <div
+          class="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono font-medium border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#666666] dark:text-[#a1a1aa]"
+        >
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+          <span>{t.heroBadge}</span>
+        </div>
+
+        <h1 class="text-3xl sm:text-5xl font-semibold tracking-tight text-[#171717] dark:text-[#ededed] leading-[1.12]">
+          {t.heroTitle}
+        </h1>
+
+        <p class="text-base sm:text-lg text-[#666666] dark:text-[#a1a1aa] leading-relaxed">
+          {t.heroSubtitle}
+        </p>
+
+        <div class="flex flex-wrap items-center gap-3 pt-1">
+          <a
+            href="#quickstart"
+            class="h-10 px-5 rounded-xl text-sm font-medium no-underline bg-[#171717] dark:bg-white text-white dark:text-[#0a0a0a] hover:opacity-90 inline-flex items-center gap-2 shadow-sm transition-opacity"
+          >
+            <span class="i-ri-terminal-box-line text-base"></span>
+            <span>{t.heroCtaPrimary}</span>
+          </a>
+          <a
+            href={lang === "zh" ? "/zh/docs/" : "/docs/"}
+            class="h-10 px-5 rounded-xl text-sm font-medium no-underline bg-white dark:bg-[#0a0a0a] hover:bg-[#f4f4f5] dark:hover:bg-[#161616] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] inline-flex items-center gap-2 transition-colors"
+          >
+            <span class="i-ri-book-open-line text-base"></span>
+            <span>{t.heroCtaDocs}</span>
+          </a>
+          <a
+            href="https://github.com/zkz098/crabdns"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="h-10 px-5 rounded-xl text-sm font-medium no-underline bg-white dark:bg-[#0a0a0a] hover:bg-[#f4f4f5] dark:hover:bg-[#161616] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] inline-flex items-center gap-2 transition-colors"
+          >
+            <span class="i-ri-github-fill text-base"></span>
+            <span>{t.heroCtaSecondary}</span>
+          </a>
+        </div>
+
+        <div class="pt-2 max-w-2xl">
+          <CopyCommand
+            client:load
+            command={t.heroCopyCmd}
+            copyLabel={t.copy}
+            copiedLabel={t.copied}
+          />
+        </div>
+      </div>
+
+      <!-- Interactive WebUI Preview -->
+      <DashboardPreview client:load lang={lang} />
+    </section>
+
+    <!-- Core Features -->
+    <section id="features" class="py-16 sm:py-20 border-t border-[#eaeaea] dark:border-[#262626] space-y-10">
+      <div class="max-w-2xl space-y-2.5">
+        <p class="text-xs font-mono uppercase tracking-wider text-[#0070f3] font-medium">
+          {t.featuresEyebrow}
+        </p>
+        <h2 class="text-2xl sm:text-3xl font-semibold tracking-tight text-[#171717] dark:text-[#ededed]">
+          {t.featuresTitle}
+        </h2>
+        <p class="text-sm sm:text-base text-[#666666] dark:text-[#a1a1aa]">
+          {t.featuresSubtitle}
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {
+          t.features.map((feat) => (
+            <div class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-5 space-y-3 transition-colors hover:border-[#d4d4d8] dark:hover:border-[#3a3a3a]">
+              <div class={`w-9 h-9 rounded-lg flex items-center justify-center ${feat.accent}`}>
+                <span class={`${feat.icon} text-lg`} />
+              </div>
+              <h3 class="text-sm font-semibold text-[#171717] dark:text-[#ededed]">{feat.title}</h3>
+              <p class="text-xs sm:text-sm text-[#666666] dark:text-[#a1a1aa] leading-relaxed">
+                {feat.desc}
+              </p>
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    <!-- 3-Step Setup -->
+    <section id="setup" class="py-16 sm:py-20 border-t border-[#eaeaea] dark:border-[#262626] space-y-10">
+      <div class="max-w-2xl space-y-2.5">
+        <p class="text-xs font-mono uppercase tracking-wider text-[#0070f3] font-medium">
+          {t.setupEyebrow}
+        </p>
+        <h2 class="text-2xl sm:text-3xl font-semibold tracking-tight text-[#171717] dark:text-[#ededed]">
+          {t.setupTitle}
+        </h2>
+        <p class="text-sm sm:text-base text-[#666666] dark:text-[#a1a1aa]">
+          {t.setupSubtitle}
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {
+          t.setupSteps.map((s) => (
+            <div class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-5 space-y-3 transition-colors hover:border-[#d4d4d8] dark:hover:border-[#3a3a3a]">
+              <div class="flex items-center justify-between">
+                <div class="w-8 h-8 rounded-lg bg-[#f4f4f5] dark:bg-[#161616] text-[#171717] dark:text-[#ededed] flex items-center justify-center">
+                  <span class={`${s.icon} text-base`} />
+                </div>
+                <span class="text-xs font-mono text-[#8f8f8f] dark:text-[#71717a]">{s.step}</span>
+              </div>
+              <h3 class="text-sm font-semibold text-[#171717] dark:text-[#ededed]">{s.title}</h3>
+              <p class="text-xs sm:text-sm text-[#666666] dark:text-[#a1a1aa] leading-relaxed">
+                {s.desc}
+              </p>
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    <!-- Quick Start -->
+    <section id="quickstart" class="py-16 sm:py-20 border-t border-[#eaeaea] dark:border-[#262626] space-y-8">
+      <div class="max-w-2xl space-y-2.5">
+        <p class="text-xs font-mono uppercase tracking-wider text-[#0070f3] font-medium">
+          {t.qsEyebrow}
+        </p>
+        <h2 class="text-2xl sm:text-3xl font-semibold tracking-tight text-[#171717] dark:text-[#ededed]">
+          {t.qsTitle}
+        </h2>
+        <p class="text-sm sm:text-base text-[#666666] dark:text-[#a1a1aa]">
+          {t.qsSubtitle}
+        </p>
+      </div>
+
+      <QuickStartTabs client:visible lang={lang} />
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-[#eaeaea] dark:border-[#262626] bg-white/60 dark:bg-black/60 backdrop-blur-sm">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 py-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-7 h-7 rounded-lg bg-[#171717] dark:bg-white text-white dark:text-[#0a0a0a] flex items-center justify-center shrink-0">
+          <span class="i-ri-shield-check-fill text-sm" />
+        </div>
+        <div class="text-xs text-[#666666] dark:text-[#8f8f8f]">
+          <span class="font-semibold text-[#171717] dark:text-[#ededed]">CrabDNS</span> ·{" "}
+          {t.footerDesc} {t.footerLicense}
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-4 text-xs text-[#666666] dark:text-[#8f8f8f]">
+        <span class="inline-flex items-center gap-1.5 font-mono text-[11px]">
+          <span class="i-ri-cloud-line text-sm text-[#0070f3]" />
+          {t.footerEdge}
+        </span>
+        <a
+          href={lang === "zh" ? "/zh/docs/" : "/docs/"}
+          class="no-underline text-[#666666] dark:text-[#8f8f8f] hover:text-[#171717] dark:hover:text-[#ededed] transition-colors"
+        >
+          {t.navDocs}
+        </a>
+        <a
+          href="https://github.com/zkz098/crabdns"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="no-underline text-[#666666] dark:text-[#8f8f8f] hover:text-[#171717] dark:hover:text-[#ededed] transition-colors"
+        >
+          GitHub
+        </a>
+        <a
+          href={lang === "en" ? "/zh/" : "/"}
+          class="no-underline text-[#666666] dark:text-[#8f8f8f] hover:text-[#171717] dark:hover:text-[#ededed] transition-colors"
+        >
+          {lang === "en" ? "简体中文" : "English"}
+        </a>
+      </div>
+    </div>
+  </footer>
+</Layout>

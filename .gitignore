@@ -5,6 +5,10 @@
 /data
 /webui/node_modules
 /webui/dist
+/website/node_modules
+/website/dist
+/website/.astro
+/website/.wrangler
 *.db
 *.log
 /soak-results

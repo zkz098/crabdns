@@ -1,0 +1,227 @@
+---
+import Layout from "../layouts/Layout.astro";
+import { Navbar } from "./Navbar";
+import { CodeBlock } from "./CodeBlock";
+import { docsContent, docHref, type DocPage } from "../data/docs";
+import { translations, type Locale } from "../i18n/translations";
+
+interface Props {
+  lang: Locale;
+  page: DocPage;
+}
+
+const { lang, page } = Astro.props;
+const t = translations[lang];
+const allPages = docsContent[lang];
+const currentIndex = allPages.findIndex((p) => p.slug === page.slug);
+const prevPage = currentIndex > 0 ? allPages[currentIndex - 1] : null;
+const nextPage = currentIndex < allPages.length - 1 ? allPages[currentIndex + 1] : null;
+const otherLang: Locale = lang === "en" ? "zh" : "en";
+const switchToHref = docHref(otherLang, page.slug);
+
+const sidebarHeading = lang === "zh" ? "文档目录" : "Documentation";
+const tocHeading = lang === "zh" ? "本页导航" : "On this page";
+const prevLabel = lang === "zh" ? "上一篇" : "Previous";
+const nextLabel = lang === "zh" ? "下一篇" : "Next";
+---
+
+<Layout
+  title={`${page.title} — CrabDNS ${t.navDocs}`}
+  description={page.description}
+  lang={lang}
+>
+  <Navbar client:load lang={lang} switchToHref={switchToHref} />
+
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
+    <!-- Mobile Horizontal Docs Nav -->
+    <div class="lg:hidden mb-6 overflow-x-auto pb-2">
+      <div class="flex items-center gap-1.5 min-w-max">
+        {
+          allPages.map((item) => {
+            const active = item.slug === page.slug;
+            return (
+              <a
+                href={docHref(lang, item.slug)}
+                class={`px-3 py-1.5 rounded-lg text-xs font-medium no-underline flex items-center gap-1.5 border transition-colors ${
+                  active
+                    ? "bg-[#171717] dark:bg-white text-white dark:text-[#0a0a0a] border-[#171717] dark:border-white"
+                    : "bg-white dark:bg-[#0a0a0a] text-[#666666] dark:text-[#a1a1aa] border-[#eaeaea] dark:border-[#262626]"
+                }`}
+              >
+                <span class={`${item.icon} text-sm`} />
+                <span>{item.title}</span>
+              </a>
+            );
+          })
+        }
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)_180px] gap-8 items-start">
+      <!-- Left Sidebar -->
+      <aside class="hidden lg:block sticky top-20 space-y-3">
+        <div class="px-2.5 text-[11px] font-mono uppercase tracking-wider text-[#8f8f8f] dark:text-[#71717a]">
+          {sidebarHeading}
+        </div>
+        <nav class="space-y-1">
+          {
+            allPages.map((item) => {
+              const active = item.slug === page.slug;
+              return (
+                <a
+                  href={docHref(lang, item.slug)}
+                  class={`px-2.5 py-2 rounded-lg text-xs font-medium no-underline flex items-center gap-2 transition-colors ${
+                    active
+                      ? "bg-white dark:bg-[#111111] text-[#171717] dark:text-white border border-[#eaeaea] dark:border-[#262626] shadow-sm"
+                      : "text-[#666666] dark:text-[#a1a1aa] hover:text-[#171717] dark:hover:text-[#ededed] hover:bg-white/60 dark:hover:bg-[#0a0a0a]"
+                  }`}
+                >
+                  <span class={`${item.icon} text-sm shrink-0`} />
+                  <span class="truncate">{item.title}</span>
+                </a>
+              );
+            })
+          }
+        </nav>
+      </aside>
+
+      <!-- Main Article -->
+      <article class="min-w-0 space-y-8 animate-view-enter">
+        <header class="space-y-3 pb-6 border-b border-[#eaeaea] dark:border-[#262626]">
+          <div class="inline-flex items-center gap-2 px-2.5 py-1 rounded-md text-[11px] font-mono bg-[#f4f4f5] dark:bg-[#111111] text-[#666666] dark:text-[#a1a1aa] border border-[#eaeaea] dark:border-[#262626]">
+            <span class={`${page.icon} text-xs text-[#0070f3]`} />
+            <span>{sidebarHeading}</span>
+          </div>
+          <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight text-[#171717] dark:text-[#ededed]">
+            {page.title}
+          </h1>
+          <p class="text-sm sm:text-base text-[#666666] dark:text-[#a1a1aa] leading-relaxed">
+            {page.description}
+          </p>
+        </header>
+
+        <div class="space-y-10">
+          {
+            page.sections.map((section) => (
+              <section id={section.id} class="scroll-mt-20 space-y-4">
+                <h2 class="text-lg sm:text-xl font-semibold tracking-tight text-[#171717] dark:text-[#ededed]">
+                  {section.heading}
+                </h2>
+                <div class="space-y-3">
+                  {section.body.map((paragraph) => (
+                    <p class="text-sm text-[#666666] dark:text-[#a1a1aa] leading-relaxed">
+                      {paragraph}
+                    </p>
+                  ))}
+                </div>
+
+                {section.code && (
+                  <CodeBlock
+                    client:visible
+                    lang={section.code.lang}
+                    content={section.code.content}
+                    copyLabel={t.copy}
+                    copiedLabel={t.copied}
+                  />
+                )}
+
+                {section.table && (
+                  <div class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] overflow-hidden">
+                    <div class="overflow-x-auto">
+                      <table class="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr class="border-b border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] text-[#666666] dark:text-[#8f8f8f] text-[11px]">
+                            {section.table.headers.map((h) => (
+                              <th class="py-2.5 px-3.5 font-medium">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody class="divide-y divide-[#eaeaea] dark:divide-[#1f1f1f]">
+                          {section.table.rows.map((row) => (
+                            <tr class="hover:bg-[#fafafa] dark:hover:bg-[#111111]">
+                              {row.map((cell, idx) => (
+                                <td
+                                  class={`py-2.5 px-3.5 ${
+                                    idx === 0
+                                      ? "font-mono text-[#171717] dark:text-[#ededed] whitespace-nowrap"
+                                      : "text-[#666666] dark:text-[#a1a1aa]"
+                                  }`}
+                                >
+                                  {cell}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </section>
+            ))
+          }
+        </div>
+
+        <!-- Prev / Next Navigation -->
+        <nav class="pt-8 border-t border-[#eaeaea] dark:border-[#262626] grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {
+            prevPage ? (
+              <a
+                href={docHref(lang, prevPage.slug)}
+                class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] hover:border-[#d4d4d8] dark:hover:border-[#3a3a3a] p-4 no-underline space-y-1 transition-colors"
+              >
+                <div class="text-[11px] font-mono text-[#8f8f8f] dark:text-[#71717a] flex items-center gap-1">
+                  <span class="i-ri-arrow-left-line" />
+                  <span>{prevLabel}</span>
+                </div>
+                <div class="text-sm font-medium text-[#171717] dark:text-[#ededed]">
+                  {prevPage.title}
+                </div>
+              </a>
+            ) : (
+              <div />
+            )
+          }
+
+          {
+            nextPage && (
+              <a
+                href={docHref(lang, nextPage.slug)}
+                class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] hover:border-[#d4d4d8] dark:hover:border-[#3a3a3a] p-4 no-underline space-y-1 text-right transition-colors"
+              >
+                <div class="text-[11px] font-mono text-[#8f8f8f] dark:text-[#71717a] flex items-center justify-end gap-1">
+                  <span>{nextLabel}</span>
+                  <span class="i-ri-arrow-right-line" />
+                </div>
+                <div class="text-sm font-medium text-[#171717] dark:text-[#ededed]">
+                  {nextPage.title}
+                </div>
+              </a>
+            )
+          }
+        </nav>
+      </article>
+
+      <!-- Right Table of Contents -->
+      <aside class="hidden lg:block sticky top-20 space-y-3">
+        <div class="text-[11px] font-mono uppercase tracking-wider text-[#8f8f8f] dark:text-[#71717a]">
+          {tocHeading}
+        </div>
+        <ul class="space-y-1.5 border-l border-[#eaeaea] dark:border-[#262626] pl-3 m-0 list-none">
+          {
+            page.sections.map((section) => (
+              <li>
+                <a
+                  href={`#${section.id}`}
+                  class="text-xs no-underline text-[#666666] dark:text-[#a1a1aa] hover:text-[#171717] dark:hover:text-[#ededed] transition-colors block py-0.5"
+                >
+                  {section.heading}
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </aside>
+    </div>
+  </div>
+</Layout>
