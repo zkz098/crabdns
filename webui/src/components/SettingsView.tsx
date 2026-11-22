@@ -9,6 +9,7 @@ import type { UpstreamCapabilities } from "../types/UpstreamCapabilities";
 import type { UpstreamStatus } from "../types/UpstreamStatus";
 import type { UpstreamStrategy } from "../types/UpstreamStrategy";
 import { InfoTooltip } from "./InfoTooltip";
+import { PortPrecheckPanel } from "./PortPrecheckPanel";
 import { SetupGuideCard } from "./SetupGuideCard";
 import { UpstreamList } from "./UpstreamList";
 
@@ -1364,6 +1365,13 @@ export function SettingsView(props: SettingsViewProps) {
                 </span>
               </div>
             </div>
+            <PortPrecheckPanel
+              listenDns={cfg().listen_dns}
+              listenWeb={cfg().listen_web}
+              listenWebTls={cfg().listen_web_tls}
+              listenDot={cfg().listen_dot}
+              listenDoq={cfg().listen_doq}
+            />
           </div>
         )}
       </Show>

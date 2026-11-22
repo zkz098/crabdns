@@ -993,3 +993,186 @@ async fn test_setup_mobileconfig_endpoint() {
         .unwrap();
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_initial_setup_wizard_endpoints() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
+    let cfg = Config::default();
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, true));
+    let pool = Arc::new(UpstreamPool::new(&cfg.upstreams, 1000).unwrap());
+    let pipeline = Arc::new(DnsPipeline::new(filter, cache, pool, None));
+    let (live_tx, _) = tokio::sync::broadcast::channel(16);
+
+    let app = build_router(AppState {
+        config: Arc::new(ArcSwap::from_pointee(cfg)),
+        pipeline,
+        storage,
+        live_tx,
+        tls_reloader: None,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let client = reqwest::Client::new();
+
+    let status_res = client
+        .get(format!("http://{addr}/api/setup/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status_res.status(), StatusCode::OK);
+    let status_json: serde_json::Value =
+        serde_json::from_str(&status_res.text().await.unwrap()).unwrap();
+    assert_eq!(status_json["setup_required"], true);
+
+    let complete_res = client
+        .post(format!("http://{addr}/api/setup/complete"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(
+            serde_json::json!({
+                "skip": false,
+                "enable_auth": true,
+                "username": "admin",
+                "password": "wizard-password-123",
+                "upstreams": ["1.1.1.1:53"],
+                "block_mode": "nx_domain",
+                "dnssec_enabled": true
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(complete_res.status(), StatusCode::OK);
+    let set_cookie = complete_res
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .expect("session cookie should be set")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let complete_json: serde_json::Value =
+        serde_json::from_str(&complete_res.text().await.unwrap()).unwrap();
+    assert_eq!(complete_json["auth_enabled"], true);
+    assert_eq!(complete_json["authenticated"], true);
+
+    // Subsequent status check reports setup_required = false
+    let after_status_text = client
+        .get(format!("http://{addr}/api/setup/status"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let after_status: serde_json::Value = serde_json::from_str(&after_status_text).unwrap();
+    assert_eq!(after_status["setup_required"], false);
+
+    // Re-running setup complete is rejected with 409 Conflict
+    let second_complete = client
+        .post(format!("http://{addr}/api/setup/complete"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(serde_json::json!({ "skip": true }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second_complete.status(), StatusCode::CONFLICT);
+
+    // Unauthenticated request to protected route is rejected
+    let unauth_cfg = client
+        .get(format!("http://{addr}/api/config"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_cfg.status(), StatusCode::UNAUTHORIZED);
+
+    // Cookie issued by complete_setup grants access to protected routes
+    let cfg_res = client
+        .get(format!("http://{addr}/api/config"))
+        .header(reqwest::header::COOKIE, set_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cfg_res.status(), StatusCode::OK);
+    let cfg_json: serde_json::Value =
+        serde_json::from_str(&cfg_res.text().await.unwrap()).unwrap();
+    assert_eq!(cfg_json["web_auth_enabled"], true);
+    assert_eq!(cfg_json["dnssec_enabled"], true);
+    assert_eq!(cfg_json["upstreams"][0], "1.1.1.1:53");
+}
+
+#[tokio::test]
+async fn test_port_precheck_endpoint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
+    let cfg = Config::default();
+    let expected_dns = cfg.listen_dns.to_string();
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, true));
+    let pool = Arc::new(UpstreamPool::new(&cfg.upstreams, 1000).unwrap());
+    let pipeline = Arc::new(DnsPipeline::new(filter, cache, pool, None));
+    let (live_tx, _) = tokio::sync::broadcast::channel(16);
+
+    let app = build_router(AppState {
+        config: Arc::new(ArcSwap::from_pointee(cfg)),
+        pipeline,
+        storage,
+        live_tx,
+        tls_reloader: None,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    // Keep an occupied port open for testing in_use detection
+    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied_addr = occupied.local_addr().unwrap().to_string();
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("http://{addr}/api/setup/check-ports"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(
+            serde_json::json!({
+                "dns_addr": expected_dns,
+                "web_addr": occupied_addr,
+                "web_tls_addr": "not-an-addr",
+                "dot_addr": "127.0.0.1:0"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_str(&res.text().await.unwrap()).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4);
+
+    assert_eq!(results[0]["key"], "dns");
+    assert_eq!(results[0]["available"], true);
+    assert_eq!(results[0]["in_use_by_self"], true);
+    assert_eq!(results[0]["reason"], "self");
+
+    assert_eq!(results[1]["key"], "web");
+    assert_eq!(results[1]["available"], false);
+    assert_eq!(results[1]["reason"], "in_use");
+
+    assert_eq!(results[2]["key"], "web_tls");
+    assert_eq!(results[2]["available"], false);
+    assert_eq!(results[2]["reason"], "invalid_addr");
+
+    assert_eq!(results[3]["key"], "dot");
+    assert_eq!(results[3]["available"], true);
+    assert_eq!(results[3]["in_use_by_self"], false);
+}

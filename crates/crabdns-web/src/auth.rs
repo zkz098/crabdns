@@ -355,7 +355,7 @@ fn login_client_ip(
     crate::proxy::extract_client_ip(connect_info, headers, trusted_proxies)
 }
 
-fn is_https_request(
+pub(crate) fn is_https_request(
     trusted_proxies: &[String],
     connect_info: Option<&Extension<ConnectInfo<SocketAddr>>>,
     headers: &HeaderMap,
@@ -439,11 +439,7 @@ pub async fn login(
             .into_response();
     };
 
-    let secure_attr = if secure_cookie { "; Secure" } else { "" };
-    let cookie = format!(
-        "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{secure_attr}",
-        SESSION_TTL.as_secs()
-    );
+    let cookie = session_cookie_header(&token, secure_cookie);
     let mut resp = Json(LoginResponse {
         token,
         username: cfg.web_username.clone(),
@@ -453,6 +449,14 @@ pub async fn login(
         resp.headers_mut().insert(header::SET_COOKIE, val);
     }
     resp
+}
+
+pub(crate) fn session_cookie_header(token: &str, secure_cookie: bool) -> String {
+    let secure_attr = if secure_cookie { "; Secure" } else { "" };
+    format!(
+        "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{secure_attr}",
+        SESSION_TTL.as_secs()
+    )
 }
 
 pub async fn logout(

@@ -205,6 +205,7 @@ pub fn build_router_with_updater(
             "/api/setup/mobileconfig",
             get(setup_api::download_mobileconfig),
         )
+        .route("/api/setup/check-ports", post(setup_api::check_ports))
         .route(
             "/api/config",
             get(config_api::get_config).put(config_api::update_config),
@@ -245,6 +246,8 @@ pub fn build_router_with_updater(
         .route("/api/health", get(health))
         .route("/metrics", get(metrics::prometheus_metrics))
         .merge(doh_routes)
+        .route("/api/setup/status", get(setup_api::get_setup_status))
+        .route("/api/setup/complete", post(setup_api::complete_setup))
         .route("/api/auth/status", get(auth::auth_status))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))

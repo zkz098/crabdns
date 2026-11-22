@@ -83,6 +83,8 @@ pub struct Config {
     pub web_username: String,
     #[serde(default)]
     pub web_password_hash: String,
+    #[serde(default = "default_true")]
+    pub setup_completed: bool,
     #[serde(default)]
     pub split_dns: Vec<SplitDnsRule>,
     #[serde(default = "default_true")]
@@ -246,6 +248,7 @@ impl Default for Config {
             web_auth_enabled: false,
             web_username: default_web_username(),
             web_password_hash: String::new(),
+            setup_completed: false,
             split_dns: Vec::new(),
             cname_cloaking_blocking: true,
             doh_enabled: true,

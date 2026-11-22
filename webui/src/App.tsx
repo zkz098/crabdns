@@ -8,6 +8,7 @@ import { MobileNav } from "./components/MobileNav";
 import { RewritesView } from "./components/RewritesView";
 import { RulesView } from "./components/RulesView";
 import { SettingsView } from "./components/SettingsView";
+import { SetupWizardView } from "./components/SetupWizardView";
 import type { TabKey } from "./components/types";
 import { t } from "./i18n";
 import type { AuthStatusResponse } from "./types/AuthStatusResponse";
@@ -26,6 +27,8 @@ import type { QueryEvent } from "./types/QueryEvent";
 import type { QuickRuleResponse } from "./types/QuickRuleResponse";
 import type { RulesPayload } from "./types/RulesPayload";
 import type { SafeSearchConfig } from "./types/SafeSearchConfig";
+import type { SetupCompletePayload } from "./types/SetupCompletePayload";
+import type { SetupStatusResponse } from "./types/SetupStatusResponse";
 import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { StatsResponse } from "./types/StatsResponse";
 import type { TestRuleResponse } from "./types/TestRuleResponse";
@@ -143,6 +146,8 @@ export default function App() {
   const [updateMessage, setUpdateMessage] = createSignal("");
   const [updateIsError, setUpdateIsError] = createSignal(false);
 
+  const [setupChecked, setSetupChecked] = createSignal(false);
+  const [setupStatus, setSetupStatus] = createSignal<SetupStatusResponse | null>(null);
   const [authChecked, setAuthChecked] = createSignal(false);
   const [authEnabled, setAuthEnabled] = createSignal(false);
   const [authenticated, setAuthenticated] = createSignal(true);
@@ -150,6 +155,44 @@ export default function App() {
   const [authPassword, setAuthPassword] = createSignal("");
   const [authMessage, setAuthMessage] = createSignal("");
   const [authIsError, setAuthIsError] = createSignal(false);
+
+  async function fetchSetupStatus(): Promise<boolean> {
+    try {
+      const res = await fetch("/api/setup/status");
+      if (res.ok) {
+        const data: SetupStatusResponse = await res.json();
+        setSetupStatus(data);
+        setSetupChecked(true);
+        return data.setup_required;
+      }
+    } catch {
+      // ignore
+    }
+    setSetupChecked(true);
+    return false;
+  }
+
+  async function handleSetupComplete(payload: SetupCompletePayload): Promise<string | null> {
+    try {
+      const res = await fetch("/api/setup/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        return errBody?.error ?? t("rulesFailed");
+      }
+      setSetupStatus((prev) => (prev ? { ...prev, setup_required: false } : null));
+      const ok = await fetchAuthStatus();
+      if (ok) {
+        loadDashboardData();
+      }
+      return null;
+    } catch {
+      return t("rulesNetworkError");
+    }
+  }
 
   async function fetchStats() {
     try {
@@ -1128,21 +1171,28 @@ export default function App() {
     }
   }
 
+  function loadDashboardData() {
+    fetchStats();
+    fetchLogs();
+    fetchRules();
+    fetchSubscriptions();
+    fetchRewrites();
+    fetchConfig();
+    fetchUpstreamHealth();
+    fetchBlockingStatus();
+    fetchClients();
+    fetchTlsStatus();
+    fetchUpdateStatus();
+  }
+
   onMount(() => {
-    void fetchAuthStatus().then((ok) => {
-      if (ok) {
-        fetchStats();
-        fetchLogs();
-        fetchRules();
-        fetchSubscriptions();
-        fetchRewrites();
-        fetchConfig();
-        fetchUpstreamHealth();
-        fetchBlockingStatus();
-        fetchClients();
-        fetchTlsStatus();
-        fetchUpdateStatus();
-      }
+    void fetchSetupStatus().then((needsSetup) => {
+      if (needsSetup) return;
+      void fetchAuthStatus().then((ok) => {
+        if (ok) {
+          loadDashboardData();
+        }
+      });
     });
 
     const timer = setInterval(() => {
@@ -1191,244 +1241,249 @@ export default function App() {
 
   return (
     <Show
-      when={!authChecked() || !authEnabled() || authenticated()}
-      fallback={<LoginView onLogin={handleLogin} />}
+      when={!setupChecked() || !setupStatus()?.setup_required}
+      fallback={<SetupWizardView status={setupStatus()!} onComplete={handleSetupComplete} />}
     >
-      <div class="min-h-screen flex flex-col bg-[#fafafa] dark:bg-[#000000] text-[#171717] dark:text-[#ededed] font-sans vercel-grid-bg">
-        <Header
-          tab={tab()}
-          onSelectTab={handleSelectTab}
-          wsConnected={wsConnected()}
-          blockingStatus={blockingStatus()}
-          onPauseBlocking={pauseBlocking}
-          onResumeBlocking={resumeBlocking}
-          authEnabled={authEnabled()}
-          onLogout={handleLogout}
-        />
+      <Show
+        when={!authChecked() || !authEnabled() || authenticated()}
+        fallback={<LoginView onLogin={handleLogin} />}
+      >
+        <div class="min-h-screen flex flex-col bg-[#fafafa] dark:bg-[#000000] text-[#171717] dark:text-[#ededed] font-sans vercel-grid-bg">
+          <Header
+            tab={tab()}
+            onSelectTab={handleSelectTab}
+            wsConnected={wsConnected()}
+            blockingStatus={blockingStatus()}
+            onPauseBlocking={pauseBlocking}
+            onResumeBlocking={resumeBlocking}
+            authEnabled={authEnabled()}
+            onLogout={handleLogout}
+          />
 
-        <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 sm:pt-7 pb-24 md:pb-10">
-          <Show when={tab() === "dashboard"}>
-            <DashboardView
-              stats={stats()}
-              clientNameMap={clientNameMap()}
-              onFlushCache={flushCache}
-              cacheFlushedMsg={cacheFlushedMsg()}
-              onResetStats={resetStats}
-              statsResetMsg={statsResetMsg()}
-            />
-          </Show>
+          <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 sm:pt-7 pb-24 md:pb-10">
+            <Show when={tab() === "dashboard"}>
+              <DashboardView
+                stats={stats()}
+                clientNameMap={clientNameMap()}
+                onFlushCache={flushCache}
+                cacheFlushedMsg={cacheFlushedMsg()}
+                onResetStats={resetStats}
+                statsResetMsg={statsResetMsg()}
+              />
+            </Show>
 
-          <Show when={tab() === "clients"}>
-            <ClientsView
-              overview={clientsOverview()}
-              message={clientsMessage()}
-              isError={clientsIsError()}
-              saving={clientsSaving()}
-              onCreateGroup={createClientGroup}
-              onUpdateGroup={updateClientGroup}
-              onDeleteGroup={deleteClientGroup}
-              onCreateClient={createClientProfile}
-              onUpdateClient={updateClientProfile}
-              onDeleteClient={deleteClientProfile}
-              onRefresh={() => void fetchClients()}
-            />
-          </Show>
+            <Show when={tab() === "clients"}>
+              <ClientsView
+                overview={clientsOverview()}
+                message={clientsMessage()}
+                isError={clientsIsError()}
+                saving={clientsSaving()}
+                onCreateGroup={createClientGroup}
+                onUpdateGroup={updateClientGroup}
+                onDeleteGroup={deleteClientGroup}
+                onCreateClient={createClientProfile}
+                onUpdateClient={updateClientProfile}
+                onDeleteClient={deleteClientProfile}
+                onRefresh={() => void fetchClients()}
+              />
+            </Show>
 
-          <Show when={tab() === "logs"}>
-            <LogsView
-              logs={logs()}
-              search={search()}
-              onSearchChange={setSearch}
-              outcomeFilter={outcomeFilter()}
-              onOutcomeChange={setOutcomeFilter}
-              protocolFilter={protocolFilter()}
-              onProtocolChange={setProtocolFilter}
-              qtypeFilter={qtypeFilter()}
-              onQtypeChange={setQtypeFilter}
-              clientFilter={clientFilter()}
-              onClientChange={setClientFilter}
-              onRefresh={fetchLogs}
-              onClearLogs={clearLogs}
-              onExportLogs={exportLogsJson}
-              onQuickRule={quickRule}
-              quickRuleMsg={quickRuleMsg()}
-            />
-          </Show>
+            <Show when={tab() === "logs"}>
+              <LogsView
+                logs={logs()}
+                search={search()}
+                onSearchChange={setSearch}
+                outcomeFilter={outcomeFilter()}
+                onOutcomeChange={setOutcomeFilter}
+                protocolFilter={protocolFilter()}
+                onProtocolChange={setProtocolFilter}
+                qtypeFilter={qtypeFilter()}
+                onQtypeChange={setQtypeFilter}
+                clientFilter={clientFilter()}
+                onClientChange={setClientFilter}
+                onRefresh={fetchLogs}
+                onClearLogs={clearLogs}
+                onExportLogs={exportLogsJson}
+                onQuickRule={quickRule}
+                quickRuleMsg={quickRuleMsg()}
+              />
+            </Show>
 
-          <Show when={tab() === "rules"}>
-            <RulesView
-              rulesText={rulesText()}
-              rulesEnabled={rulesEnabled()}
-              onRulesChange={setRulesText}
-              onRulesEnabledChange={(next) => {
-                setRulesEnabled(next);
-                void saveRules();
-              }}
-              saveMessage={saveMessage()}
-              onSave={saveRules}
-              subscriptions={subscriptions()}
-              subMessage={subMessage()}
-              subIsError={subIsError()}
-              refreshingIds={refreshingIds()}
-              refreshingAll={refreshingAll()}
-              addingSub={addingSub()}
-              onAddSubscription={addSubscription}
-              onToggleSubscription={toggleSubscription}
-              onRefreshSubscription={refreshSubscription}
-              onRefreshAllSubscriptions={refreshAllSubscriptions}
-              onDeleteSubscription={deleteSubscription}
-              onTestRule={testRule}
-            />
-          </Show>
+            <Show when={tab() === "rules"}>
+              <RulesView
+                rulesText={rulesText()}
+                rulesEnabled={rulesEnabled()}
+                onRulesChange={setRulesText}
+                onRulesEnabledChange={(next) => {
+                  setRulesEnabled(next);
+                  void saveRules();
+                }}
+                saveMessage={saveMessage()}
+                onSave={saveRules}
+                subscriptions={subscriptions()}
+                subMessage={subMessage()}
+                subIsError={subIsError()}
+                refreshingIds={refreshingIds()}
+                refreshingAll={refreshingAll()}
+                addingSub={addingSub()}
+                onAddSubscription={addSubscription}
+                onToggleSubscription={toggleSubscription}
+                onRefreshSubscription={refreshSubscription}
+                onRefreshAllSubscriptions={refreshAllSubscriptions}
+                onDeleteSubscription={deleteSubscription}
+                onTestRule={testRule}
+              />
+            </Show>
 
-          <Show when={tab() === "rewrites"}>
-            <RewritesView
-              rewrites={rewrites()}
-              message={rewritesMessage()}
-              isError={rewritesIsError()}
-              saving={rewritesSaving()}
-              onCreate={createRewrite}
-              onUpdate={updateRewrite}
-              onDelete={deleteRewrite}
-              onRefresh={() => void fetchRewrites()}
-            />
-          </Show>
+            <Show when={tab() === "rewrites"}>
+              <RewritesView
+                rewrites={rewrites()}
+                message={rewritesMessage()}
+                isError={rewritesIsError()}
+                saving={rewritesSaving()}
+                onCreate={createRewrite}
+                onUpdate={updateRewrite}
+                onDelete={deleteRewrite}
+                onRefresh={() => void fetchRewrites()}
+              />
+            </Show>
 
-          <Show when={tab() === "settings"}>
-            <SettingsView
-              configData={configData()}
-              upstreamsText={upstreamsText()}
-              onUpstreamsChange={setUpstreamsText}
-              bootstrapDnsText={bootstrapDnsText()}
-              onBootstrapDnsChange={setBootstrapDnsText}
-              upstreamStrategy={upstreamStrategy()}
-              onUpstreamStrategyChange={setUpstreamStrategy}
-              upstreamHealth={upstreamHealth()}
-              probingUpstreams={probingUpstreams()}
-              onProbeUpstreams={probeUpstreams}
-              upstreamCapabilities={upstreamCapabilities()}
-              probingCapabilities={probingCapabilities()}
-              probeCapabilitiesError={probeCapabilitiesError()}
-              onProbeCapabilities={probeUpstreamCapabilities}
-              onReplaceUpstream={replaceUpstreamLine}
-              blockMode={blockMode()}
-              onBlockModeChange={setBlockMode}
-              allowCidrsText={allowCidrsText()}
-              onAllowCidrsChange={setAllowCidrsText}
-              denyCidrsText={denyCidrsText()}
-              onDenyCidrsChange={setDenyCidrsText}
-              rateLimitQps={rateLimitQps()}
-              onRateLimitChange={setRateLimitQps}
-              cacheSize={cacheSize()}
-              onCacheSizeChange={setCacheSize}
-              upstreamTimeoutMs={upstreamTimeoutMs()}
-              onUpstreamTimeoutChange={setUpstreamTimeoutMs}
-              logRetentionHours={logRetentionHours()}
-              onLogRetentionChange={setLogRetentionHours}
-              optimisticCache={optimisticCache()}
-              onOptimisticCacheChange={setOptimisticCache}
-              cacheMinTtlSecs={cacheMinTtlSecs()}
-              onCacheMinTtlChange={setCacheMinTtlSecs}
-              cacheMaxTtlSecs={cacheMaxTtlSecs()}
-              onCacheMaxTtlChange={setCacheMaxTtlSecs}
-              cachePrefetchEnabled={cachePrefetchEnabled()}
-              onCachePrefetchChange={setCachePrefetchEnabled}
-              cachePersistEnabled={cachePersistEnabled()}
-              onCachePersistChange={setCachePersistEnabled}
-              splitDnsText={splitDnsText()}
-              onSplitDnsChange={setSplitDnsText}
-              cnameCloakingBlocking={cnameCloakingBlocking()}
-              onCnameCloakingChange={setCnameCloakingBlocking}
-              dohEnabled={dohEnabled()}
-              onDohEnabledChange={setDohEnabled}
-              allowPrivateSubscriptions={allowPrivateSubscriptions()}
-              onAllowPrivateSubscriptionsChange={setAllowPrivateSubscriptions}
-              ecsEnabled={ecsEnabled()}
-              onEcsEnabledChange={setEcsEnabled}
-              ecsCustomIp={ecsCustomIp()}
-              onEcsCustomIpChange={setEcsCustomIp}
-              ecsIpv4Prefix={ecsIpv4Prefix()}
-              onEcsIpv4PrefixChange={setEcsIpv4Prefix}
-              ecsIpv6Prefix={ecsIpv6Prefix()}
-              onEcsIpv6PrefixChange={setEcsIpv6Prefix}
-              dnssecEnabled={dnssecEnabled()}
-              onDnssecEnabledChange={setDnssecEnabled}
-              hostsEnabled={hostsEnabled()}
-              onHostsEnabledChange={setHostsEnabled}
-              hostsPath={hostsPath()}
-              onHostsPathChange={setHostsPath}
-              dhcpLeasesEnabled={dhcpLeasesEnabled()}
-              onDhcpLeasesEnabledChange={setDhcpLeasesEnabled}
-              dhcpLeasesPath={dhcpLeasesPath()}
-              onDhcpLeasesPathChange={setDhcpLeasesPath}
-              mdnsEnabled={mdnsEnabled()}
-              onMdnsEnabledChange={setMdnsEnabled}
-              sniClientIdHostnamesText={sniClientIdHostnamesText()}
-              onSniClientIdHostnamesChange={setSniClientIdHostnamesText}
-              privatePtrEnabled={privatePtrEnabled()}
-              onPrivatePtrEnabledChange={setPrivatePtrEnabled}
-              privatePtrUpstreamsText={privatePtrUpstreamsText()}
-              onPrivatePtrUpstreamsChange={setPrivatePtrUpstreamsText}
-              ddrEnabled={ddrEnabled()}
-              onDdrEnabledChange={setDdrEnabled}
-              ddrHostname={ddrHostname()}
-              onDdrHostnameChange={setDdrHostname}
-              dnsRebindingProtection={dnsRebindingProtection()}
-              onDnsRebindingProtectionChange={setDnsRebindingProtection}
-              blockAnyQueries={blockAnyQueries()}
-              onBlockAnyQueriesChange={setBlockAnyQueries}
-              trustedProxiesText={trustedProxiesText()}
-              onTrustedProxiesChange={setTrustedProxiesText}
-              rdnsEnabled={rdnsEnabled()}
-              onRdnsEnabledChange={setRdnsEnabled}
-              safesearch={safesearch()}
-              onSafesearchChange={setSafesearch}
-              dns64Enabled={dns64Enabled()}
-              onDns64EnabledChange={setDns64Enabled}
-              dns64PrefixesText={dns64PrefixesText()}
-              onDns64PrefixesChange={setDns64PrefixesText}
-              svcbStripEch={svcbStripEch()}
-              onSvcbStripEchChange={setSvcbStripEch}
-              svcbStripHints={svcbStripHints()}
-              onSvcbStripHintsChange={setSvcbStripHints}
-              tlsCertPath={tlsCertPath()}
-              onTlsCertPathChange={setTlsCertPath}
-              tlsKeyPath={tlsKeyPath()}
-              onTlsKeyPathChange={setTlsKeyPath}
-              tlsStatus={tlsStatus()}
-              reloadingTls={reloadingTls()}
-              tlsMessage={tlsMessage()}
-              tlsIsError={tlsIsError()}
-              onReloadTls={() => void reloadTls()}
-              configMessage={configMessage()}
-              configIsError={configIsError()}
-              onSave={saveConfig}
-              authEnabled={authEnabled()}
-              onAuthEnabledChange={setAuthEnabled}
-              authUsername={authUsername()}
-              onAuthUsernameChange={setAuthUsername}
-              authPassword={authPassword()}
-              onAuthPasswordChange={setAuthPassword}
-              authMessage={authMessage()}
-              authIsError={authIsError()}
-              onSaveAuth={saveAuth}
-              onExportBackup={exportBackup}
-              onImportBackup={importBackup}
-              backupMessage={backupMessage()}
-              backupIsError={backupIsError()}
-              backupBusy={backupBusy()}
-              updateStatus={updateStatus()}
-              updateBusy={updateBusy()}
-              updateMessage={updateMessage()}
-              updateIsError={updateIsError()}
-              onCheckUpdate={checkUpdate}
-              onApplyUpdate={applyUpdate}
-            />
-          </Show>
-        </main>
+            <Show when={tab() === "settings"}>
+              <SettingsView
+                configData={configData()}
+                upstreamsText={upstreamsText()}
+                onUpstreamsChange={setUpstreamsText}
+                bootstrapDnsText={bootstrapDnsText()}
+                onBootstrapDnsChange={setBootstrapDnsText}
+                upstreamStrategy={upstreamStrategy()}
+                onUpstreamStrategyChange={setUpstreamStrategy}
+                upstreamHealth={upstreamHealth()}
+                probingUpstreams={probingUpstreams()}
+                onProbeUpstreams={probeUpstreams}
+                upstreamCapabilities={upstreamCapabilities()}
+                probingCapabilities={probingCapabilities()}
+                probeCapabilitiesError={probeCapabilitiesError()}
+                onProbeCapabilities={probeUpstreamCapabilities}
+                onReplaceUpstream={replaceUpstreamLine}
+                blockMode={blockMode()}
+                onBlockModeChange={setBlockMode}
+                allowCidrsText={allowCidrsText()}
+                onAllowCidrsChange={setAllowCidrsText}
+                denyCidrsText={denyCidrsText()}
+                onDenyCidrsChange={setDenyCidrsText}
+                rateLimitQps={rateLimitQps()}
+                onRateLimitChange={setRateLimitQps}
+                cacheSize={cacheSize()}
+                onCacheSizeChange={setCacheSize}
+                upstreamTimeoutMs={upstreamTimeoutMs()}
+                onUpstreamTimeoutChange={setUpstreamTimeoutMs}
+                logRetentionHours={logRetentionHours()}
+                onLogRetentionChange={setLogRetentionHours}
+                optimisticCache={optimisticCache()}
+                onOptimisticCacheChange={setOptimisticCache}
+                cacheMinTtlSecs={cacheMinTtlSecs()}
+                onCacheMinTtlChange={setCacheMinTtlSecs}
+                cacheMaxTtlSecs={cacheMaxTtlSecs()}
+                onCacheMaxTtlChange={setCacheMaxTtlSecs}
+                cachePrefetchEnabled={cachePrefetchEnabled()}
+                onCachePrefetchChange={setCachePrefetchEnabled}
+                cachePersistEnabled={cachePersistEnabled()}
+                onCachePersistChange={setCachePersistEnabled}
+                splitDnsText={splitDnsText()}
+                onSplitDnsChange={setSplitDnsText}
+                cnameCloakingBlocking={cnameCloakingBlocking()}
+                onCnameCloakingChange={setCnameCloakingBlocking}
+                dohEnabled={dohEnabled()}
+                onDohEnabledChange={setDohEnabled}
+                allowPrivateSubscriptions={allowPrivateSubscriptions()}
+                onAllowPrivateSubscriptionsChange={setAllowPrivateSubscriptions}
+                ecsEnabled={ecsEnabled()}
+                onEcsEnabledChange={setEcsEnabled}
+                ecsCustomIp={ecsCustomIp()}
+                onEcsCustomIpChange={setEcsCustomIp}
+                ecsIpv4Prefix={ecsIpv4Prefix()}
+                onEcsIpv4PrefixChange={setEcsIpv4Prefix}
+                ecsIpv6Prefix={ecsIpv6Prefix()}
+                onEcsIpv6PrefixChange={setEcsIpv6Prefix}
+                dnssecEnabled={dnssecEnabled()}
+                onDnssecEnabledChange={setDnssecEnabled}
+                hostsEnabled={hostsEnabled()}
+                onHostsEnabledChange={setHostsEnabled}
+                hostsPath={hostsPath()}
+                onHostsPathChange={setHostsPath}
+                dhcpLeasesEnabled={dhcpLeasesEnabled()}
+                onDhcpLeasesEnabledChange={setDhcpLeasesEnabled}
+                dhcpLeasesPath={dhcpLeasesPath()}
+                onDhcpLeasesPathChange={setDhcpLeasesPath}
+                mdnsEnabled={mdnsEnabled()}
+                onMdnsEnabledChange={setMdnsEnabled}
+                sniClientIdHostnamesText={sniClientIdHostnamesText()}
+                onSniClientIdHostnamesChange={setSniClientIdHostnamesText}
+                privatePtrEnabled={privatePtrEnabled()}
+                onPrivatePtrEnabledChange={setPrivatePtrEnabled}
+                privatePtrUpstreamsText={privatePtrUpstreamsText()}
+                onPrivatePtrUpstreamsChange={setPrivatePtrUpstreamsText}
+                ddrEnabled={ddrEnabled()}
+                onDdrEnabledChange={setDdrEnabled}
+                ddrHostname={ddrHostname()}
+                onDdrHostnameChange={setDdrHostname}
+                dnsRebindingProtection={dnsRebindingProtection()}
+                onDnsRebindingProtectionChange={setDnsRebindingProtection}
+                blockAnyQueries={blockAnyQueries()}
+                onBlockAnyQueriesChange={setBlockAnyQueries}
+                trustedProxiesText={trustedProxiesText()}
+                onTrustedProxiesChange={setTrustedProxiesText}
+                rdnsEnabled={rdnsEnabled()}
+                onRdnsEnabledChange={setRdnsEnabled}
+                safesearch={safesearch()}
+                onSafesearchChange={setSafesearch}
+                dns64Enabled={dns64Enabled()}
+                onDns64EnabledChange={setDns64Enabled}
+                dns64PrefixesText={dns64PrefixesText()}
+                onDns64PrefixesChange={setDns64PrefixesText}
+                svcbStripEch={svcbStripEch()}
+                onSvcbStripEchChange={setSvcbStripEch}
+                svcbStripHints={svcbStripHints()}
+                onSvcbStripHintsChange={setSvcbStripHints}
+                tlsCertPath={tlsCertPath()}
+                onTlsCertPathChange={setTlsCertPath}
+                tlsKeyPath={tlsKeyPath()}
+                onTlsKeyPathChange={setTlsKeyPath}
+                tlsStatus={tlsStatus()}
+                reloadingTls={reloadingTls()}
+                tlsMessage={tlsMessage()}
+                tlsIsError={tlsIsError()}
+                onReloadTls={() => void reloadTls()}
+                configMessage={configMessage()}
+                configIsError={configIsError()}
+                onSave={saveConfig}
+                authEnabled={authEnabled()}
+                onAuthEnabledChange={setAuthEnabled}
+                authUsername={authUsername()}
+                onAuthUsernameChange={setAuthUsername}
+                authPassword={authPassword()}
+                onAuthPasswordChange={setAuthPassword}
+                authMessage={authMessage()}
+                authIsError={authIsError()}
+                onSaveAuth={saveAuth}
+                onExportBackup={exportBackup}
+                onImportBackup={importBackup}
+                backupMessage={backupMessage()}
+                backupIsError={backupIsError()}
+                backupBusy={backupBusy()}
+                updateStatus={updateStatus()}
+                updateBusy={updateBusy()}
+                updateMessage={updateMessage()}
+                updateIsError={updateIsError()}
+                onCheckUpdate={checkUpdate}
+                onApplyUpdate={applyUpdate}
+              />
+            </Show>
+          </main>
 
-        <MobileNav tab={tab()} onSelectTab={handleSelectTab} />
-      </div>
+          <MobileNav tab={tab()} onSelectTab={handleSelectTab} />
+        </div>
+      </Show>
     </Show>
   );
 }

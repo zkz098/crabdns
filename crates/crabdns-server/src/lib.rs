@@ -157,6 +157,7 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.web_auth_enabled = saved_cfg.web_auth_enabled;
     config.web_username = saved_cfg.web_username;
     config.web_password_hash = saved_cfg.web_password_hash;
+    config.setup_completed = saved_cfg.setup_completed;
     config.split_dns = saved_cfg.split_dns;
     config.cname_cloaking_blocking = saved_cfg.cname_cloaking_blocking;
     config.doh_enabled = saved_cfg.doh_enabled;
