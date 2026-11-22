@@ -57,7 +57,7 @@ interface PresetCatalogItem {
 const PRESET_CATALOG: PresetCatalogItem[] = [
   {
     name: "AdGuard DNS Filter",
-    url: "https://adguardteam.github.io/AdGuardDNSFilter/Filters/filter.txt",
+    url: "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt",
     category: "general",
     syntax: "AdGuard",
     descEn:

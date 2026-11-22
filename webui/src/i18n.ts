@@ -114,8 +114,19 @@ const en = {
   settingsSave: "Save & Apply",
   settingsSaving: "Applying...",
   settingsSaved: "Config applied & saved",
-  settingsUpstreamsLabel: "Upstream DNS Servers (one per line)",
+  settingsUpstreamsLabel: "Upstream DNS Servers",
   settingsUpstreamsHint: "Supports udp://, tcp://, tls://, https://",
+  settingsUpstreamAddBtn: "Add",
+  settingsUpstreamAddPlaceholder: "e.g. https://1.1.1.1/dns-query or udp://8.8.8.8:53",
+  settingsUpstreamConfirmAdd: "Add",
+  settingsUpstreamCancelAdd: "Cancel",
+  settingsUpstreamEmpty: 'No upstream DNS servers configured. Click "Add" to add one.',
+  settingsUpstreamEditTitle: "Edit",
+  settingsUpstreamDeleteTitle: "Remove",
+  settingsUpstreamMoveUpTitle: "Move up",
+  settingsUpstreamMoveDownTitle: "Move down",
+  settingsUpstreamRequests: "req",
+  settingsUpstreamFailures: "err",
   settingsProbeCapabilities: "Detect Features",
   settingsProbingCapabilities: "Detecting...",
   settingsCapUnreachable: "Unreachable",
@@ -383,6 +394,98 @@ const en = {
   updateUpToDateMsg: "CrabDNS is already on the latest version",
   updateAvailableMsg: "New signed update available",
   updateAppliedMsg: "Binary replaced in place — restart service to take effect",
+
+  settingsAdvancedTitle: "Advanced Settings",
+  settingsAdvancedSummary:
+    "Bootstrap DNS, Cache TTL & Persistence, Split DNS, ACL & Rate Limiting, ECS / DNSSEC, LAN Integration, SafeSearch / DNS64, and Native TLS",
+  settingsAdvancedExpand: "Show",
+  settingsAdvancedCollapse: "Hide",
+  settingsAdvancedCacheTitle: "Bootstrap DNS & Cache Tuning",
+
+  tooltipUpstreams:
+    "Upstream resolvers queried when a domain is not cached or blocked. Supports udp://, tcp://, tls:// (DoT), and https:// (DoH).",
+  tooltipStrategy:
+    "Failover tries upstreams in order; Parallel queries all upstreams and returns the fastest valid answer; Least Latency routes to the fastest upstream using EWMA.",
+  tooltipBlockMode:
+    "DNS response returned for blocked domains: Zero IP (0.0.0.0 / ::), NXDOMAIN (non-existent domain), or NODATA (valid domain with empty records).",
+  tooltipCacheSize:
+    "Maximum number of DNS records kept in the in-memory LRU cache. Larger values improve hit rate at a small memory cost.",
+  tooltipTimeout:
+    "Maximum time in milliseconds to wait for a single upstream DNS response before timing out or failing over.",
+  tooltipRetention:
+    "How many hours query logs are retained in local storage before automatic background cleanup.",
+  tooltipBootstrapDns:
+    "IP-only DNS servers used solely to resolve hostnames of DoT/DoH upstream endpoints (e.g. dns.google), avoiding circular dependencies.",
+  tooltipOptimisticCache:
+    "When a cached record expires, immediately return the stale answer to the client while refreshing it asynchronously in the background.",
+  tooltipCacheMinTtl:
+    "Minimum TTL (seconds) enforced on cached responses. Overrides shorter upstream TTLs to reduce repeated queries.",
+  tooltipCacheMaxTtl:
+    "Maximum TTL (seconds) allowed for cached responses. Caps overly long upstream TTLs so record changes propagate faster.",
+  tooltipCachePrefetch:
+    "Automatically refreshes frequently queried (hot) domains in the background shortly before their cache TTL expires.",
+  tooltipCachePersist:
+    "Saves cached DNS entries to disk periodically and on shutdown, then restores them on startup for an instant warm cache.",
+  tooltipSplitDns:
+    "Forward queries matching specific domain suffixes to dedicated upstream servers instead of the global upstreams (e.g. internal LAN or VPN domains).",
+  tooltipCnameCloaking:
+    "Inspects CNAME target chains in upstream responses and blocks queries if any intermediate or final CNAME target matches a blocklist rule.",
+  tooltipDohEnabled:
+    "Exposes an inbound DNS-over-HTTPS endpoint at /dns-query on the Web/HTTPS listener for browser and OS clients.",
+  tooltipAllowPrivateSubs:
+    "Allows fetching filter list subscriptions from private/LAN or localhost IP addresses. Disabled by default to prevent SSRF.",
+  tooltipAllowCidrs:
+    "Client IP/CIDR allowlist for DNS queries. Leave empty to allow all clients; if set, only matching clients are served.",
+  tooltipDenyCidrs:
+    "Client IP/CIDR denylist for DNS queries. Evaluated before the allowlist and blocks matching clients immediately.",
+  tooltipRateLimit:
+    "Maximum DNS queries per second (QPS) allowed per client IP to mitigate floods or misbehaving devices. Set to 0 to disable.",
+  tooltipEcs:
+    "Includes a truncated client subnet (EDNS0 Client Subnet) in upstream queries for better CDN geo-routing. Note: shares approximate client subnet with upstreams.",
+  tooltipEcsCustomIp:
+    "Optional fixed IP or CIDR sent as the ECS subnet instead of the actual client IP—useful for privacy or when behind NAT.",
+  tooltipEcsV4Prefix:
+    "Number of IPv4 bits exposed to upstreams in ECS (default 24). Smaller values hide more of the client address; larger values give finer CDN routing.",
+  tooltipEcsV6Prefix:
+    "Number of IPv6 bits exposed to upstreams in ECS (default 56). Controls the trade-off between privacy and geo-accuracy.",
+  tooltipDnssec:
+    "Cryptographically validates RRSIG/DS chains to detect DNS spoofing. Requires upstream resolvers that support DNSSEC records.",
+  tooltipDnsRebinding:
+    "Blocks responses from public upstreams that resolve to private, loopback, or link-local IP addresses to prevent DNS rebinding attacks.",
+  tooltipBlockAny:
+    "Responds to DNS ANY queries with a minimal RFC 8482 HINFO record instead of forwarding, mitigating DNS amplification.",
+  tooltipTrustedProxies:
+    "Reverse proxy IP/CIDR ranges trusted to supply the real client IP via X-Forwarded-For or Forwarded headers for DoH requests.",
+  tooltipHosts:
+    "Loads static hostname-to-IP mappings from the local hosts file so LAN devices resolve without upstream queries.",
+  tooltipDhcpLeases:
+    "Parses a DHCP server leases file (dnsmasq, ISC DHCP, or Kea) to automatically map LAN client IPs to device hostnames.",
+  tooltipMdns:
+    "Listens for multicast DNS (.local) announcements on the LAN to discover device hostnames automatically.",
+  tooltipPrivatePtr:
+    "Handles reverse IP lookups (in-addr.arpa / ip6.arpa) for private LAN addresses locally or forwards them to private PTR upstreams.",
+  tooltipPrivatePtrUpstreams:
+    "Optional upstream DNS servers (e.g. your LAN router) for private reverse PTR lookups. If empty, private PTR queries return NXDOMAIN locally.",
+  tooltipDdr:
+    "Enables Discovery of Designated Resolvers (_dns.resolver.arpa SVCB, RFC 9462) so compatible clients auto-upgrade to encrypted DoT/DoH/DoQ.",
+  tooltipDdrHostname:
+    "Publicly reachable TLS hostname advertised in DDR SVCB responses (must match your TLS certificate).",
+  tooltipRdns:
+    "Performs asynchronous reverse DNS lookups for LAN client IPs to display readable hostnames in query logs and the Clients view.",
+  tooltipSniHostnames:
+    "Base hostnames used to extract Client IDs from DoT/DoQ TLS SNI subdomains (e.g. <client-id>.dot.example.com).",
+  tooltipSafeSearch:
+    "Rewrites DNS answers for selected search engines and YouTube to their official SafeSearch VIPs/CNAMEs to enforce safe content filtering.",
+  tooltipDns64:
+    "Synthesizes IPv6 AAAA records from IPv4 A records using a NAT64 prefix when a domain has no native IPv6 address—for IPv6-only networks.",
+  tooltipDns64Prefixes:
+    "NAT64 IPv6 prefixes (e.g. well-known 64:ff9b::/96) used to embed synthesized IPv4 addresses into AAAA responses.",
+  tooltipSvcbStripEch:
+    "Removes Encrypted Client Hello (ech) parameters from HTTPS/SVCB records so network policies or SNI-based tools can inspect the TLS handshake.",
+  tooltipSvcbStripHints:
+    "Removes ipv4hint and ipv6hint parameters from HTTPS/SVCB records so clients must resolve A/AAAA records through CrabDNS filtering.",
+  tooltipTls:
+    "Configures PEM certificate and private key paths for native DoT, DoQ, and HTTPS listeners, supporting zero-downtime certificate hot reload.",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -484,8 +587,19 @@ const zhCN: Record<TranslationKey, string> = {
   settingsSave: "保存并应用",
   settingsSaving: "应用中...",
   settingsSaved: "配置已应用并保存",
-  settingsUpstreamsLabel: "上游 DNS 服务器（每行一个）",
+  settingsUpstreamsLabel: "上游 DNS 服务器",
   settingsUpstreamsHint: "支持 udp://、tcp://、tls://、https://",
+  settingsUpstreamAddBtn: "添加",
+  settingsUpstreamAddPlaceholder: "例如 https://1.1.1.1/dns-query 或 udp://8.8.8.8:53",
+  settingsUpstreamConfirmAdd: "确定",
+  settingsUpstreamCancelAdd: "取消",
+  settingsUpstreamEmpty: "暂未配置上游 DNS 服务器，点击「添加」开始配置。",
+  settingsUpstreamEditTitle: "编辑",
+  settingsUpstreamDeleteTitle: "移除",
+  settingsUpstreamMoveUpTitle: "上移",
+  settingsUpstreamMoveDownTitle: "下移",
+  settingsUpstreamRequests: "次请求",
+  settingsUpstreamFailures: "次失败",
   settingsProbeCapabilities: "检测特性",
   settingsProbingCapabilities: "检测中...",
   settingsCapUnreachable: "不可达",
@@ -750,6 +864,92 @@ const zhCN: Record<TranslationKey, string> = {
   updateUpToDateMsg: "当前已是最新版本",
   updateAvailableMsg: "发现签名新版本",
   updateAppliedMsg: "二进制已原地替换，重启服务后生效",
+
+  settingsAdvancedTitle: "高级设置",
+  settingsAdvancedSummary:
+    "Bootstrap DNS、缓存 TTL 与持久化、分流 DNS、客户端 ACL 与限速、ECS / DNSSEC、局域网集成、安全搜索 / DNS64 与原生 TLS",
+  settingsAdvancedExpand: "展开",
+  settingsAdvancedCollapse: "收起",
+  settingsAdvancedCacheTitle: "Bootstrap DNS 与缓存调优",
+
+  tooltipUpstreams:
+    "当域名未命中缓存或规则时用于转发解析的上游服务器。支持 udp://、tcp://、tls://（DoT）和 https://（DoH）。",
+  tooltipStrategy:
+    "故障转移按顺序尝试上游；并发竞速同时查询所有上游并返回最快有效结果；最低延迟基于 EWMA 延迟自适应路由。",
+  tooltipBlockMode:
+    "域名被拦截时返回的 DNS 响应：零地址（0.0.0.0 / ::）、NXDOMAIN（域名不存在）或 NODATA（域名存在但无记录）。",
+  tooltipCacheSize:
+    "内存中 LRU 缓存保存的最大 DNS 记录条数。适当增大可提高缓存命中率，仅占用少量内存。",
+  tooltipTimeout: "单次向上游 DNS 发起请求的最大等待时间（毫秒），超时后将触发故障转移或返回错误。",
+  tooltipRetention: "查询日志在本地存储中保留的小时数，超过后将由后台任务自动清理。",
+  tooltipBootstrapDns:
+    "仅支持 IP 的 DNS 服务器，专门用于解析 DoT/DoH 上游自身的域名（如 dns.google），避免循环解析依赖。",
+  tooltipOptimisticCache:
+    "当缓存记录过期时，先立即向客户端返回旧记录以降低延迟，同时在后台异步刷新缓存。",
+  tooltipCacheMinTtl: "强制生效的最小缓存 TTL（秒），可覆盖上游过短的 TTL 以减少重复查询。",
+  tooltipCacheMaxTtl:
+    "允许缓存的最大 TTL（秒），用于限制上游过长的 TTL，使域名记录变更能更快生效。",
+  tooltipCachePrefetch:
+    "在高频查询（热点）域名的缓存即将过期前，自动在后台提前刷新记录，保持命中率。",
+  tooltipCachePersist:
+    "定期及在退出时将内存 DNS 缓存持久化到磁盘，并在下次启动时自动恢复，实现热启动。",
+  tooltipSplitDns:
+    "将匹配指定域名后缀的查询定向转发到专用上游服务器（如企业内网或 VPN 域名），而不走全局上游。",
+  tooltipCnameCloaking:
+    "检查上游响应中的 CNAME 跳转链，若中间或最终 CNAME 目标命中拦截规则，则同样拦截该查询。",
+  tooltipDohEnabled:
+    "在 Web/HTTPS 监听端口上开启 /dns-query 入站 DoH 接口，供浏览器和操作系统客户端使用。",
+  tooltipAllowPrivateSubs:
+    "允许从内网或本机（localhost）地址拉取订阅规则列表。默认关闭以防止 SSRF 风险。",
+  tooltipAllowCidrs:
+    "允许发起 DNS 查询的客户端 IP/CIDR 白名单。留空表示允许所有客户端；配置后仅放行匹配网段。",
+  tooltipDenyCidrs:
+    "禁止发起 DNS 查询的客户端 IP/CIDR 黑名单。优先级高于白名单，命中后直接拒绝服务。",
+  tooltipRateLimit:
+    "限制单个客户端 IP 每秒最大 DNS 查询数（QPS），用于缓解异常设备刷量或洪水攻击；设为 0 表示不限制。",
+  tooltipEcs:
+    "向上游查询附带截断后的客户端子网（EDNS0 Client Subnet），以获得更精准的 CDN 就近调度；注意会向上游暴露近似子网。",
+  tooltipEcsCustomIp:
+    "可选，指定固定 IP 或网段作为 ECS 子网发送给上游，替代真实客户端 IP，常用于隐私保护或 NAT 环境。",
+  tooltipEcsV4Prefix:
+    "ECS 中向上游暴露的 IPv4 前缀位数（默认 24）。位数越小越保护隐私，位数越大 CDN 调度越精确。",
+  tooltipEcsV6Prefix:
+    "ECS 中向上游暴露的 IPv6 前缀位数（默认 56），用于权衡隐私保护与地理调度精度。",
+  tooltipDnssec:
+    "对响应进行 RRSIG/DS 签名链密码学校验，防止 DNS 劫持与欺骗；需要上游解析器支持返回 DNSSEC 记录。",
+  tooltipDnsRebinding:
+    "拦截来自公网上游但解析结果为内网、回环或链路本地 IP 的响应，防范 DNS 重绑定（Rebinding）攻击。",
+  tooltipBlockAny:
+    "对 DNS ANY 查询直接返回精简的 RFC 8482 HINFO 响应而不转发上游，防止 DNS 放大攻击。",
+  tooltipTrustedProxies:
+    "受信任的反向代理 IP/CIDR 列表，允许其通过 X-Forwarded-For 或 Forwarded 请求头传递真实 DoH 客户端 IP。",
+  tooltipHosts: "加载本机 hosts 文件中的静态主机名映射，使局域网设备无需向上游查询即可直接解析。",
+  tooltipDhcpLeases:
+    "解析 DHCP 服务租约文件（支持 dnsmasq、ISC DHCP、Kea），自动将局域网客户端 IP 关联到设备主机名。",
+  tooltipMdns: "监听局域网内的组播 DNS（.local）广播，自动发现并记录局域网设备主机名。",
+  tooltipPrivatePtr:
+    "处理内网私有 IP 的反向解析（in-addr.arpa / ip6.arpa），可本地直接拦截或转发给内网 PTR 上游。",
+  tooltipPrivatePtrUpstreams:
+    "可选，用于处理内网反向 PTR 查询的上游服务器（如局域网路由器）；留空则在本地直接返回 NXDOMAIN。",
+  tooltipDdr:
+    "启用指定解析器发现（_dns.resolver.arpa SVCB，RFC 9462），使支持的客户端自动升级为加密的 DoT/DoH/DoQ。",
+  tooltipDdrHostname: "在 DDR SVCB 响应中通告的公网 TLS 主机名，需与实际配置的 TLS 证书域名一致。",
+  tooltipRdns:
+    "在后台异步对局域网客户端 IP 执行反向 DNS 查询，以便在日志与客户端列表中显示可读主机名。",
+  tooltipSniHostnames:
+    "用于从 DoT/DoQ TLS SNI 子域名中提取 ClientID 的基础域名（例如 <client-id>.dot.example.com）。",
+  tooltipSafeSearch:
+    "将主流搜索引擎和 YouTube 的 DNS 解析重写为官方安全搜索（SafeSearch）专用地址，强制开启安全过滤。",
+  tooltipDns64:
+    "在纯 IPv6 网络中，当域名没有原生 AAAA 记录时，使用 NAT64 前缀将 IPv4 A 记录合成为 IPv6 AAAA 记录。",
+  tooltipDns64Prefixes:
+    "用于合成 AAAA 记录的 NAT64 IPv6 前缀（如标准前缀 64:ff9b::/96），每行一个。",
+  tooltipSvcbStripEch:
+    "从 HTTPS/SVCB 记录中剥离 Encrypted Client Hello（ech）参数，以便网络策略或 SNI 工具识别握手域名。",
+  tooltipSvcbStripHints:
+    "从 HTTPS/SVCB 记录中剥离 ipv4hint 与 ipv6hint 地址提示，强制客户端通过 CrabDNS 重新解析 A/AAAA 记录以应用过滤规则。",
+  tooltipTls:
+    "配置原生 DoT、DoQ 与 HTTPS 监听所需的 PEM 证书和私钥路径，支持无需重启服务的证书热重载。",
 };
 
 const dictionaries: Record<Locale, Record<TranslationKey, string>> = {
