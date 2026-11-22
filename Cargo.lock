@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "crabdns-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "crabdns-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "crabdns-storage"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "crabdns-core",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "crabdns-web"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",

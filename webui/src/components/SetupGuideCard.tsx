@@ -71,6 +71,32 @@ export function SetupGuideCard(props: SetupGuideCardProps) {
   const showApple = createMemo(() => showDoh() || showDot());
   const showAndroid = createMemo(() => showDot());
   const showDesktop = createMemo(() => showDoh() || showDot());
+
+  const cleanHost = createMemo(() => host().trim() || defaultHost());
+  const cleanClientId = createMemo(() => clientId().trim());
+
+  const dohUrl = createMemo(() => {
+    const cid = cleanClientId();
+    return cid
+      ? `https://${cleanHost()}/dns-query/${encodeURIComponent(cid)}`
+      : `https://${cleanHost()}/dns-query`;
+  });
+
+  const dotHost = createMemo(() => {
+    const cid = cleanClientId();
+    return cid ? `${cid}.${cleanHost()}` : cleanHost();
+  });
+
+  const doqUrl = createMemo(() => {
+    const port = extractPort(props.configData?.listen_doq, "853");
+    return `quic://${cleanHost()}:${port}`;
+  });
+
+  const plainDns = createMemo(() => {
+    const port = extractPort(props.configData?.listen_dns, "53");
+    return `${cleanHost()}:${port}`;
+  });
+
   const endpoints = createMemo(() => {
     const items: Array<{ key: string; label: string; value: string; available: boolean }> = [];
     if (showDoh()) {
@@ -110,31 +136,6 @@ export function SetupGuideCard(props: SetupGuideCardProps) {
     if (!hostEdited()) {
       setHost(defaultHost());
     }
-  });
-
-  const cleanHost = createMemo(() => host().trim() || defaultHost());
-  const cleanClientId = createMemo(() => clientId().trim());
-
-  const dohUrl = createMemo(() => {
-    const cid = cleanClientId();
-    return cid
-      ? `https://${cleanHost()}/dns-query/${encodeURIComponent(cid)}`
-      : `https://${cleanHost()}/dns-query`;
-  });
-
-  const dotHost = createMemo(() => {
-    const cid = cleanClientId();
-    return cid ? `${cid}.${cleanHost()}` : cleanHost();
-  });
-
-  const doqUrl = createMemo(() => {
-    const port = extractPort(props.configData?.listen_doq, "853");
-    return `quic://${cleanHost()}:${port}`;
-  });
-
-  const plainDns = createMemo(() => {
-    const port = extractPort(props.configData?.listen_dns, "53");
-    return `${cleanHost()}:${port}`;
   });
 
   async function copyText(key: string, value: string) {
