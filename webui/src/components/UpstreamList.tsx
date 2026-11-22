@@ -216,9 +216,13 @@ export function UpstreamList(props: UpstreamListProps) {
                 const base =
                   c.protocol === "doh"
                     ? "DoH"
-                    : c.protocol === "dot"
-                      ? "DoT"
-                      : c.protocol.toUpperCase();
+                    : c.protocol === "doh3"
+                      ? "DoH3"
+                      : c.protocol === "doq"
+                        ? "DoQ"
+                        : c.protocol === "dot"
+                          ? "DoT"
+                          : c.protocol.toUpperCase();
                 return c.transport_detail ? `${base} · ${c.transport_detail}` : base;
               };
 
@@ -310,6 +314,9 @@ export function UpstreamList(props: UpstreamListProps) {
                             >
                               <Show when={c().encrypted}>
                                 <span class="i-ri-lock-line text-[10px]" />
+                              </Show>
+                              <Show when={c().protocol === "doq" || c().protocol === "doh3"}>
+                                <span class="i-ri-flashlight-line text-[10px]" />
                               </Show>
                               {protoLabel()}
                             </span>

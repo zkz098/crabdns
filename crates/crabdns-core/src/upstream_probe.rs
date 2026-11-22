@@ -51,15 +51,19 @@ pub struct UpstreamCapabilities {
     pub error: Option<String>,
 }
 
+const fn is_encrypted_protocol(protocol: UpstreamProtocol) -> bool {
+    matches!(
+        protocol,
+        UpstreamProtocol::Dot
+            | UpstreamProtocol::Doh
+            | UpstreamProtocol::Doq
+            | UpstreamProtocol::Doh3
+    )
+}
+
 impl UpstreamCapabilities {
     fn failed(input: String, endpoint: String, protocol: UpstreamProtocol, error: String) -> Self {
-        let encrypted = matches!(
-            protocol,
-            UpstreamProtocol::Dot
-                | UpstreamProtocol::Doh
-                | UpstreamProtocol::Doq
-                | UpstreamProtocol::Doh3
-        );
+        let encrypted = is_encrypted_protocol(protocol);
         Self {
             input,
             endpoint,
@@ -316,7 +320,7 @@ async fn probe_single(ctx: &ProbeContext, input: String) -> UpstreamCapabilities
     };
 
     let protocol = endpoint_protocol(&endpoint);
-    let encrypted = matches!(protocol, UpstreamProtocol::Dot | UpstreamProtocol::Doh);
+    let encrypted = is_encrypted_protocol(protocol);
     let label = endpoint_label(&endpoint);
 
     // 1. Primary probe: `.` DNSKEY with EDNS0 + DO=1 + NSID + Client Cookie
