@@ -23,8 +23,13 @@ cargo run -p crabdns-server
 ## Quality Gates & Tests
 
 ```bash
-cargo warden check && cargo warden hygiene && cargo warden manifest
-cargo nextest run --workspace
+# Run all static checks (dag, complexity, file-length, hygiene, manifest, ci-parity, actions) + fmt + clippy
+cargo warden check
+
+# Run the full local gate (static checks + fmt + clippy + workspace nextest + Web UI checks/build)
+cargo warden gate
+
+# Fuzz targets (nightly)
 cargo +nightly fuzz run fuzz_filter_parser
 cargo +nightly fuzz run fuzz_dns_packet
 ```

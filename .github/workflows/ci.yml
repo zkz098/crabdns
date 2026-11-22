@@ -36,9 +36,11 @@ jobs:
           path: webui/dist
 
   rust:
-    name: Rust Check & Nextest
+    name: Rust Warden Gate
     needs: webui
     runs-on: ubuntu-latest
+    env:
+      NEXTEST_PROFILE: ci
     steps:
       - uses: actions/checkout@v7
       - name: Download Web UI dist
@@ -52,15 +54,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: nextest
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Run unit & E2E tests
-        run: cargo nextest run -p crabdns-core -p crabdns-storage -p crabdns-web -p crabdns-server -E 'not (binary(heap_bounds) | binary(stability_ci))' --profile ci --no-fail-fast --hide-progress-bar
-      - name: Run heap-bounds & virtual-time stability gates
-        run: cargo nextest run -p crabdns-core -p crabdns-web -p crabdns-server -E 'binary(heap_bounds) | binary(stability_ci)' --profile ci --no-fail-fast --hide-progress-bar
+          tool: nextest,cargo-binstall
+      - name: Install cargo-warden
+        run: cargo binstall -y --no-confirm cargo-warden@0.3.1 || cargo install cargo-warden --version 0.3.1 --locked
+      - name: Run cargo warden gate
+        run: cargo warden gate --format github-actions --skip webui
 
   fuzz:
     name: Fuzz Build
