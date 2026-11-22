@@ -1368,7 +1368,7 @@ export function SettingsView(props: SettingsViewProps) {
         )}
       </Show>
 
-      <SetupGuideCard configData={props.configData} />
+      <SetupGuideCard configData={props.configData} tlsStatus={props.tlsStatus} />
     </div>
   );
 }

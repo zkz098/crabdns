@@ -268,6 +268,11 @@ const en = {
   setupGuideDesktopTitle: "Windows 11 / Linux",
   setupGuideDesktopDesc:
     "Use the DoH URL above in Windows Network DNS settings (DNS over HTTPS) or configure systemd-resolved with DNSOverTLS=yes.",
+  setupGuideShowUnavailable: "Show unavailable",
+  setupGuideHideUnavailable: "Hide unavailable",
+  setupGuideNoTlsHint:
+    "SSL certificate or encrypted DNS listeners are not configured; DoH, DoT, and DoQ are hidden by default.",
+  setupGuideUnavailableTag: "Unavailable",
   settingsDhcpLeasesLabel: "Parse DHCP Leases File for Hostnames",
   settingsDhcpLeasesPathLabel: "DHCP Leases Path (dnsmasq / ISC / Kea)",
   settingsMdnsLabel: "Discover LAN Hostnames via mDNS (.local)",
@@ -739,6 +744,10 @@ const zhCN: Record<TranslationKey, string> = {
   setupGuideDesktopTitle: "Windows 11 / Linux",
   setupGuideDesktopDesc:
     "在 Windows 网络 DNS 设置中填入上方 DoH 地址，或在 Linux systemd-resolved 中配置 DNSOverTLS=yes。",
+  setupGuideShowUnavailable: "显示不可用配置",
+  setupGuideHideUnavailable: "隐藏不可用配置",
+  setupGuideNoTlsHint: "未配置 SSL 证书或对应监听端口，已默认隐藏 DoH、DoT 和 DoQ 配置。",
+  setupGuideUnavailableTag: "未启用",
   settingsDhcpLeasesLabel: "读取 DHCP Lease 文件解析设备主机名",
   settingsDhcpLeasesPathLabel: "DHCP Lease 文件路径（dnsmasq / ISC / Kea）",
   settingsMdnsLabel: "启用 mDNS (.local) 局域网设备名发现",

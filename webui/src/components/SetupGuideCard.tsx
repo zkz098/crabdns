@@ -1,9 +1,11 @@
-import { createEffect, createMemo, createSignal, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { t } from "../i18n";
 import type { ConfigResponse } from "../types/ConfigResponse";
+import type { TlsStatusResponse } from "../types/TlsStatusResponse";
 
 interface SetupGuideCardProps {
   configData: ConfigResponse | null;
+  tlsStatus?: TlsStatusResponse | null;
 }
 
 function extractPort(addr: string | null | undefined, fallback: string): string {
@@ -30,6 +32,79 @@ export function SetupGuideCard(props: SetupGuideCardProps) {
   const [copiedKey, setCopiedKey] = createSignal("");
   const [downloading, setDownloading] = createSignal<"doh" | "dot" | null>(null);
   const [downloadError, setDownloadError] = createSignal("");
+  const [showUnavailable, setShowUnavailable] = createSignal(false);
+
+  const hasTlsCert = createMemo(() => {
+    if (props.tlsStatus) {
+      return Boolean(props.tlsStatus.cert_path && props.tlsStatus.key_path);
+    }
+    return Boolean(props.configData?.tls_cert_path && props.configData?.tls_key_path);
+  });
+
+  const dohAvailable = createMemo(() => {
+    if (props.configData?.doh_enabled === false) return false;
+    if (!hasTlsCert()) return false;
+    if (props.tlsStatus) return props.tlsStatus.https_enabled;
+    return Boolean(props.configData?.listen_web_tls);
+  });
+
+  const dotAvailable = createMemo(() => {
+    if (!hasTlsCert()) return false;
+    if (props.tlsStatus) return props.tlsStatus.dot_enabled;
+    return Boolean(props.configData?.listen_dot);
+  });
+
+  const doqAvailable = createMemo(() => {
+    if (!hasTlsCert()) return false;
+    if (props.tlsStatus) return props.tlsStatus.doq_enabled;
+    return Boolean(props.configData?.listen_doq);
+  });
+
+  const hasUnavailable = createMemo(() => !dohAvailable() || !dotAvailable() || !doqAvailable());
+  const hasAnyEncryptedAvailable = createMemo(
+    () => dohAvailable() || dotAvailable() || doqAvailable(),
+  );
+  const showDoh = createMemo(() => dohAvailable() || showUnavailable());
+  const showDot = createMemo(() => dotAvailable() || showUnavailable());
+  const showDoq = createMemo(() => doqAvailable() || showUnavailable());
+  const showClientId = createMemo(() => showDoh() || showDot());
+  const showApple = createMemo(() => showDoh() || showDot());
+  const showAndroid = createMemo(() => showDot());
+  const showDesktop = createMemo(() => showDoh() || showDot());
+  const endpoints = createMemo(() => {
+    const items: Array<{ key: string; label: string; value: string; available: boolean }> = [];
+    if (showDoh()) {
+      items.push({
+        key: "doh",
+        label: "DNS-over-HTTPS (DoH)",
+        value: dohUrl(),
+        available: dohAvailable(),
+      });
+    }
+    if (showDot()) {
+      items.push({
+        key: "dot",
+        label: "DNS-over-TLS (DoT / Android Private DNS)",
+        value: dotHost(),
+        available: dotAvailable(),
+      });
+    }
+    if (showDoq()) {
+      items.push({
+        key: "doq",
+        label: "DNS-over-QUIC (DoQ)",
+        value: doqUrl(),
+        available: doqAvailable(),
+      });
+    }
+    items.push({
+      key: "plain",
+      label: "Plain DNS (UDP / TCP)",
+      value: plainDns(),
+      available: true,
+    });
+    return items;
+  });
 
   createEffect(() => {
     if (!hostEdited()) {
@@ -112,14 +187,29 @@ export function SetupGuideCard(props: SetupGuideCardProps) {
 
   return (
     <div class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-4 sm:p-5 space-y-4">
-      <div>
-        <h3 class="text-sm font-medium text-[#171717] dark:text-[#ededed]">
-          {t("setupGuideTitle")}
-        </h3>
-        <p class="text-xs text-[#666666] dark:text-[#a1a1aa] mt-0.5">{t("setupGuideDesc")}</p>
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 class="text-sm font-medium text-[#171717] dark:text-[#ededed]">
+            {t("setupGuideTitle")}
+          </h3>
+          <p class="text-xs text-[#666666] dark:text-[#a1a1aa] mt-0.5">{t("setupGuideDesc")}</p>
+        </div>
+        <Show when={hasUnavailable()}>
+          <button
+            type="button"
+            onClick={() => setShowUnavailable((prev) => !prev)}
+            class="shrink-0 px-2.5 py-1 rounded-lg text-xs border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] text-[#666666] dark:text-[#a1a1aa] hover:text-[#171717] dark:hover:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] cursor-pointer"
+          >
+            {showUnavailable() ? t("setupGuideHideUnavailable") : t("setupGuideShowUnavailable")}
+          </button>
+        </Show>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <Show when={!hasAnyEncryptedAvailable() && !showUnavailable()}>
+        <p class="text-xs text-[#8f8f8f] dark:text-[#71717a]">{t("setupGuideNoTlsHint")}</p>
+      </Show>
+
+      <div class={`grid grid-cols-1 ${showClientId() ? "md:grid-cols-2" : ""} gap-3`}>
         <div>
           <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
             {t("setupGuideHostnameLabel")}
@@ -135,128 +225,119 @@ export function SetupGuideCard(props: SetupGuideCardProps) {
             class="w-full h-9 bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none"
           />
         </div>
-        <div>
-          <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
-            {t("setupGuideClientIdLabel")}
-          </label>
-          <input
-            type="text"
-            value={clientId()}
-            onInput={(e) => setClientId(e.currentTarget.value)}
-            placeholder="iphone-pro"
-            class="w-full h-9 bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none"
-          />
-        </div>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
-        <div class="flex items-center justify-between gap-2 rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2">
-          <div class="min-w-0">
-            <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">DNS-over-HTTPS (DoH)</div>
-            <div class="font-mono text-[#171717] dark:text-[#ededed] truncate">{dohUrl()}</div>
-          </div>
-          <button
-            type="button"
-            onClick={() => void copyText("doh", dohUrl())}
-            class="shrink-0 px-2.5 py-1 rounded border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] cursor-pointer"
-          >
-            {copiedKey() === "doh" ? t("setupGuideCopied") : t("setupGuideCopy")}
-          </button>
-        </div>
-
-        <div class="flex items-center justify-between gap-2 rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2">
-          <div class="min-w-0">
-            <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
-              DNS-over-TLS (DoT / Android Private DNS)
-            </div>
-            <div class="font-mono text-[#171717] dark:text-[#ededed] truncate">{dotHost()}</div>
-          </div>
-          <button
-            type="button"
-            onClick={() => void copyText("dot", dotHost())}
-            class="shrink-0 px-2.5 py-1 rounded border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] cursor-pointer"
-          >
-            {copiedKey() === "dot" ? t("setupGuideCopied") : t("setupGuideCopy")}
-          </button>
-        </div>
-
-        <div class="flex items-center justify-between gap-2 rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2">
-          <div class="min-w-0">
-            <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">DNS-over-QUIC (DoQ)</div>
-            <div class="font-mono text-[#171717] dark:text-[#ededed] truncate">{doqUrl()}</div>
-          </div>
-          <button
-            type="button"
-            onClick={() => void copyText("doq", doqUrl())}
-            class="shrink-0 px-2.5 py-1 rounded border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] cursor-pointer"
-          >
-            {copiedKey() === "doq" ? t("setupGuideCopied") : t("setupGuideCopy")}
-          </button>
-        </div>
-
-        <div class="flex items-center justify-between gap-2 rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2">
-          <div class="min-w-0">
-            <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">Plain DNS (UDP / TCP)</div>
-            <div class="font-mono text-[#171717] dark:text-[#ededed] truncate">{plainDns()}</div>
-          </div>
-          <button
-            type="button"
-            onClick={() => void copyText("plain", plainDns())}
-            class="shrink-0 px-2.5 py-1 rounded border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] cursor-pointer"
-          >
-            {copiedKey() === "plain" ? t("setupGuideCopied") : t("setupGuideCopy")}
-          </button>
-        </div>
-      </div>
-
-      <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3.5 space-y-2.5">
-        <div class="flex flex-wrap items-center justify-between gap-2">
+        <Show when={showClientId()}>
           <div>
-            <div class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
-              {t("setupGuideAppleTitle")}
-            </div>
-            <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
-              {t("setupGuideAppleDesc")}
-            </div>
+            <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
+              {t("setupGuideClientIdLabel")}
+            </label>
+            <input
+              type="text"
+              value={clientId()}
+              onInput={(e) => setClientId(e.currentTarget.value)}
+              placeholder="iphone-pro"
+              class="w-full h-9 bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none"
+            />
           </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={downloading() !== null}
-              onClick={() => void downloadMobileconfig("doh")}
-              class="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#171717] dark:bg-[#ededed] text-white dark:text-[#0a0a0a] hover:opacity-90 disabled:opacity-50 cursor-pointer"
-            >
-              {downloading() === "doh" ? t("setupGuideDownloading") : t("setupGuideDownloadDoh")}
-            </button>
-            <button
-              type="button"
-              disabled={downloading() !== null}
-              onClick={() => void downloadMobileconfig("dot")}
-              class="px-3 py-1.5 rounded-lg text-xs font-medium border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] disabled:opacity-50 cursor-pointer"
-            >
-              {downloading() === "dot" ? t("setupGuideDownloading") : t("setupGuideDownloadDot")}
-            </button>
-          </div>
-        </div>
-        <Show when={downloadError()}>
-          <div class="text-xs text-red-600 dark:text-red-400">{downloadError()}</div>
         </Show>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px] text-[#666666] dark:text-[#a1a1aa]">
-        <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] p-3 space-y-1">
-          <div class="font-medium text-[#171717] dark:text-[#ededed]">
-            {t("setupGuideAndroidTitle")}
-          </div>
-          <p>{t("setupGuideAndroidDesc")}</p>
-        </div>
-        <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] p-3 space-y-1">
-          <div class="font-medium text-[#171717] dark:text-[#ededed]">
-            {t("setupGuideDesktopTitle")}
-          </div>
-          <p>{t("setupGuideDesktopDesc")}</p>
-        </div>
+      <div
+        class={`grid grid-cols-1 ${endpoints().length > 1 ? "md:grid-cols-2" : ""} gap-2.5 text-xs`}
+      >
+        <For each={endpoints()}>
+          {(item) => (
+            <div class="flex items-center justify-between gap-2 rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2">
+              <div class="min-w-0">
+                <div class="flex items-center gap-1.5 text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                  <span>{item.label}</span>
+                  <Show when={!item.available}>
+                    <span class="px-1.5 py-0.2 rounded bg-[#eaeaea] dark:bg-[#262626] text-[10px] text-[#666666] dark:text-[#a1a1aa]">
+                      {t("setupGuideUnavailableTag")}
+                    </span>
+                  </Show>
+                </div>
+                <div class="font-mono text-[#171717] dark:text-[#ededed] truncate">
+                  {item.value}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void copyText(item.key, item.value)}
+                class="shrink-0 px-2.5 py-1 rounded border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] cursor-pointer"
+              >
+                {copiedKey() === item.key ? t("setupGuideCopied") : t("setupGuideCopy")}
+              </button>
+            </div>
+          )}
+        </For>
       </div>
+
+      <Show when={showApple()}>
+        <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3.5 space-y-2.5">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                {t("setupGuideAppleTitle")}
+              </div>
+              <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                {t("setupGuideAppleDesc")}
+              </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <Show when={showDoh()}>
+                <button
+                  type="button"
+                  disabled={downloading() !== null}
+                  onClick={() => void downloadMobileconfig("doh")}
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#171717] dark:bg-[#ededed] text-white dark:text-[#0a0a0a] hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                >
+                  {downloading() === "doh"
+                    ? t("setupGuideDownloading")
+                    : t("setupGuideDownloadDoh")}
+                </button>
+              </Show>
+              <Show when={showDot()}>
+                <button
+                  type="button"
+                  disabled={downloading() !== null}
+                  onClick={() => void downloadMobileconfig("dot")}
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] disabled:opacity-50 cursor-pointer"
+                >
+                  {downloading() === "dot"
+                    ? t("setupGuideDownloading")
+                    : t("setupGuideDownloadDot")}
+                </button>
+              </Show>
+            </div>
+          </div>
+          <Show when={downloadError()}>
+            <div class="text-xs text-red-600 dark:text-red-400">{downloadError()}</div>
+          </Show>
+        </div>
+      </Show>
+
+      <Show when={showAndroid() || showDesktop()}>
+        <div
+          class={`grid grid-cols-1 ${showAndroid() && showDesktop() ? "md:grid-cols-2" : ""} gap-2.5 text-[11px] text-[#666666] dark:text-[#a1a1aa]`}
+        >
+          <Show when={showAndroid()}>
+            <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] p-3 space-y-1">
+              <div class="font-medium text-[#171717] dark:text-[#ededed]">
+                {t("setupGuideAndroidTitle")}
+              </div>
+              <p>{t("setupGuideAndroidDesc")}</p>
+            </div>
+          </Show>
+          <Show when={showDesktop()}>
+            <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] p-3 space-y-1">
+              <div class="font-medium text-[#171717] dark:text-[#ededed]">
+                {t("setupGuideDesktopTitle")}
+              </div>
+              <p>{t("setupGuideDesktopDesc")}</p>
+            </div>
+          </Show>
+        </div>
+      </Show>
     </div>
   );
 }
