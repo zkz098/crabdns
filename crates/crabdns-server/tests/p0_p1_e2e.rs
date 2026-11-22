@@ -127,7 +127,7 @@ async fn send_dot_query(
     cert_pem: &[u8],
     query: &[u8],
 ) -> anyhow::Result<Message> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_slice_iter(cert_pem).collect::<std::result::Result<Vec<_>, _>>()?;
     let mut roots = RootCertStore::empty();
@@ -249,7 +249,7 @@ fn generate_test_cert(dir: &Path, name: &str) -> (PathBuf, PathBuf, Vec<u8>) {
 }
 
 fn build_tls_http_client(cert_pem: &[u8]) -> reqwest::Client {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cert = reqwest::Certificate::from_pem(cert_pem).expect("parse reqwest cert");
     reqwest::Client::builder()
         .tls_certs_only([cert])

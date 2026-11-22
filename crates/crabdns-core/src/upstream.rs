@@ -481,7 +481,7 @@ impl UpstreamPool {
         strategy: UpstreamStrategy,
         bootstrap_dns: &[String],
     ) -> Result<Self> {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut endpoints = Vec::with_capacity(specs.len());
         for spec in specs {
             endpoints.push(UpstreamEndpoint::parse(spec)?);

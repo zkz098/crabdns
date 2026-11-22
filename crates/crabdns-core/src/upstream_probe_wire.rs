@@ -44,7 +44,7 @@ pub(crate) struct ProbeContext {
 
 impl ProbeContext {
     pub(crate) fn new(bootstrap_dns: &[String], timeout_ms: u64) -> Result<Self> {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let timeout = Duration::from_millis(timeout_ms.clamp(200, 15_000));
         let bootstrap = BootstrapResolver::new(bootstrap_dns, timeout)?;
 

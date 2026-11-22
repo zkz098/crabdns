@@ -70,7 +70,7 @@ async fn send_doq_query(
     cert_pem: &[u8],
     query: &[u8],
 ) -> anyhow::Result<Message> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_slice_iter(cert_pem).collect::<std::result::Result<Vec<_>, _>>()?;
     let mut roots = RootCertStore::empty();

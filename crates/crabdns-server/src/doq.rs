@@ -23,7 +23,7 @@ pub fn build_doq_server_config(
     key_path: &Path,
     idle_timeout: Duration,
 ) -> anyhow::Result<ServerConfig> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_file_iter(cert_path)?.collect::<std::result::Result<Vec<_>, _>>()?;
     if certs.is_empty() {

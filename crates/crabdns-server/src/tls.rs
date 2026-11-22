@@ -12,7 +12,7 @@ use axum::serve::Listener;
 use chrono::Utc;
 use crabdns_core::DnsPipeline;
 use crabdns_web::tls_api::{TlsReloader, TlsStatusResponse};
-use ring::digest::{SHA256, digest};
+use aws_lc_rs::digest::{SHA256, digest};
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -34,7 +34,7 @@ pub fn build_tls_acceptor_with_meta(
     key_path: &Path,
     alpn_protocols: Vec<Vec<u8>>,
 ) -> anyhow::Result<(TlsAcceptor, String, usize)> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_file_iter(cert_path)?.collect::<std::result::Result<Vec<_>, _>>()?;
     if certs.is_empty() {

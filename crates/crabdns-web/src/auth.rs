@@ -9,8 +9,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
-use ring::pbkdf2;
-use ring::rand::{SecureRandom, SystemRandom};
+use aws_lc_rs::pbkdf2;
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
