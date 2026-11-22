@@ -281,10 +281,7 @@ fn configure_pipeline(
     }
     pipeline.set_dhcp_leases_enabled(cfg.dhcp_leases_enabled);
     if cfg.dhcp_leases_enabled {
-        let resolved_dhcp = cfg
-            .dhcp_leases_path
-            .as_deref()
-            .unwrap_or("/var/lib/misc/dnsmasq.leases");
+        let resolved_dhcp = crabdns_core::resolve_dhcp_leases_path(cfg.dhcp_leases_path.as_deref());
         if let Err(err) = pipeline.reload_dhcp_leases_from_path(std::path::Path::new(resolved_dhcp))
         {
             tracing::warn!(path = %resolved_dhcp, error = %err, "failed to load DHCP leases file");

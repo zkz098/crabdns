@@ -570,11 +570,8 @@ pub async fn import_backup(
     };
 
     let dhcp_table_opt = if next.dhcp_leases_enabled {
-        let resolved_dhcp = next
-            .dhcp_leases_path
-            .as_deref()
-            .unwrap_or("/var/lib/misc/dnsmasq.leases")
-            .to_string();
+        let resolved_dhcp =
+            crabdns_core::resolve_dhcp_leases_path(next.dhcp_leases_path.as_deref()).to_string();
         tokio::task::spawn_blocking(move || DhcpLeaseTable::from_file(Path::new(&resolved_dhcp)))
             .await
             .ok()

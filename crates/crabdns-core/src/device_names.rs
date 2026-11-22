@@ -31,6 +31,39 @@ const MDNS_V6_ADDR: SocketAddr = SocketAddr::V6(SocketAddrV6::new(
     0,
 ));
 
+pub const DEFAULT_DHCP_LEASES_PATH: &str = "/var/lib/misc/dnsmasq.leases";
+pub const OPENWRT_DHCP_LEASES_PATH: &str = "/tmp/dhcp.leases";
+
+fn is_openwrt_with_dhcp_leases(
+    openwrt_release_path: &Path,
+    openwrt_version_path: &Path,
+    openwrt_leases_path: &Path,
+) -> bool {
+    (openwrt_release_path.is_file() || openwrt_version_path.is_file())
+        && openwrt_leases_path.is_file()
+}
+
+/// Returns the default DHCP leases path, preferring `/tmp/dhcp.leases` on OpenWrt when present.
+pub fn default_dhcp_leases_path() -> &'static str {
+    if is_openwrt_with_dhcp_leases(
+        Path::new("/etc/openwrt_release"),
+        Path::new("/etc/openwrt_version"),
+        Path::new(OPENWRT_DHCP_LEASES_PATH),
+    ) {
+        OPENWRT_DHCP_LEASES_PATH
+    } else {
+        DEFAULT_DHCP_LEASES_PATH
+    }
+}
+
+/// Resolves the effective DHCP leases file path from an optional user-configured path.
+pub fn resolve_dhcp_leases_path(configured: Option<&str>) -> &str {
+    configured
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| default_dhcp_leases_path())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DhcpLeaseTable {
     entries: HashMap<IpAddr, String, RandomState>,
@@ -487,5 +520,38 @@ lease 192.168.2.11 {
             resolver.lookup_cached("192.168.1.99".parse().unwrap()),
             Some(Some("apple-tv.local".to_string()))
         );
+    }
+
+    #[test]
+    fn test_openwrt_dhcp_leases_detection_and_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("openwrt_release");
+        let version = dir.path().join("openwrt_version");
+        let leases = dir.path().join("dhcp.leases");
+
+        assert!(!is_openwrt_with_dhcp_leases(&release, &version, &leases));
+
+        std::fs::write(&leases, "").unwrap();
+        assert!(!is_openwrt_with_dhcp_leases(&release, &version, &leases));
+
+        std::fs::write(&release, "DISTRIB_ID='OpenWrt'\n").unwrap();
+        assert!(is_openwrt_with_dhcp_leases(&release, &version, &leases));
+
+        std::fs::remove_file(&release).unwrap();
+        std::fs::write(&version, "24.10.0\n").unwrap();
+        assert!(is_openwrt_with_dhcp_leases(&release, &version, &leases));
+
+        std::fs::remove_file(&leases).unwrap();
+        assert!(!is_openwrt_with_dhcp_leases(&release, &version, &leases));
+
+        assert_eq!(
+            resolve_dhcp_leases_path(Some(" /custom/dhcp.leases ")),
+            "/custom/dhcp.leases"
+        );
+        assert_eq!(
+            resolve_dhcp_leases_path(Some("   ")),
+            default_dhcp_leases_path()
+        );
+        assert_eq!(resolve_dhcp_leases_path(None), default_dhcp_leases_path());
     }
 }

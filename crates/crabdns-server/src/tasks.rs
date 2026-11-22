@@ -199,10 +199,8 @@ pub fn spawn_dhcp_lease_refresh_task(
                         last_mtime = None;
                         continue;
                     }
-                    let path_str = cfg
-                        .dhcp_leases_path
-                        .as_deref()
-                        .unwrap_or("/var/lib/misc/dnsmasq.leases");
+                    let path_str =
+                        crabdns_core::resolve_dhcp_leases_path(cfg.dhcp_leases_path.as_deref());
                     let path = std::path::Path::new(path_str);
                     let Ok(meta) = tokio::fs::metadata(path).await else {
                         continue;

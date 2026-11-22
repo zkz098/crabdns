@@ -480,10 +480,8 @@ pub async fn update_config(
     };
 
     let dhcp_table_opt = if dhcp_leases_enabled {
-        let resolved_dhcp = dhcp_leases_path
-            .as_deref()
-            .unwrap_or("/var/lib/misc/dnsmasq.leases")
-            .to_string();
+        let resolved_dhcp =
+            crabdns_core::resolve_dhcp_leases_path(dhcp_leases_path.as_deref()).to_string();
         let path_for_log = resolved_dhcp.clone();
         match tokio::task::spawn_blocking(move || {
             DhcpLeaseTable::from_file(Path::new(&resolved_dhcp))
