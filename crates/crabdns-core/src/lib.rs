@@ -11,12 +11,15 @@ pub mod filter;
 pub mod filter_rules;
 pub mod lan;
 pub mod pipeline;
+mod pipeline_cache;
 mod pipeline_exec;
+mod pipeline_types;
 pub mod security;
 pub mod singleflight;
 pub mod split_dns;
 pub mod upstream;
 pub mod upstream_probe;
+mod upstream_probe_wire;
 mod upstream_transport;
 mod wire;
 
