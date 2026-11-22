@@ -57,6 +57,18 @@ enum ExchangeError {
     UpstreamFailed(String),
 }
 
+struct LatencyRecorder<'a> {
+    hist: &'a crate::pipeline::QueryLatencyHistogram,
+    start: Instant,
+}
+
+impl Drop for LatencyRecorder<'_> {
+    fn drop(&mut self) {
+        let elapsed_us = u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.hist.record(elapsed_us);
+    }
+}
+
 impl DnsPipeline {
     pub async fn handle_packet(
         &self,
@@ -80,6 +92,10 @@ impl DnsPipeline {
         ctx: QueryContext,
     ) -> Result<Vec<u8>> {
         let start = Instant::now();
+        let _latency_recorder = LatencyRecorder {
+            hist: &self.latency,
+            start,
+        };
         let request = Message::from_vec(raw_query)
             .map_err(|e| CoreError::Protocol(format!("invalid DNS packet: {e}")))?;
 

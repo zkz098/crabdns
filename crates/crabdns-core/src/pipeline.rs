@@ -80,6 +80,78 @@ pub struct QueryEvent {
 }
 
 pub(crate) const MAX_BG_REFRESHES: usize = 64;
+const LATENCY_BUCKET_BOUNDS_US: [u64; 14] = [
+    500, 1_000, 2_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000,
+    2_500_000, 5_000_000, 10_000_000,
+];
+
+#[derive(Debug, Default)]
+pub(crate) struct QueryLatencyHistogram {
+    buckets: [AtomicU64; 14],
+    inf_bucket: AtomicU64,
+    sum_us: AtomicU64,
+    count: AtomicU64,
+}
+
+impl QueryLatencyHistogram {
+    pub(crate) fn record(&self, elapsed_us: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(elapsed_us, Ordering::Relaxed);
+        if let Some(idx) = LATENCY_BUCKET_BOUNDS_US
+            .iter()
+            .position(|&bound| elapsed_us <= bound)
+        {
+            self.buckets[idx].fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.inf_bucket.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> LatencyHistogramSnapshot {
+        let mut cumulative = 0_u64;
+        let mut buckets = Vec::with_capacity(LATENCY_BUCKET_BOUNDS_US.len());
+        for (idx, bound_us) in LATENCY_BUCKET_BOUNDS_US.iter().enumerate() {
+            cumulative = cumulative.saturating_add(self.buckets[idx].load(Ordering::Relaxed));
+            #[allow(clippy::cast_precision_loss)]
+            let bound_secs = *bound_us as f64 / 1_000_000.0;
+            buckets.push((bound_secs, cumulative));
+        }
+        let inf = cumulative.saturating_add(self.inf_bucket.load(Ordering::Relaxed));
+        let sum_us = self.sum_us.load(Ordering::Relaxed);
+        let count = self.count.load(Ordering::Relaxed);
+        #[allow(clippy::cast_precision_loss)]
+        let sum_secs = sum_us as f64 / 1_000_000.0;
+        LatencyHistogramSnapshot {
+            buckets,
+            inf_count: inf,
+            sum_secs,
+            count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LatencyHistogramSnapshot {
+    pub buckets: Vec<(f64, u64)>,
+    pub inf_count: u64,
+    pub sum_secs: f64,
+    pub count: u64,
+}
+
+#[derive(Debug, Default)]
+struct ServerRuntimeCounters {
+    udp_dropped_inflight: AtomicU64,
+    tcp_active_connections: AtomicU64,
+    tcp_rejected_connections: AtomicU64,
+    dot_active_connections: AtomicU64,
+    dot_rejected_connections: AtomicU64,
+    web_active_connections: AtomicU64,
+    web_rejected_connections: AtomicU64,
+    doh_rejected_inflight: AtomicU64,
+    doh_timed_out: AtomicU64,
+    filter_reloads: AtomicU64,
+    filter_last_reload_ms: AtomicU64,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PipelineRuntimeMetrics {
@@ -88,6 +160,17 @@ pub struct PipelineRuntimeMetrics {
     pub rdns_inflight: usize,
     pub acl_tracked_clients: usize,
     pub bg_refresh_inflight: usize,
+    pub udp_dropped_inflight: u64,
+    pub tcp_active_connections: u64,
+    pub tcp_rejected_connections: u64,
+    pub dot_active_connections: u64,
+    pub dot_rejected_connections: u64,
+    pub web_active_connections: u64,
+    pub web_rejected_connections: u64,
+    pub doh_rejected_inflight: u64,
+    pub doh_timed_out: u64,
+    pub filter_reloads: u64,
+    pub filter_last_reload_ms: u64,
 }
 
 pub struct DnsPipeline {
@@ -115,6 +198,8 @@ pub struct DnsPipeline {
     pub(crate) ddr_config: ArcSwap<DdrConfig>,
     pub(crate) dns_rebinding_protection: AtomicBool,
     pub(crate) block_any_queries: AtomicBool,
+    pub(crate) latency: QueryLatencyHistogram,
+    counters: ServerRuntimeCounters,
 }
 
 fn block_mode_to_u8(mode: BlockMode) -> u8 {
@@ -166,6 +251,8 @@ impl DnsPipeline {
             ddr_config: ArcSwap::from_pointee(DdrConfig::default()),
             dns_rebinding_protection: AtomicBool::new(false),
             block_any_queries: AtomicBool::new(false),
+            latency: QueryLatencyHistogram::default(),
+            counters: ServerRuntimeCounters::default(),
         }
     }
 
@@ -474,6 +561,87 @@ impl DnsPipeline {
         self.block_any_queries.store(enabled, Ordering::Relaxed);
     }
 
+    pub fn record_udp_dropped(&self) {
+        self.counters
+            .udp_dropped_inflight
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_tcp_active(&self) {
+        self.counters
+            .tcp_active_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_tcp_active(&self) {
+        self.counters
+            .tcp_active_connections
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tcp_rejected(&self) {
+        self.counters
+            .tcp_rejected_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_dot_active(&self) {
+        self.counters
+            .dot_active_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_dot_active(&self) {
+        self.counters
+            .dot_active_connections
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn record_dot_rejected(&self) {
+        self.counters
+            .dot_rejected_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_web_active(&self) {
+        self.counters
+            .web_active_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_web_active(&self) {
+        self.counters
+            .web_active_connections
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn record_web_rejected(&self) {
+        self.counters
+            .web_rejected_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_doh_rejected(&self) {
+        self.counters
+            .doh_rejected_inflight
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_doh_timeout(&self) {
+        self.counters.doh_timed_out.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_filter_reload(&self, elapsed_ms: u64) {
+        self.counters.filter_reloads.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .filter_last_reload_ms
+            .store(elapsed_ms, Ordering::Relaxed);
+    }
+
+    pub fn latency_snapshot(&self) -> LatencyHistogramSnapshot {
+        self.latency.snapshot()
+    }
+
     pub fn runtime_metrics(&self) -> PipelineRuntimeMetrics {
         PipelineRuntimeMetrics {
             log_dropped: self.log_dropped.load(Ordering::Relaxed),
@@ -482,6 +650,26 @@ impl DnsPipeline {
             acl_tracked_clients: self.acl.load().tracked_clients(),
             bg_refresh_inflight: MAX_BG_REFRESHES
                 .saturating_sub(self.refresh_limiter.available_permits()),
+            udp_dropped_inflight: self.counters.udp_dropped_inflight.load(Ordering::Relaxed),
+            tcp_active_connections: self.counters.tcp_active_connections.load(Ordering::Relaxed),
+            tcp_rejected_connections: self
+                .counters
+                .tcp_rejected_connections
+                .load(Ordering::Relaxed),
+            dot_active_connections: self.counters.dot_active_connections.load(Ordering::Relaxed),
+            dot_rejected_connections: self
+                .counters
+                .dot_rejected_connections
+                .load(Ordering::Relaxed),
+            web_active_connections: self.counters.web_active_connections.load(Ordering::Relaxed),
+            web_rejected_connections: self
+                .counters
+                .web_rejected_connections
+                .load(Ordering::Relaxed),
+            doh_rejected_inflight: self.counters.doh_rejected_inflight.load(Ordering::Relaxed),
+            doh_timed_out: self.counters.doh_timed_out.load(Ordering::Relaxed),
+            filter_reloads: self.counters.filter_reloads.load(Ordering::Relaxed),
+            filter_last_reload_ms: self.counters.filter_last_reload_ms.load(Ordering::Relaxed),
         }
     }
 

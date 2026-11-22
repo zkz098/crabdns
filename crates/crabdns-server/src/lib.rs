@@ -1,19 +1,20 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use axum::serve::ListenerExt;
 use crabdns_core::{
     Config, DdrConfig, DnsCache, DnsPipeline, FilterEngine, QueryContext, QueryEvent,
-    QueryProtocol, UpstreamPool,
+    QueryProtocol, UpstreamPool, build_raw_formerr,
 };
 use crabdns_storage::{StorageEngine, spawn_log_sink};
 use crabdns_web::tls_api::TlsReloader;
 use crabdns_web::{AppState, build_router};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{Semaphore, broadcast, mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 mod dot;
@@ -24,9 +25,102 @@ pub use tasks::prune_logs_once;
 
 const UDP_MAX_INFLIGHT: usize = 2048;
 const WEB_MAX_CONNECTIONS: usize = 512;
+const MAX_TCP_PIPELINE_INFLIGHT: usize = 32;
+const MAX_TCP_CONN_LIFETIME: Duration = Duration::from_secs(300);
 const ACCEPT_ERR_BACKOFF: Duration = Duration::from_millis(50);
 pub(crate) const GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub(crate) struct ActiveConnGuard {
+    pipeline: Arc<DnsPipeline>,
+    is_dot: bool,
+}
+
+impl ActiveConnGuard {
+    pub(crate) fn new_tcp(pipeline: Arc<DnsPipeline>) -> Self {
+        pipeline.inc_tcp_active();
+        Self {
+            pipeline,
+            is_dot: false,
+        }
+    }
+
+    pub(crate) fn new_dot(pipeline: Arc<DnsPipeline>) -> Self {
+        pipeline.inc_dot_active();
+        Self {
+            pipeline,
+            is_dot: true,
+        }
+    }
+}
+
+impl Drop for ActiveConnGuard {
+    fn drop(&mut self) {
+        if self.is_dot {
+            self.pipeline.dec_dot_active();
+        } else {
+            self.pipeline.dec_tcp_active();
+        }
+    }
+}
+
+pub(crate) struct IpConnLimiter {
+    global: Arc<Semaphore>,
+    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    max_per_ip: usize,
+}
+
+pub(crate) struct IpConnGuard {
+    _global: OwnedSemaphorePermit,
+    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl Drop for IpConnGuard {
+    fn drop(&mut self) {
+        let mut guard = self
+            .per_ip
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = guard.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                guard.remove(&self.ip);
+            }
+        }
+    }
+}
+
+impl IpConnLimiter {
+    pub(crate) fn new(max_global: usize, max_per_ip: usize) -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(max_global.max(1))),
+            per_ip: Arc::new(Mutex::new(HashMap::new())),
+            max_per_ip: max_per_ip.max(1),
+        }
+    }
+
+    pub(crate) fn try_acquire(&self, ip: IpAddr) -> Option<IpConnGuard> {
+        let global = Arc::clone(&self.global).try_acquire_owned().ok()?;
+        let mut guard = self
+            .per_ip
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = guard.entry(ip).or_insert(0);
+        if *entry >= self.max_per_ip {
+            if *entry == 0 {
+                guard.remove(&ip);
+            }
+            return None;
+        }
+        *entry += 1;
+        Some(IpConnGuard {
+            _global: global,
+            per_ip: Arc::clone(&self.per_ip),
+            ip,
+        })
+    }
+}
 
 pub struct RunningServer {
     pub dns_addr: SocketAddr,
@@ -351,8 +445,11 @@ async fn start_web_and_tls(
                 )?;
                 let tls_app = app.clone();
                 let tls_shutdown = shutdown_rx.clone();
-                let limited_https =
-                    tls::PermittedListener::new(https_listener, web_max_connections);
+                let limited_https = tls::PermittedListener::new(
+                    https_listener,
+                    web_max_connections,
+                    Arc::clone(pipeline),
+                );
                 let serve_task = tokio::spawn(async move {
                     if let Err(err) = axum::serve(
                         limited_https.tap_io(|_| {}),
@@ -370,7 +467,8 @@ async fn start_web_and_tls(
         };
 
     let web_shutdown = shutdown_rx.clone();
-    let limited_web = tls::PermittedListener::new(web_listener, web_max_connections);
+    let limited_web =
+        tls::PermittedListener::new(web_listener, web_max_connections, Arc::clone(pipeline));
     let web_task = tokio::spawn(async move {
         if let Err(err) = axum::serve(
             limited_web.tap_io(|_| {}),
@@ -600,6 +698,7 @@ async fn run_udp_server(
                     }
                 };
                 let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
+                    pipeline.record_udp_dropped();
                     tracing::warn!(peer = %peer, "UDP DNS query dropped: max inflight reached");
                     continue;
                 };
@@ -630,7 +729,8 @@ async fn run_tcp_server(
     idle_timeout: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let limiter = Arc::new(Semaphore::new(max_connections.max(1)));
+    let per_ip_limit = (max_connections / 2).max(8);
+    let limiter = IpConnLimiter::new(max_connections.max(1), per_ip_limit);
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
@@ -650,15 +750,17 @@ async fn run_tcp_server(
                     }
                 };
                 let _ = stream.set_nodelay(true);
-                let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
-                    tracing::warn!(peer = %peer, "TCP DNS connection rejected: max connections reached");
+                let Some(guard) = limiter.try_acquire(peer.ip()) else {
+                    pipeline.record_tcp_rejected();
+                    tracing::warn!(peer = %peer, "TCP DNS connection rejected: connection limit reached");
                     drop(stream);
                     continue;
                 };
                 let pipe = Arc::clone(&pipeline);
                 let conn_shutdown = shutdown_rx.clone();
                 tasks.spawn(async move {
-                    let _permit = permit;
+                    let _guard = guard;
+                    let _active = ActiveConnGuard::new_tcp(Arc::clone(&pipe));
                     if let Err(err) = handle_dns_stream_with_context(
                         stream,
                         peer,
@@ -680,7 +782,7 @@ async fn run_tcp_server(
 }
 
 pub(crate) async fn handle_dns_stream_with_context<S>(
-    mut stream: S,
+    stream: S,
     peer: SocketAddr,
     pipeline: Arc<DnsPipeline>,
     idle_timeout: Duration,
@@ -689,49 +791,235 @@ pub(crate) async fn handle_dns_stream_with_context<S>(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut len_buf = [0_u8; 2];
-    let mut query = Vec::with_capacity(512);
-    let mut write_buf = Vec::with_capacity(514);
-    loop {
-        let read_res = tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    break;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (resp_tx, mut resp_rx) = mpsc::channel::<Vec<u8>>(MAX_TCP_PIPELINE_INFLIGHT);
+    let (write_err_tx, mut write_err_rx) = watch::channel(false);
+
+    let reader_fut = async {
+        let mut len_buf = [0_u8; 2];
+        let mut inflight = JoinSet::new();
+        let inflight_sem = Arc::new(Semaphore::new(MAX_TCP_PIPELINE_INFLIGHT));
+        let conn_deadline = tokio::time::Instant::now() + MAX_TCP_CONN_LIFETIME;
+
+        loop {
+            let read_res = tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
+                _ = write_err_rx.changed() => {
+                    if *write_err_rx.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                () = tokio::time::sleep_until(conn_deadline) => break,
+                Some(_) = inflight.join_next(), if !inflight.is_empty() => continue,
+                res = tokio::time::timeout(idle_timeout, reader.read_exact(&mut len_buf)) => res,
+            };
+            let Ok(Ok(_)) = read_res else {
+                break;
+            };
+            let len = usize::from(u16::from_be_bytes(len_buf));
+            if len == 0 || len > 65_535 {
+                break;
             }
-            res = tokio::time::timeout(idle_timeout, stream.read_exact(&mut len_buf)) => res,
-        };
-        let Ok(Ok(_)) = read_res else {
-            break;
-        };
-        let len = usize::from(u16::from_be_bytes(len_buf));
-        if len == 0 || len > 65_535 {
-            break;
-        }
-        query.resize(len, 0);
-        tokio::time::timeout(idle_timeout, stream.read_exact(&mut query)).await??;
-        let resp = pipeline
-            .handle_packet_with_context(
-                &query,
-                QueryContext {
+            let mut query = vec![0_u8; len];
+            if !matches!(
+                tokio::time::timeout(idle_timeout, reader.read_exact(&mut query)).await,
+                Ok(Ok(_))
+            ) {
+                break;
+            }
+
+            let permit_res = tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                _ = write_err_rx.changed() => break,
+                res = tokio::time::timeout(idle_timeout, Arc::clone(&inflight_sem).acquire_owned()) => res,
+            };
+            let Ok(Ok(permit)) = permit_res else {
+                break;
+            };
+
+            let pipe = Arc::clone(&pipeline);
+            let tx = resp_tx.clone();
+            let cid = client_id.clone();
+            inflight.spawn(async move {
+                let _permit = permit;
+                let ctx = QueryContext {
                     client_addr: peer,
                     protocol,
-                    client_id: client_id.clone(),
-                },
-            )
-            .await?;
-        let resp_len = u16::try_from(resp.len())?;
-        write_buf.clear();
-        write_buf.extend_from_slice(&resp_len.to_be_bytes());
-        write_buf.extend_from_slice(&resp);
-        tokio::time::timeout(idle_timeout, async {
-            stream.write_all(&write_buf).await?;
-            stream.flush().await
-        })
-        .await??;
-    }
+                    client_id: cid,
+                };
+                let resp_opt = match pipe.handle_packet_with_context(&query, ctx).await {
+                    Ok(resp) => Some(resp),
+                    Err(_) => build_raw_formerr(&query),
+                };
+                if let Some(resp) = resp_opt {
+                    let _ = tx.send(resp).await;
+                }
+            });
+        }
+        drop(resp_tx);
+        drain_join_set(&mut inflight, GRACEFUL_DRAIN_TIMEOUT).await;
+    };
+
+    let writer_fut = async {
+        let mut write_buf = Vec::with_capacity(514);
+        while let Some(resp) = resp_rx.recv().await {
+            let Ok(resp_len) = u16::try_from(resp.len()) else {
+                continue;
+            };
+            write_buf.clear();
+            write_buf.extend_from_slice(&resp_len.to_be_bytes());
+            write_buf.extend_from_slice(&resp);
+            let write_res = tokio::time::timeout(idle_timeout, async {
+                writer.write_all(&write_buf).await?;
+                writer.flush().await
+            })
+            .await;
+            if !matches!(write_res, Ok(Ok(()))) {
+                let _ = write_err_tx.send(true);
+                break;
+            }
+        }
+    };
+
+    tokio::join!(reader_fut, writer_fut);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_ip_conn_limiter_enforces_per_ip_and_releases() {
+        let limiter = IpConnLimiter::new(8, 2);
+        let ip1 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+
+        let g1 = limiter.try_acquire(ip1).expect("1st ip1");
+        let g2 = limiter.try_acquire(ip1).expect("2nd ip1");
+        assert!(limiter.try_acquire(ip1).is_none(), "3rd ip1 must fail");
+        assert!(
+            limiter.try_acquire(ip2).is_some(),
+            "other IP must still be allowed"
+        );
+
+        drop(g1);
+        assert!(
+            limiter.try_acquire(ip1).is_some(),
+            "released slot must be reusable"
+        );
+        drop(g2);
+    }
+
+    #[tokio::test]
+    async fn test_tcp_pipelining_out_of_order_and_formerr_keeps_conn_alive() {
+        use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::{Name, RData, Record, RecordType};
+
+        let upstream_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind mock");
+        let upstream_addr = upstream_sock.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut buf = [0_u8; 2048];
+            while let Ok((len, peer)) = upstream_sock.recv_from(&mut buf).await {
+                if let Ok(req) = Message::from_vec(&buf[..len]) {
+                    let sock = &upstream_sock;
+                    let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+                    resp.metadata.recursion_available = true;
+                    resp.metadata.response_code = ResponseCode::NoError;
+                    resp.queries.clone_from(&req.queries);
+                    if let Some(q) = req.queries.first() {
+                        resp.add_answer(Record::from_rdata(
+                            q.name().clone(),
+                            60,
+                            RData::A(A(Ipv4Addr::new(93, 184, 216, 34))),
+                        ));
+                    }
+                    let wire = resp.to_vec().unwrap();
+                    // Delay slow queries by 200ms so pipelined local queries overtake them.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let _ = sock.send_to(&wire, peer).await;
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = spawn_server(Config {
+            listen_dns: "127.0.0.1:0".parse().unwrap(),
+            listen_web: "127.0.0.1:0".parse().unwrap(),
+            data_dir: dir.path().to_path_buf(),
+            upstreams: vec![format!("udp://{upstream_addr}")],
+            custom_rules: vec!["||blocked.pipe.test^".to_string()],
+            rdns_enabled: false,
+            ..Config::default()
+        })
+        .await
+        .expect("spawn server");
+
+        let mut stream = tokio::net::TcpStream::connect(server.dns_addr)
+            .await
+            .expect("connect tcp");
+
+        let build_q = |id: u16, domain: &str| {
+            let mut msg = Message::new(id, MessageType::Query, OpCode::Query);
+            msg.metadata.recursion_desired = true;
+            msg.add_query(Query::query(
+                Name::from_ascii(domain).unwrap(),
+                RecordType::A,
+            ));
+            msg.to_vec().unwrap()
+        };
+
+        // Frame 1: slow upstream query (ID 0x1001)
+        let q_slow = build_q(0x1001, "slow.pipe.test.");
+        // Frame 2: malformed DNS packet >= 12 bytes (ID 0x1002, QDCOUNT=5 with truncated body) -> FORMERR
+        let q_malformed = vec![
+            0x10, 0x02, 0x01, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+        ];
+        // Frame 3: locally blocked query (ID 0x1003) -> must overtake q_slow!
+        let q_fast = build_q(0x1003, "blocked.pipe.test.");
+
+        let mut pipelined = Vec::new();
+        for pkt in [&q_slow, &q_malformed, &q_fast] {
+            let len = u16::try_from(pkt.len()).unwrap();
+            pipelined.extend_from_slice(&len.to_be_bytes());
+            pipelined.extend_from_slice(pkt);
+        }
+        stream.write_all(&pipelined).await.expect("write pipelined");
+        stream.flush().await.expect("flush");
+
+        let mut ids = Vec::new();
+        let mut rcodes = Vec::new();
+        for _ in 0..3 {
+            let mut len_buf = [0_u8; 2];
+            tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut len_buf))
+                .await
+                .expect("read len timeout")
+                .expect("read len");
+            let rlen = usize::from(u16::from_be_bytes(len_buf));
+            let mut rbuf = vec![0_u8; rlen];
+            stream.read_exact(&mut rbuf).await.expect("read resp");
+            let msg = Message::from_vec(&rbuf).expect("decode resp");
+            ids.push(msg.id);
+            rcodes.push(msg.response_code);
+        }
+
+        // Fast/malformed responses arrived before slow upstream response (0x1001 is last).
+        assert_eq!(ids.last().copied(), Some(0x1001));
+        let formerr_idx = ids.iter().position(|&id| id == 0x1002).expect("formerr id");
+        assert_eq!(rcodes[formerr_idx], ResponseCode::FormErr);
+        assert!(ids.contains(&0x1003));
+
+        drop(stream);
+        server.shutdown().await;
+    }
 }

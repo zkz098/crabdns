@@ -3,8 +3,10 @@ use std::fmt::Write as _;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use crabdns_core::{CacheStats, FilterStats, PipelineRuntimeMetrics, UpstreamStatus};
-use crabdns_storage::StatsSnapshot;
+use crabdns_core::{
+    CacheStats, FilterStats, LatencyHistogramSnapshot, PipelineRuntimeMetrics, UpstreamStatus,
+};
+use crabdns_storage::{StatsSnapshot, StorageRuntimeMetrics};
 
 use crate::RouterState;
 
@@ -29,17 +31,22 @@ struct JemallocStats {
 pub async fn prometheus_metrics(State(state): State<RouterState>) -> Response {
     let query_stats = state.app.storage.stats_snapshot();
     let storage_entries = state.app.storage.tracked_stat_entries();
+    let storage_runtime = state.app.storage.runtime_metrics();
     let cache_stats = state.app.pipeline.cache().stats();
     let filter_stats = state.app.pipeline.filter().stats();
     let upstreams = state.app.pipeline.upstream().health_snapshot();
     let (paused, _) = state.app.pipeline.blocking_status();
     let runtime = state.app.pipeline.runtime_metrics();
+    let latency = state.app.pipeline.latency_snapshot();
     let auth_sessions = state.sessions.active_sessions();
     let auth_attempts = state.login_limiter.tracked_entries();
-    let proc_metrics = read_process_metrics();
+    let proc_metrics = tokio::task::spawn_blocking(read_process_metrics)
+        .await
+        .unwrap_or_default();
 
-    let mut out = String::with_capacity(2048);
+    let mut out = String::with_capacity(4096);
     write_query_metrics(&mut out, &query_stats);
+    write_query_latency_histogram(&mut out, &latency);
     write_cache_and_filter_metrics(&mut out, &cache_stats, &filter_stats, paused);
     write_upstream_metrics(&mut out, &upstreams);
     write_process_metrics(&mut out, &proc_metrics);
@@ -50,6 +57,7 @@ pub async fn prometheus_metrics(State(state): State<RouterState>) -> Response {
     write_runtime_metrics(
         &mut out,
         &runtime,
+        &storage_runtime,
         auth_sessions,
         auth_attempts,
         storage_entries,
@@ -196,14 +204,38 @@ fn write_process_metrics(out: &mut String, proc: &ProcessMetrics) {
     }
 }
 
+fn write_query_latency_histogram(out: &mut String, latency: &LatencyHistogramSnapshot) {
+    let _ = writeln!(
+        out,
+        "# HELP crabdns_query_duration_seconds End-to-end DNS query handling latency in seconds.\n\
+         # TYPE crabdns_query_duration_seconds histogram"
+    );
+    for (bound_secs, count) in &latency.buckets {
+        let _ = writeln!(
+            out,
+            "crabdns_query_duration_seconds_bucket{{le=\"{bound_secs}\"}} {count}"
+        );
+    }
+    let _ = writeln!(
+        out,
+        "crabdns_query_duration_seconds_bucket{{le=\"+Inf\"}} {}\n\
+         crabdns_query_duration_seconds_sum {:.6}\n\
+         crabdns_query_duration_seconds_count {}",
+        latency.inf_count, latency.sum_secs, latency.count
+    );
+}
+
 fn write_runtime_metrics(
     out: &mut String,
     pipeline: &PipelineRuntimeMetrics,
+    storage: &StorageRuntimeMetrics,
     auth_sessions: usize,
     auth_attempts: usize,
     storage_entries: (usize, usize, usize),
 ) {
     let (domains, blocked, clients) = storage_entries;
+    #[allow(clippy::cast_precision_loss)]
+    let flush_secs = storage.log_flush_total_us as f64 / 1_000_000.0;
     let _ = writeln!(
         out,
         "# HELP crabdns_log_channel_dropped_total Total query log events dropped due to full log channel.\n\
@@ -221,6 +253,43 @@ fn write_runtime_metrics(
          # HELP crabdns_acl_tracked_clients Tracked client IPs in ACL rate limiter.\n\
          # TYPE crabdns_acl_tracked_clients gauge\n\
          crabdns_acl_tracked_clients {}\n\
+         # HELP crabdns_udp_dropped_inflight_total UDP DNS queries dropped due to inflight limit.\n\
+         # TYPE crabdns_udp_dropped_inflight_total counter\n\
+         crabdns_udp_dropped_inflight_total {}\n\
+         # HELP crabdns_active_connections Active client connections by protocol.\n\
+         # TYPE crabdns_active_connections gauge\n\
+         crabdns_active_connections{{protocol=\"tcp\"}} {}\n\
+         crabdns_active_connections{{protocol=\"dot\"}} {}\n\
+         crabdns_active_connections{{protocol=\"web\"}} {}\n\
+         # HELP crabdns_rejected_connections_total Rejected client connections by protocol.\n\
+         # TYPE crabdns_rejected_connections_total counter\n\
+         crabdns_rejected_connections_total{{protocol=\"tcp\"}} {}\n\
+         crabdns_rejected_connections_total{{protocol=\"dot\"}} {}\n\
+         crabdns_rejected_connections_total{{protocol=\"web\"}} {}\n\
+         # HELP crabdns_doh_rejected_inflight_total DoH requests rejected due to inflight limit.\n\
+         # TYPE crabdns_doh_rejected_inflight_total counter\n\
+         crabdns_doh_rejected_inflight_total {}\n\
+         # HELP crabdns_doh_timed_out_total DoH requests that exceeded the query timeout.\n\
+         # TYPE crabdns_doh_timed_out_total counter\n\
+         crabdns_doh_timed_out_total {}\n\
+         # HELP crabdns_filter_reloads_total Total filter engine reloads.\n\
+         # TYPE crabdns_filter_reloads_total counter\n\
+         crabdns_filter_reloads_total {}\n\
+         # HELP crabdns_filter_last_reload_ms Duration of the latest filter engine reload in milliseconds.\n\
+         # TYPE crabdns_filter_last_reload_ms gauge\n\
+         crabdns_filter_last_reload_ms {}\n\
+         # HELP crabdns_storage_log_batches_total Total query log batches committed to storage.\n\
+         # TYPE crabdns_storage_log_batches_total counter\n\
+         crabdns_storage_log_batches_total {}\n\
+         # HELP crabdns_storage_log_batch_failures_total Total failed query log batch flushes.\n\
+         # TYPE crabdns_storage_log_batch_failures_total counter\n\
+         crabdns_storage_log_batch_failures_total {}\n\
+         # HELP crabdns_storage_log_flush_duration_seconds_total Cumulative time spent flushing log batches.\n\
+         # TYPE crabdns_storage_log_flush_duration_seconds_total counter\n\
+         crabdns_storage_log_flush_duration_seconds_total {flush_secs:.6}\n\
+         # HELP crabdns_storage_logs_pruned_total Total query log entries pruned.\n\
+         # TYPE crabdns_storage_logs_pruned_total counter\n\
+         crabdns_storage_logs_pruned_total {}\n\
          # HELP crabdns_auth_sessions Active web authentication sessions.\n\
          # TYPE crabdns_auth_sessions gauge\n\
          crabdns_auth_sessions {auth_sessions}\n\
@@ -237,6 +306,20 @@ fn write_runtime_metrics(
         pipeline.rdns_inflight,
         pipeline.bg_refresh_inflight,
         pipeline.acl_tracked_clients,
+        pipeline.udp_dropped_inflight,
+        pipeline.tcp_active_connections,
+        pipeline.dot_active_connections,
+        pipeline.web_active_connections,
+        pipeline.tcp_rejected_connections,
+        pipeline.dot_rejected_connections,
+        pipeline.web_rejected_connections,
+        pipeline.doh_rejected_inflight,
+        pipeline.doh_timed_out,
+        pipeline.filter_reloads,
+        pipeline.filter_last_reload_ms,
+        storage.log_batches_written,
+        storage.log_batch_failures,
+        storage.log_pruned_total,
     );
 }
 

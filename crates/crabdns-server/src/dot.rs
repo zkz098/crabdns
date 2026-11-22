@@ -5,11 +5,14 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use crabdns_core::{Config, DnsPipeline, QueryProtocol, validate_client_id};
 use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
-use crate::{GRACEFUL_DRAIN_TIMEOUT, drain_join_set, handle_dns_stream_with_context};
+use crate::{
+    ActiveConnGuard, GRACEFUL_DRAIN_TIMEOUT, IpConnLimiter, drain_join_set,
+    handle_dns_stream_with_context,
+};
 
 fn extract_dot_client_id(sni: Option<&str>, base_hostname: Option<&str>) -> Option<String> {
     let sni = sni?.trim().trim_end_matches('.');
@@ -36,7 +39,8 @@ pub async fn run_dot_server(
     idle_timeout: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let limiter = Arc::new(Semaphore::new(max_connections.max(1)));
+    let per_ip_limit = (max_connections / 2).max(8);
+    let limiter = IpConnLimiter::new(max_connections.max(1), per_ip_limit);
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
@@ -56,8 +60,9 @@ pub async fn run_dot_server(
                     }
                 };
                 let _ = stream.set_nodelay(true);
-                let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
-                    tracing::warn!(peer = %peer, "DoT connection rejected: max connections reached");
+                let Some(guard) = limiter.try_acquire(peer.ip()) else {
+                    pipeline.record_dot_rejected();
+                    tracing::warn!(peer = %peer, "DoT connection rejected: connection limit reached");
                     drop(stream);
                     continue;
                 };
@@ -66,7 +71,8 @@ pub async fn run_dot_server(
                 let pipe = Arc::clone(&pipeline);
                 let conn_shutdown = shutdown_rx.clone();
                 tasks.spawn(async move {
-                    let _permit = permit;
+                    let _guard = guard;
+                    let _active = ActiveConnGuard::new_dot(Arc::clone(&pipe));
                     match tokio::time::timeout(idle_timeout, tls.accept(stream)).await {
                         Ok(Ok(tls_stream)) => {
                             let sni = tls_stream.get_ref().1.server_name().map(str::to_string);

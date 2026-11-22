@@ -28,6 +28,21 @@ pub(crate) fn build_error_response(request: &Message, rcode: ResponseCode) -> Re
         .map_err(|e| CoreError::Protocol(e.to_string()))
 }
 
+/// Builds a minimal 12-byte `FORMERR` response directly from raw header bytes when full DNS parsing fails.
+pub fn build_raw_formerr(raw_query: &[u8]) -> Option<Vec<u8>> {
+    if raw_query.len() < 12 {
+        return None;
+    }
+    let mut out = vec![0_u8; 12];
+    out[0] = raw_query[0];
+    out[1] = raw_query[1];
+    // QR=1, preserve OPCODE (bits 6..3) and RD (bit 0).
+    out[2] = 0x80 | (raw_query[2] & 0x79);
+    // RA=1, RCODE=1 (FORMERR).
+    out[3] = 0x81;
+    Some(out)
+}
+
 pub(crate) fn build_blocked_response(
     request: &Message,
     qtype: RecordType,

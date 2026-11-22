@@ -89,7 +89,8 @@ pub fn spawn_subscription_refresh_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let client = crabdns_web::subscriptions::build_http_client();
+        let client_public = crabdns_web::subscriptions::build_subscription_http_client(false);
+        let client_private = crabdns_web::subscriptions::build_subscription_http_client(true);
         let mut interval = delay_interval(Duration::from_hours(24));
         interval.tick().await;
         loop {
@@ -101,9 +102,14 @@ pub fn spawn_subscription_refresh_task(
                 }
                 _ = interval.tick() => {
                     let allow_private = config.load().allow_private_subscriptions;
+                    let client = if allow_private {
+                        &client_private
+                    } else {
+                        &client_public
+                    };
                     if let Err(err) =
                         crabdns_web::subscriptions::refresh_enabled_subscriptions_job_with_policy(
-                            &client,
+                            client,
                             &storage,
                             &pipeline,
                             allow_private,

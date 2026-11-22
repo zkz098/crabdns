@@ -10,6 +10,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use axum::serve::Listener;
 use chrono::Utc;
+use crabdns_core::DnsPipeline;
 use crabdns_web::tls_api::{TlsReloader, TlsStatusResponse};
 use ring::digest::{SHA256, digest};
 use rustls::ServerConfig;
@@ -17,10 +18,12 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
+
+use crate::{IpConnGuard, IpConnLimiter};
 
 const HTTPS_MAX_HANDSHAKES: usize = 256;
 const HTTPS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -377,10 +380,17 @@ impl Listener for HttpsTlsListener {
     }
 }
 
-/// Stream wrapper holding an active-connection semaphore permit until the connection closes.
+/// Stream wrapper holding an active-connection guard and tracking web active connection count.
 pub struct PermittedStream<S> {
     inner: S,
-    _permit: OwnedSemaphorePermit,
+    _guard: IpConnGuard,
+    pipeline: Arc<DnsPipeline>,
+}
+
+impl<S> Drop for PermittedStream<S> {
+    fn drop(&mut self) {
+        self.pipeline.dec_web_active();
+    }
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for PermittedStream<S> {
@@ -423,42 +433,47 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PermittedStream<S> {
     }
 }
 
-/// Listener wrapper that caps concurrent accepted HTTP/HTTPS connections via a bounded semaphore.
+/// Listener wrapper that caps global and per-IP concurrent HTTP/HTTPS connections.
 pub struct PermittedListener<L> {
     inner: L,
-    limiter: Arc<Semaphore>,
+    limiter: IpConnLimiter,
+    pipeline: Arc<DnsPipeline>,
 }
 
 impl<L> PermittedListener<L> {
-    pub fn new(inner: L, max_connections: usize) -> Self {
+    pub fn new(inner: L, max_connections: usize, pipeline: Arc<DnsPipeline>) -> Self {
+        let per_ip = (max_connections / 2).max(16);
         Self {
             inner,
-            limiter: Arc::new(Semaphore::new(max_connections.max(1))),
+            limiter: IpConnLimiter::new(max_connections.max(1), per_ip),
+            pipeline,
         }
     }
 }
 
 impl<L> Listener for PermittedListener<L>
 where
-    L: Listener,
-    L::Addr: std::fmt::Display,
+    L: Listener<Addr = SocketAddr>,
 {
     type Io = PermittedStream<L::Io>;
-    type Addr = L::Addr;
+    type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
             let (io, addr) = self.inner.accept().await;
-            if let Ok(permit) = Arc::clone(&self.limiter).try_acquire_owned() {
+            if let Some(guard) = self.limiter.try_acquire(addr.ip()) {
+                self.pipeline.inc_web_active();
                 return (
                     PermittedStream {
                         inner: io,
-                        _permit: permit,
+                        _guard: guard,
+                        pipeline: Arc::clone(&self.pipeline),
                     },
                     addr,
                 );
             }
-            tracing::warn!(peer = %addr, "web connection rejected: max active connections reached");
+            self.pipeline.record_web_rejected();
+            tracing::warn!(peer = %addr, "web connection rejected: connection limit reached");
             drop(io);
         }
     }

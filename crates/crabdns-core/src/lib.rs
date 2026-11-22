@@ -31,8 +31,10 @@ pub use error::{CoreError, Result};
 pub use filter::{FilterAction, FilterDecision, FilterEngine, FilterStats, RewriteAction};
 pub use lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter};
 pub use pipeline::{
-    DnsPipeline, PipelineRuntimeMetrics, QueryContext, QueryEvent, QueryOutcome, QueryProtocol,
+    DnsPipeline, LatencyHistogramSnapshot, PipelineRuntimeMetrics, QueryContext, QueryEvent,
+    QueryOutcome, QueryProtocol,
 };
 pub use split_dns::SplitUpstreamRouter;
 pub use upstream::{UpstreamPool, UpstreamStatus};
 pub use upstream_probe::{UpstreamCapabilities, UpstreamProtocol, probe_upstreams};
+pub use wire::build_raw_formerr;

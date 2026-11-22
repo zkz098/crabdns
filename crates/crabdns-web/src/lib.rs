@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use axum::extract::{DefaultBodyLimit, Query, Request, State};
-use axum::http::{StatusCode, Uri, header};
+use axum::http::{Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
@@ -16,7 +16,7 @@ use crabdns_storage::{StatsSnapshot, StorageEngine};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use ts_rs::TS;
 
 pub mod auth;
@@ -49,9 +49,20 @@ const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 pub struct RouterState {
     pub app: AppState,
     pub http_client: reqwest::Client,
+    pub http_client_private: reqwest::Client,
     pub sessions: Arc<auth::SessionStore>,
     pub login_limiter: Arc<auth::LoginRateLimiter>,
     pub doh_limiter: Arc<Semaphore>,
+}
+
+impl RouterState {
+    pub fn subscription_client(&self, allow_private: bool) -> &reqwest::Client {
+        if allow_private {
+            &self.http_client_private
+        } else {
+            &self.http_client
+        }
+    }
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -110,7 +121,8 @@ pub use config_api::{ConfigResponse, ConfigUpdatePayload};
 pub fn build_router(state: AppState) -> Router {
     let router_state = RouterState {
         app: state,
-        http_client: subscriptions::build_http_client(),
+        http_client: subscriptions::build_subscription_http_client(false),
+        http_client_private: subscriptions::build_subscription_http_client(true),
         sessions: Arc::new(auth::SessionStore::default()),
         login_limiter: Arc::new(auth::LoginRateLimiter::default()),
         doh_limiter: Arc::new(Semaphore::new(DOH_MAX_INFLIGHT)),
@@ -177,13 +189,19 @@ pub fn build_router(state: AppState) -> Router {
         auth::require_auth,
     ));
 
+    let doh_cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT]);
+
     let doh_routes = Router::new()
         .route("/dns-query", get(doh::doh_get).post(doh::doh_post))
         .route(
             "/dns-query/{client_id}",
             get(doh::doh_get_client).post(doh::doh_post_client),
         )
-        .layer(DefaultBodyLimit::max(doh::MAX_DOH_PACKET_BYTES));
+        .layer(DefaultBodyLimit::max(doh::MAX_DOH_PACKET_BYTES))
+        .layer(doh_cors);
 
     Router::new()
         .route("/api/health", get(health))
@@ -195,7 +213,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(protected_api)
         .fallback(serve_spa)
         .layer(middleware::from_fn(request_timeout_middleware))
-        .layer(CorsLayer::permissive())
         .with_state(router_state)
 }
 
@@ -838,5 +855,94 @@ mod tests {
             vec!["udp://1.1.1.1:53".to_string()]
         );
         assert!(storage.load_config().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cors_tightened_and_metrics_histogram_exported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+        let config = Arc::new(ArcSwap::from_pointee(Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        }));
+        let filter = Arc::new(FilterEngine::new(&["||blocked.test^".to_string()]));
+        let cache = Arc::new(DnsCache::new(64, false));
+        let upstream =
+            Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
+        let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+        let (live_tx, _) = broadcast::channel(16);
+
+        let app = build_router(AppState {
+            config,
+            pipeline: Arc::clone(&pipeline),
+            storage,
+            live_tx,
+            tls_reloader: None,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // /api/* must NOT emit permissive Access-Control-Allow-Origin for untrusted Origin.
+        let api_res = client
+            .get(format!("{base}/api/health"))
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(api_res.status(), StatusCode::OK);
+        assert!(
+            api_res
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "API routes must not allow arbitrary cross-origin access"
+        );
+
+        // /dns-query keeps DoH CORS headers.
+        let doh_opt = client
+            .request(reqwest::Method::OPTIONS, format!("{base}/dns-query"))
+            .header("origin", "https://dns.example")
+            .header("access-control-request-method", "POST")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            doh_opt
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+
+        // /metrics includes histogram and saturation counters.
+        let metrics_text = client
+            .get(format!("{base}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        for expected in [
+            "crabdns_query_duration_seconds_bucket{le=\"+Inf\"}",
+            "crabdns_query_duration_seconds_count",
+            "crabdns_udp_dropped_inflight_total",
+            "crabdns_active_connections{protocol=\"tcp\"}",
+            "crabdns_rejected_connections_total{protocol=\"dot\"}",
+            "crabdns_doh_rejected_inflight_total",
+            "crabdns_storage_log_batches_total",
+            "crabdns_filter_reloads_total",
+        ] {
+            assert!(
+                metrics_text.contains(expected),
+                "missing metric '{expected}' in /metrics output"
+            );
+        }
     }
 }

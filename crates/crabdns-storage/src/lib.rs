@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crabdns_core::{
     ClientGroup, ClientProfile, Config, PersistedCacheEntry, QueryEvent, QueryOutcome,
@@ -150,6 +150,14 @@ impl BoundedCountMap {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageRuntimeMetrics {
+    pub log_batches_written: u64,
+    pub log_batch_failures: u64,
+    pub log_flush_total_us: u64,
+    pub log_pruned_total: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PersistedCounters {
     total: u64,
@@ -177,6 +185,10 @@ pub struct StorageEngine {
     sub_lock: Mutex<()>,
     client_lock: Mutex<()>,
     config_lock: Mutex<()>,
+    log_batches_written: AtomicU64,
+    log_batch_failures: AtomicU64,
+    log_flush_total_us: AtomicU64,
+    log_pruned_total: AtomicU64,
 }
 
 impl StorageEngine {
@@ -223,7 +235,20 @@ impl StorageEngine {
             sub_lock: Mutex::new(()),
             client_lock: Mutex::new(()),
             config_lock: Mutex::new(()),
+            log_batches_written: AtomicU64::new(0),
+            log_batch_failures: AtomicU64::new(0),
+            log_flush_total_us: AtomicU64::new(0),
+            log_pruned_total: AtomicU64::new(0),
         })
+    }
+
+    pub fn runtime_metrics(&self) -> StorageRuntimeMetrics {
+        StorageRuntimeMetrics {
+            log_batches_written: self.log_batches_written.load(Ordering::Relaxed),
+            log_batch_failures: self.log_batch_failures.load(Ordering::Relaxed),
+            log_flush_total_us: self.log_flush_total_us.load(Ordering::Relaxed),
+            log_pruned_total: self.log_pruned_total.load(Ordering::Relaxed),
+        }
     }
 
     pub fn subscription_lock(&self) -> &Mutex<()> {
@@ -517,6 +542,12 @@ impl StorageEngine {
                 break;
             }
         }
+        if removed > 0 {
+            self.log_pruned_total.fetch_add(
+                u64::try_from(removed).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
         Ok(removed)
     }
 
@@ -547,6 +578,12 @@ impl StorageEngine {
             if chunk_len < PRUNE_CHUNK {
                 break;
             }
+        }
+        if removed > 0 {
+            self.log_pruned_total.fetch_add(
+                u64::try_from(removed).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
         }
         Ok(removed)
     }
@@ -692,12 +729,22 @@ async fn flush_buffer(storage: &Arc<StorageEngine>, buffer: &mut Vec<QueryEvent>
     }
     let batch = std::mem::replace(buffer, Vec::with_capacity(256));
     let st = Arc::clone(storage);
-    match tokio::task::spawn_blocking(move || st.record_batch(&batch)).await {
-        Ok(Ok(())) => {}
+    let start = Instant::now();
+    let res = tokio::task::spawn_blocking(move || st.record_batch(&batch)).await;
+    let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    storage
+        .log_flush_total_us
+        .fetch_add(elapsed_us, Ordering::Relaxed);
+    match res {
+        Ok(Ok(())) => {
+            storage.log_batches_written.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(Err(err)) => {
+            storage.log_batch_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(error = %err, "failed to flush query logs to fjall");
         }
         Err(err) => {
+            storage.log_batch_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(error = %err, "query log flush task panicked");
         }
     }

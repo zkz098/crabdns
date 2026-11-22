@@ -1,6 +1,6 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -47,12 +47,69 @@ fn err_response(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json
     (status, Json(ApiError { error: msg.into() }))
 }
 
-pub fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+const MAX_SUBSCRIPTION_REDIRECTS: usize = 5;
+
+#[derive(Debug)]
+struct SsrfSafeResolver;
+
+async fn resolve_public_addrs(host: &str) -> std::io::Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, 0)).await?.collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no IP addresses resolved for '{host}'"),
+        ));
+    }
+    for addr in &addrs {
+        if is_private_or_reserved_ip(addr.ip()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Subscription host '{host}' resolved to private IP {}",
+                    addr.ip()
+                ),
+            ));
+        }
+    }
+    Ok(addrs)
+}
+
+impl reqwest::dns::Resolve for SsrfSafeResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs = resolve_public_addrs(&host)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            let iter: reqwest::dns::Addrs = Box::new(addrs.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
+pub fn build_subscription_http_client(allow_private: bool) -> reqwest::Client {
+    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= MAX_SUBSCRIPTION_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        match validate_subscription_url_with_policy(attempt.url().as_str(), allow_private) {
+            Ok(_) => attempt.follow(),
+            Err(err) => attempt.error(err),
+        }
+    });
+
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent("crabdns/0.1")
-        .build()
-        .unwrap_or_default()
+        .redirect(redirect_policy);
+    if !allow_private {
+        builder = builder.dns_resolver(Arc::new(SsrfSafeResolver));
+    }
+    builder.build().unwrap_or_default()
+}
+
+pub fn build_http_client() -> reqwest::Client {
+    build_subscription_http_client(false)
 }
 
 pub fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
@@ -206,6 +263,7 @@ pub fn rebuild_filter_engine(
     storage: &StorageEngine,
     pipeline: &DnsPipeline,
 ) -> Result<(), String> {
+    let start = Instant::now();
     let custom_rules = storage
         .load_custom_rules()
         .map_err(|e| e.to_string())?
@@ -220,6 +278,8 @@ pub fn rebuild_filter_engine(
     pipeline
         .filter()
         .reload_from_named_sources(&custom_rules, custom_enabled, &sub_contents);
+    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    pipeline.record_filter_reload(elapsed_ms);
     Ok(())
 }
 
@@ -372,13 +432,8 @@ pub async fn create_subscription(
     };
 
     if sub.enabled {
-        fetch_and_store_subscription(
-            &state.http_client,
-            &state.app.storage,
-            &mut sub,
-            allow_private,
-        )
-        .await;
+        let client = state.subscription_client(allow_private);
+        fetch_and_store_subscription(client, &state.app.storage, &mut sub, allow_private).await;
     }
 
     let _guard = state.app.storage.subscription_lock().lock().await;
@@ -457,13 +512,9 @@ pub async fn update_subscription(
     };
 
     if should_fetch {
-        fetch_and_store_subscription(
-            &state.http_client,
-            &state.app.storage,
-            &mut updated_sub,
-            allow_private,
-        )
-        .await;
+        let client = state.subscription_client(allow_private);
+        fetch_and_store_subscription(client, &state.app.storage, &mut updated_sub, allow_private)
+            .await;
     }
 
     let _guard = state.app.storage.subscription_lock().lock().await;
@@ -534,13 +585,8 @@ pub async fn refresh_subscription(
     };
 
     let allow_private = state.app.config.load().allow_private_subscriptions;
-    fetch_and_store_subscription(
-        &state.http_client,
-        &state.app.storage,
-        &mut target,
-        allow_private,
-    )
-    .await;
+    let client = state.subscription_client(allow_private);
+    fetch_and_store_subscription(client, &state.app.storage, &mut target, allow_private).await;
 
     let _guard = state.app.storage.subscription_lock().lock().await;
     let mut subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
@@ -568,8 +614,9 @@ pub async fn refresh_all_subscriptions(
     State(state): State<RouterState>,
 ) -> ApiResult<Json<Vec<FilterSubscription>>> {
     let allow_private = state.app.config.load().allow_private_subscriptions;
+    let client = state.subscription_client(allow_private);
     let subs = refresh_enabled_subscriptions_job_with_policy(
-        &state.http_client,
+        client,
         &state.app.storage,
         &state.app.pipeline,
         allow_private,
@@ -633,5 +680,35 @@ mod tests {
             .expect_err("chunked stream over 4096 bytes should fail");
         let _ = done_tx.send(());
         assert!(err.contains("exceeds"), "unexpected err: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_ssrf_resolver_and_redirect_limit() {
+        // SsrfSafeResolver rejects loopback/private resolution directly.
+        let err = resolve_public_addrs("localhost")
+            .await
+            .expect_err("localhost must be blocked by SsrfSafeResolver");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // Redirect loop exceeds MAX_SUBSCRIPTION_REDIRECTS (5) and aborts cleanly.
+        let app = axum::Router::new().route(
+            "/loop",
+            axum::routing::get(|| async { axum::response::Redirect::temporary("/loop") }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = build_subscription_http_client(true);
+        let fetch_err =
+            fetch_subscription_text_with_policy(&client, &format!("http://{addr}/loop"), true)
+                .await
+                .expect_err("redirect loop must fail");
+        assert!(
+            fetch_err.contains("Request failed"),
+            "unexpected redirect error: {fetch_err}"
+        );
     }
 }

@@ -122,6 +122,7 @@ async fn handle_doh_packet(
         return (StatusCode::BAD_REQUEST, "invalid DNS message size").into_response();
     }
     let Ok(_permit) = Arc::clone(&state.doh_limiter).try_acquire_owned() else {
+        state.app.pipeline.record_doh_rejected();
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "DoH inflight capacity reached",
@@ -149,7 +150,10 @@ async fn handle_doh_packet(
         )
             .into_response(),
         Ok(Err(err)) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
-        Err(_) => (StatusCode::GATEWAY_TIMEOUT, "DNS query timed out").into_response(),
+        Err(_) => {
+            state.app.pipeline.record_doh_timeout();
+            (StatusCode::GATEWAY_TIMEOUT, "DNS query timed out").into_response()
+        }
     }
 }
 
