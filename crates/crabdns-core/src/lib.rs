@@ -3,9 +3,11 @@ pub mod cache;
 pub mod clients;
 mod clock;
 pub mod config;
+pub mod cookies;
 pub mod device_names;
 pub mod dns64;
 pub mod dnssec;
+mod dnssec_nsec;
 pub mod edns;
 pub mod error;
 pub mod filter;
@@ -16,6 +18,7 @@ mod pipeline_cache;
 mod pipeline_exec;
 mod pipeline_post;
 mod pipeline_types;
+pub mod rrl;
 pub mod safesearch;
 pub mod security;
 pub mod singleflight;
@@ -34,13 +37,14 @@ pub use clients::{
     ResolvedClientPolicy, ip_to_ptr_domain, validate_client_id, validate_client_identifier,
 };
 pub use config::{BlockMode, Config, SplitDnsRule, UpstreamStrategy};
+pub use cookies::{CookieCheck, DnsCookieEngine};
 pub use device_names::{
     DEFAULT_DHCP_LEASES_PATH, DhcpLeaseTable, MdnsNameResolver, OPENWRT_DHCP_LEASES_PATH,
     default_dhcp_leases_path, resolve_dhcp_leases_path,
 };
 pub use dns64::{DEFAULT_DNS64_PREFIX, Dns64Config, Dns64Prefix};
 pub use dnssec::{DnssecValidator, ValidationOutcome};
-pub use edns::EcsConfig;
+pub use edns::{DEFAULT_MAX_UDP_PAYLOAD, EcsConfig};
 pub use error::{CoreError, Result};
 pub use filter::{FilterAction, FilterDecision, FilterEngine, FilterStats};
 pub use filter_rules::{
@@ -51,6 +55,7 @@ pub use pipeline::{
     DnsPipeline, LatencyHistogramSnapshot, PipelineRuntimeMetrics, QueryContext, QueryEvent,
     QueryOutcome, QueryProtocol,
 };
+pub use rrl::{ResponseRateLimiter, RrlCategory, RrlConfig, RrlDecision};
 pub use safesearch::SafeSearchConfig;
 pub use split_dns::SplitUpstreamRouter;
 pub use svcb::SvcbSanitizeOptions;

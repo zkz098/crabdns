@@ -4,15 +4,26 @@ use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::RecordType;
 
 use crate::clients::ResolvedClientPolicy;
+use crate::cookies::CookieCheck;
 use crate::dns64::{build_dns64_response, needs_dns64_synthesis};
+use crate::edns::{
+    EDE_PROHIBITED, attach_ede_to_wire, effective_udp_payload_limit, truncate_dns_response,
+};
 use crate::error::Result;
+use crate::filter::FilterDecision;
 use crate::filter_rules::RewriteAction;
-use crate::pipeline::{DnsPipeline, QueryOutcome};
+use crate::pipeline::{DnsPipeline, QueryContext, QueryOutcome, QueryProtocol};
+use crate::pipeline_exec::PolicyFlags;
 use crate::pipeline_types::LogMeta;
+use crate::rrl::{RrlDecision, classify_response_category};
 use crate::safesearch::match_safesearch;
+use crate::security::contains_rebinding_ip_msg;
 use crate::svcb::sanitize_svcb_bytes;
 use crate::upstream::UpstreamPool;
-use crate::wire::{build_rewrite_response, extract_answer_summaries, extract_answer_summaries_msg};
+use crate::wire::{
+    build_blocked_response, build_rewrite_response, extract_answer_summaries,
+    extract_answer_summaries_msg,
+};
 
 impl DnsPipeline {
     pub(crate) fn check_safesearch_interceptor(
@@ -187,5 +198,129 @@ impl DnsPipeline {
             answers,
         );
         Ok(resp_bytes)
+    }
+
+    pub(crate) fn maybe_attach_ede(
+        &self,
+        request: &Message,
+        resp_bytes: Vec<u8>,
+        info_code: u16,
+        extra_text: Option<&str>,
+    ) -> Vec<u8> {
+        if !self.ede_enabled.load(Ordering::Relaxed) {
+            return resp_bytes;
+        }
+        attach_ede_to_wire(request, resp_bytes, info_code, extra_text)
+    }
+
+    pub(crate) fn finalize_protocol_response(
+        &self,
+        request: &Message,
+        ctx: &QueryContext,
+        meta: &LogMeta,
+        cookie_check: CookieCheck,
+        mut resp_bytes: Vec<u8>,
+    ) -> Vec<u8> {
+        match cookie_check {
+            CookieCheck::Valid { client_cookie }
+            | CookieCheck::NeedsServerCookie { client_cookie } => {
+                resp_bytes = self.dns_cookies.attach_cookie_to_wire(
+                    resp_bytes,
+                    client_cookie,
+                    ctx.client_addr.ip(),
+                );
+            }
+            CookieCheck::None | CookieCheck::Malformed => {}
+        }
+
+        if ctx.protocol == QueryProtocol::Udp {
+            let category = classify_response_category(&resp_bytes);
+            let mut force_tc = false;
+            match self.rrl.check(ctx.client_addr.ip(), &meta.domain, category) {
+                RrlDecision::Drop => return Vec::new(),
+                RrlDecision::Slip => force_tc = true,
+                RrlDecision::Allow => {}
+            }
+            let max_udp = effective_udp_payload_limit(
+                request,
+                self.max_udp_payload_size.load(Ordering::Relaxed),
+            );
+            resp_bytes = truncate_dns_response(request, resp_bytes, max_udp, force_tc);
+        }
+
+        resp_bytes
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn finalize_upstream_response(
+        &self,
+        request: &Message,
+        meta: &LogMeta,
+        policy: Option<&ResolvedClientPolicy>,
+        upstream: &UpstreamPool,
+        is_local_route: bool,
+        decision: &FilterDecision,
+        flags: PolicyFlags,
+        resp_bytes: Vec<u8>,
+        upstream_label: String,
+        parsed_msg: Option<Message>,
+    ) -> Result<Vec<u8>> {
+        if !flags.blocking_disabled
+            && !flags.explicitly_allowed
+            && !is_local_route
+            && self.dns_rebinding_protection.load(Ordering::Relaxed)
+            && parsed_msg.as_ref().is_some_and(contains_rebinding_ip_msg)
+        {
+            let (blocked_bytes, rcode) =
+                build_blocked_response(request, meta.qtype, flags.block_mode)?;
+            let blocked_bytes = self.maybe_attach_ede(
+                request,
+                blocked_bytes,
+                EDE_PROHIBITED,
+                Some("DNS rebinding protection"),
+            );
+            self.emit_log(
+                meta,
+                QueryOutcome::Blocked,
+                Some("security:dns-rebinding".to_string()),
+                Some("security".to_string()),
+                Some(upstream_label),
+                rcode,
+                extract_answer_summaries(&blocked_bytes),
+            );
+            return Ok(blocked_bytes);
+        }
+
+        if !flags.blocking_disabled
+            && !flags.explicitly_allowed
+            && flags.cname_cloaking_on
+            && let Some(ref msg) = parsed_msg
+            && let Some(blk) =
+                self.check_cname_cloaking_msg(policy, meta, request, msg, flags.block_mode)?
+        {
+            self.emit_log(
+                meta,
+                QueryOutcome::Blocked,
+                Some(blk.rule),
+                blk.list,
+                Some(upstream_label),
+                blk.rcode,
+                extract_answer_summaries(&blk.bytes),
+            );
+            return Ok(blk.bytes);
+        }
+
+        self.post_process_and_log(
+            request,
+            meta,
+            upstream,
+            resp_bytes,
+            parsed_msg,
+            QueryOutcome::Forwarded,
+            decision.matched_rule.clone(),
+            decision.matched_list.clone(),
+            upstream_label,
+        )
+        .await
     }
 }

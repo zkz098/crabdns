@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 arc-swap.workspace = true
+aws-lc-rs.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
@@ -20,6 +21,7 @@ foldhash.workspace = true
 futures-util.workspace = true
 hickory-proto.workspace = true
 moka.workspace = true
+quinn.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rustls.workspace = true

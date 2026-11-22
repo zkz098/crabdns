@@ -43,7 +43,7 @@ fn is_openwrt_with_dhcp_leases(
         && openwrt_leases_path.is_file()
 }
 
-/// Returns the default DHCP leases path, preferring `/tmp/dhcp.leases` on OpenWrt when present.
+/// Returns the default DHCP leases path, preferring `/tmp/dhcp.leases` on `OpenWrt` when present.
 pub fn default_dhcp_leases_path() -> &'static str {
     if is_openwrt_with_dhcp_leases(
         Path::new("/etc/openwrt_release"),

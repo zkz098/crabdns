@@ -200,12 +200,29 @@ impl DnssecValidator {
         let Some(q) = msg.queries.first() else {
             return ValidationOutcome::Insecure;
         };
-        let qname = normalize_zone(&q.name().to_ascii());
-        match self.resolve_zone_keys(&qname, upstream, now_secs).await {
-            // If the zone is provably signed (has DS/DNSKEY chain) yet returned no RRSIGs
-            // for an answer, treat as Bogus.
-            Ok(Some(_)) if !msg.answers.is_empty() => ValidationOutcome::Bogus,
-            Ok(_) => ValidationOutcome::Insecure,
+        let target_zone = find_negative_zone_candidate(q.name(), &msg.authorities);
+        match self
+            .resolve_zone_keys(&target_zone, upstream, now_secs)
+            .await
+        {
+            Ok(Some(keys)) => {
+                if !msg.answers.is_empty() {
+                    return ValidationOutcome::Bogus;
+                }
+                match crate::dnssec_nsec::validate_negative_response(
+                    msg,
+                    q.name(),
+                    q.query_type(),
+                    &keys,
+                    now_secs,
+                    verify_rrset_with_keys,
+                ) {
+                    crate::dnssec_nsec::NegativeOutcome::Secure => ValidationOutcome::Secure,
+                    crate::dnssec_nsec::NegativeOutcome::Insecure => ValidationOutcome::Insecure,
+                    crate::dnssec_nsec::NegativeOutcome::Bogus => ValidationOutcome::Bogus,
+                }
+            }
+            Ok(None) => ValidationOutcome::Insecure,
             Err(_) => ValidationOutcome::Bogus,
         }
     }
@@ -480,7 +497,26 @@ async fn query_upstream_dnssec(
     Ok(resp)
 }
 
-fn extract_rrsigs(records: &[Record]) -> Vec<(&Record, &RRSIG)> {
+fn find_negative_zone_candidate(qname: &Name, authorities: &[Record]) -> String {
+    for (_, sig) in extract_rrsigs(authorities) {
+        let signer = sig.input().signer_name.clone();
+        if signer.zone_of(qname) {
+            return normalize_zone(&signer.to_ascii());
+        }
+    }
+    for rec in authorities {
+        if rec.record_type() == RecordType::SOA && rec.name.zone_of(qname) {
+            return normalize_zone(&rec.name.to_ascii());
+        }
+    }
+    if !qname.is_root() {
+        let parent = qname.base_name();
+        return normalize_zone(&parent.to_ascii());
+    }
+    normalize_zone(&qname.to_ascii())
+}
+
+pub(crate) fn extract_rrsigs(records: &[Record]) -> Vec<(&Record, &RRSIG)> {
     records
         .iter()
         .filter_map(|r| match &r.data {
@@ -534,7 +570,7 @@ fn verify_any_rrsig(
     false
 }
 
-fn verify_rrset_with_keys(
+pub(crate) fn verify_rrset_with_keys(
     name: &Name,
     dns_class: DNSClass,
     sig: &RRSIG,
@@ -568,7 +604,7 @@ fn verify_rrset_with_keys(
     false
 }
 
-fn strip_dnssec_records(msg: &mut Message) {
+pub(crate) fn strip_dnssec_records(msg: &mut Message) {
     let keep = |r: &Record| {
         !matches!(
             r.record_type(),

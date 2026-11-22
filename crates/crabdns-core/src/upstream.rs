@@ -20,8 +20,9 @@ use crate::config::UpstreamStrategy;
 use crate::error::{CoreError, Result};
 use crate::singleflight::{FlightRole, Singleflight, wait_follower};
 use crate::upstream_transport::{
-    ConnPool, UdpSocketPool, exchange_doh, exchange_dot_addrs, exchange_tcp, exchange_tcp_pooled,
-    exchange_udp, is_udp_truncated, parse_socket_addr, try_exchange_dot_pooled,
+    ConnPool, UdpSocketPool, build_doq_client_config, exchange_doh, exchange_doq_addrs,
+    exchange_dot_addrs, exchange_tcp, exchange_tcp_pooled, exchange_udp, is_udp_truncated,
+    parse_socket_addr, try_exchange_doq_pooled, try_exchange_dot_pooled,
 };
 pub(crate) use crate::upstream_transport::{read_tcp_framed, send_tcp_framed, split_host_port};
 
@@ -158,6 +159,7 @@ pub enum UpstreamEndpoint {
     Tcp(SocketAddr),
     Dot { addr: String, server_name: String },
     Doh { url: String },
+    Doq { addr: String, server_name: String },
 }
 
 impl UpstreamEndpoint {
@@ -174,6 +176,13 @@ impl UpstreamEndpoint {
         if let Some(rest) = trimmed.strip_prefix("tls://") {
             let (host, port) = split_host_port(rest, 853);
             return Ok(Self::Dot {
+                addr: format!("{host}:{port}"),
+                server_name: host,
+            });
+        }
+        if let Some(rest) = trimmed.strip_prefix("quic://") {
+            let (host, port) = split_host_port(rest, 853);
+            return Ok(Self::Doq {
                 addr: format!("{host}:{port}"),
                 server_name: host,
             });
@@ -203,7 +212,10 @@ fn parse_bootstrap_endpoint(raw: &str) -> Result<BootstrapEndpoint> {
     if let Some(rest) = trimmed.strip_prefix("tcp://") {
         return Ok(BootstrapEndpoint::Tcp(parse_socket_addr(rest, 53)?));
     }
-    if trimmed.starts_with("tls://") || trimmed.starts_with("https://") {
+    if trimmed.starts_with("tls://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("quic://")
+    {
         return Err(CoreError::Config(format!(
             "bootstrap_dns must be IP addresses (udp:// or tcp://): {trimmed}"
         )));
@@ -455,11 +467,13 @@ pub struct UpstreamPool {
     udp_pools: Vec<UdpSocketPool>,
     tcp_pools: Vec<ConnPool<TcpStream>>,
     dot_pools: Vec<ConnPool<TlsStream<TcpStream>>>,
+    doq_pools: Vec<ConnPool<quinn::Connection>>,
     strategy: UpstreamStrategy,
     timeout: Duration,
     bootstrap: BootstrapResolver,
     http_client: reqwest::Client,
     tls_connector: TlsConnector,
+    doq_client_config: quinn::ClientConfig,
 }
 
 impl UpstreamPool {
@@ -500,6 +514,7 @@ impl UpstreamPool {
             .collect();
         let tcp_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
         let dot_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
+        let quic_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
         let timeout = Duration::from_millis(timeout_ms);
         let bootstrap = BootstrapResolver::new(bootstrap_dns, timeout)?;
 
@@ -517,6 +532,7 @@ impl UpstreamPool {
             .with_root_certificates(roots)
             .with_no_client_auth();
         let tls_connector = TlsConnector::from(Arc::new(tls_config));
+        let doq_client_config = build_doq_client_config()?;
 
         Ok(Self {
             endpoints,
@@ -524,11 +540,13 @@ impl UpstreamPool {
             udp_pools,
             tcp_pools,
             dot_pools,
+            doq_pools: quic_pools,
             strategy,
             timeout,
             bootstrap,
             http_client,
             tls_connector,
+            doq_client_config,
         })
     }
 
@@ -552,7 +570,9 @@ impl UpstreamPool {
             UpstreamEndpoint::Udp(addr) | UpstreamEndpoint::Tcp(addr) => {
                 crate::security::is_private_or_special_ip(addr.ip())
             }
-            UpstreamEndpoint::Dot { .. } | UpstreamEndpoint::Doh { .. } => false,
+            UpstreamEndpoint::Dot { .. }
+            | UpstreamEndpoint::Doh { .. }
+            | UpstreamEndpoint::Doq { .. } => false,
         })
     }
 
@@ -720,6 +740,22 @@ impl UpstreamPool {
                 .await
             }
             UpstreamEndpoint::Doh { url } => exchange_doh(&self.http_client, url, query_wire).await,
+            UpstreamEndpoint::Doq { addr, server_name } => {
+                if let Some(resp) = try_exchange_doq_pooled(&self.doq_pools[idx], query_wire).await
+                {
+                    return Ok(resp);
+                }
+                let (host, port) = split_host_port(addr, 853);
+                let addrs = self.bootstrap.resolve_socket_addrs(&host, port).await?;
+                exchange_doq_addrs(
+                    &self.doq_client_config,
+                    &addrs,
+                    &self.doq_pools[idx],
+                    server_name,
+                    query_wire,
+                )
+                .await
+            }
         }
     }
 }
@@ -730,6 +766,7 @@ pub(crate) fn endpoint_label(endpoint: &UpstreamEndpoint) -> String {
         UpstreamEndpoint::Tcp(addr) => format!("tcp://{addr}"),
         UpstreamEndpoint::Dot { addr, .. } => format!("tls://{addr}"),
         UpstreamEndpoint::Doh { url } => url.clone(),
+        UpstreamEndpoint::Doq { addr, .. } => format!("quic://{addr}"),
     }
 }
 

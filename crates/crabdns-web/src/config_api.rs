@@ -75,6 +75,15 @@ pub struct ConfigResponse {
     pub dns64_prefixes: Vec<String>,
     pub svcb_strip_ech: bool,
     pub svcb_strip_hints: bool,
+    pub ede_enabled: bool,
+    pub dns_cookies_enabled: bool,
+    pub dns_cookies_require_valid: bool,
+    pub max_udp_payload_size: u16,
+    pub rrl_enabled: bool,
+    pub rrl_responses_per_second: u32,
+    pub rrl_slip: u32,
+    #[ts(type = "number")]
+    pub rrl_window_secs: u64,
 }
 
 impl From<&Config> for ConfigResponse {
@@ -133,6 +142,14 @@ impl From<&Config> for ConfigResponse {
             dns64_prefixes: cfg.dns64_prefixes.clone(),
             svcb_strip_ech: cfg.svcb_strip_ech,
             svcb_strip_hints: cfg.svcb_strip_hints,
+            ede_enabled: cfg.ede_enabled,
+            dns_cookies_enabled: cfg.dns_cookies_enabled,
+            dns_cookies_require_valid: cfg.dns_cookies_require_valid,
+            max_udp_payload_size: cfg.max_udp_payload_size,
+            rrl_enabled: cfg.rrl_enabled,
+            rrl_responses_per_second: cfg.rrl_responses_per_second,
+            rrl_slip: cfg.rrl_slip,
+            rrl_window_secs: cfg.rrl_window_secs,
         }
     }
 }
@@ -229,6 +246,23 @@ pub struct ConfigUpdatePayload {
     pub svcb_strip_ech: Option<bool>,
     #[serde(default)]
     pub svcb_strip_hints: Option<bool>,
+    #[serde(default)]
+    pub ede_enabled: Option<bool>,
+    #[serde(default)]
+    pub dns_cookies_enabled: Option<bool>,
+    #[serde(default)]
+    pub dns_cookies_require_valid: Option<bool>,
+    #[serde(default)]
+    pub max_udp_payload_size: Option<u16>,
+    #[serde(default)]
+    pub rrl_enabled: Option<bool>,
+    #[serde(default)]
+    pub rrl_responses_per_second: Option<u32>,
+    #[serde(default)]
+    pub rrl_slip: Option<u32>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub rrl_window_secs: Option<u64>,
 }
 
 pub async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
@@ -393,6 +427,23 @@ pub async fn update_config(
     );
     let svcb_strip_ech = payload.svcb_strip_ech.unwrap_or(current.svcb_strip_ech);
     let svcb_strip_hints = payload.svcb_strip_hints.unwrap_or(current.svcb_strip_hints);
+    let ede_enabled = payload.ede_enabled.unwrap_or(current.ede_enabled);
+    let dns_cookies_enabled = payload
+        .dns_cookies_enabled
+        .unwrap_or(current.dns_cookies_enabled);
+    let dns_cookies_require_valid = payload
+        .dns_cookies_require_valid
+        .unwrap_or(current.dns_cookies_require_valid);
+    let max_udp_payload_size = payload
+        .max_udp_payload_size
+        .unwrap_or(current.max_udp_payload_size)
+        .max(512);
+    let rrl_enabled = payload.rrl_enabled.unwrap_or(current.rrl_enabled);
+    let rrl_responses_per_second = payload
+        .rrl_responses_per_second
+        .unwrap_or(current.rrl_responses_per_second);
+    let rrl_slip = payload.rrl_slip.unwrap_or(current.rrl_slip);
+    let rrl_window_secs = payload.rrl_window_secs.unwrap_or(current.rrl_window_secs);
 
     let cache_min_ttl_secs = payload
         .cache_min_ttl_secs
@@ -555,6 +606,14 @@ pub async fn update_config(
     next.dns64_prefixes = dns64_prefixes.clone();
     next.svcb_strip_ech = svcb_strip_ech;
     next.svcb_strip_hints = svcb_strip_hints;
+    next.ede_enabled = ede_enabled;
+    next.dns_cookies_enabled = dns_cookies_enabled;
+    next.dns_cookies_require_valid = dns_cookies_require_valid;
+    next.max_udp_payload_size = max_udp_payload_size;
+    next.rrl_enabled = rrl_enabled;
+    next.rrl_responses_per_second = rrl_responses_per_second;
+    next.rrl_slip = rrl_slip;
+    next.rrl_window_secs = rrl_window_secs;
 
     // Phase 2: Persist config first, then atomically swap all runtime state.
     let storage = Arc::clone(&state.app.storage);
@@ -613,6 +672,21 @@ pub async fn update_config(
         .app
         .pipeline
         .set_svcb_sanitization(svcb_strip_ech, svcb_strip_hints);
+    state.app.pipeline.set_ede_enabled(ede_enabled);
+    state
+        .app
+        .pipeline
+        .set_dns_cookies(dns_cookies_enabled, dns_cookies_require_valid);
+    state
+        .app
+        .pipeline
+        .set_max_udp_payload_size(max_udp_payload_size);
+    state.app.pipeline.set_rrl(crabdns_core::RrlConfig {
+        enabled: rrl_enabled,
+        responses_per_second: rrl_responses_per_second,
+        slip: rrl_slip,
+        window_secs: rrl_window_secs,
+    });
     state.app.pipeline.reload_ddr(DdrConfig {
         enabled: ddr_enabled,
         hostname: ddr_hostname,

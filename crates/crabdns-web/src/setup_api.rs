@@ -350,8 +350,18 @@ pub async fn check_ports(
 ) -> Json<PortCheckResponse> {
     let cfg = state.app.config.load();
     let candidates = [
-        ("dns", payload.dns_addr, TransportKind::Both, Some(cfg.listen_dns)),
-        ("web", payload.web_addr, TransportKind::Tcp, Some(cfg.listen_web)),
+        (
+            "dns",
+            payload.dns_addr,
+            TransportKind::Both,
+            Some(cfg.listen_dns),
+        ),
+        (
+            "web",
+            payload.web_addr,
+            TransportKind::Tcp,
+            Some(cfg.listen_web),
+        ),
         (
             "web_tls",
             payload.web_tls_addr,

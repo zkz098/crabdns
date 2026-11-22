@@ -186,6 +186,14 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.dns64_prefixes = saved_cfg.dns64_prefixes;
     config.svcb_strip_ech = saved_cfg.svcb_strip_ech;
     config.svcb_strip_hints = saved_cfg.svcb_strip_hints;
+    config.ede_enabled = saved_cfg.ede_enabled;
+    config.dns_cookies_enabled = saved_cfg.dns_cookies_enabled;
+    config.dns_cookies_require_valid = saved_cfg.dns_cookies_require_valid;
+    config.max_udp_payload_size = saved_cfg.max_udp_payload_size;
+    config.rrl_enabled = saved_cfg.rrl_enabled;
+    config.rrl_responses_per_second = saved_cfg.rrl_responses_per_second;
+    config.rrl_slip = saved_cfg.rrl_slip;
+    config.rrl_window_secs = saved_cfg.rrl_window_secs;
     if saved_cfg.tls_cert_path.is_some() {
         config.tls_cert_path = saved_cfg.tls_cert_path;
     }
@@ -300,6 +308,15 @@ fn configure_pipeline(
     pipeline.set_safesearch(cfg.safesearch.clone());
     pipeline.reload_dns64(cfg.dns64_enabled, &cfg.dns64_prefixes)?;
     pipeline.set_svcb_sanitization(cfg.svcb_strip_ech, cfg.svcb_strip_hints);
+    pipeline.set_ede_enabled(cfg.ede_enabled);
+    pipeline.set_dns_cookies(cfg.dns_cookies_enabled, cfg.dns_cookies_require_valid);
+    pipeline.set_max_udp_payload_size(cfg.max_udp_payload_size);
+    pipeline.set_rrl(crabdns_core::RrlConfig {
+        enabled: cfg.rrl_enabled,
+        responses_per_second: cfg.rrl_responses_per_second,
+        slip: cfg.rrl_slip,
+        window_secs: cfg.rrl_window_secs,
+    });
 
     let clients = storage.list_clients()?;
     let groups = storage.list_client_groups()?;

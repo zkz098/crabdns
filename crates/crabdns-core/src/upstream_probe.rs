@@ -53,7 +53,10 @@ pub struct UpstreamCapabilities {
 
 impl UpstreamCapabilities {
     fn failed(input: String, endpoint: String, protocol: UpstreamProtocol, error: String) -> Self {
-        let encrypted = matches!(protocol, UpstreamProtocol::Dot | UpstreamProtocol::Doh);
+        let encrypted = matches!(
+            protocol,
+            UpstreamProtocol::Dot | UpstreamProtocol::Doh | UpstreamProtocol::Doq
+        );
         Self {
             input,
             endpoint,

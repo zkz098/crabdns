@@ -10,7 +10,11 @@ use crate::acl::AclDecision;
 use crate::cache::{CacheKey, patch_tx_id};
 use crate::clients::{ClientRegistry, ResolvedClientPolicy};
 use crate::config::BlockMode;
-use crate::edns::{apply_ecs_to_message, has_dnssec_ok, resolve_ecs_subnet, set_dnssec_ok};
+use crate::cookies::CookieCheck;
+use crate::edns::{
+    EDE_BLOCKED, EDE_DNSSEC_BOGUS, EDE_NO_REACHABLE_AUTHORITY, EDE_PROHIBITED,
+    apply_ecs_to_message, has_dnssec_ok, resolve_ecs_subnet, set_dnssec_ok,
+};
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision};
 use crate::filter_rules::FilterQueryContext;
@@ -34,6 +38,7 @@ pub(crate) struct PolicyFlags {
     pub block_mode: BlockMode,
     pub dnssec_on: bool,
     pub client_wants_do: bool,
+    pub client_cd: bool,
 }
 
 enum ExchangeError {
@@ -94,12 +99,54 @@ impl DnsPipeline {
 
         let (policy, meta) = self.resolve_query_meta(&ctx, clean_domain, qtype, start);
 
-        if let Some(resp) = self.check_pre_routing(&request, &meta)? {
+        let cookie_check = if ctx.protocol == QueryProtocol::Udp {
+            self.dns_cookies
+                .check_request(&request, ctx.client_addr.ip())
+        } else {
+            CookieCheck::None
+        };
+        match cookie_check {
+            CookieCheck::Malformed => {
+                return build_error_response(&request, ResponseCode::FormErr);
+            }
+            CookieCheck::NeedsServerCookie { client_cookie }
+                if self.dns_cookies.require_valid() =>
+            {
+                return self.dns_cookies.build_badcookie_response(
+                    &request,
+                    client_cookie,
+                    ctx.client_addr.ip(),
+                );
+            }
+            _ => {}
+        }
+
+        let resp = self
+            .handle_packet_inner(
+                raw_query, &request, &ctx, &meta, policy, &qname, qtype, qclass,
+            )
+            .await?;
+        Ok(self.finalize_protocol_response(&request, &ctx, &meta, cookie_check, resp))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_packet_inner(
+        &self,
+        raw_query: &[u8],
+        request: &Message,
+        ctx: &QueryContext,
+        meta: &LogMeta,
+        policy: Option<Arc<ResolvedClientPolicy>>,
+        qname: &str,
+        qtype: RecordType,
+        qclass: u16,
+    ) -> Result<Vec<u8>> {
+        if let Some(resp) = self.check_pre_routing(request, meta)? {
             return Ok(resp);
         }
 
-        let flags = self.build_policy_flags(&request, policy.as_deref());
-        let decision = self.evaluate_request_filter(&meta, &ctx, policy.as_deref());
+        let flags = self.build_policy_flags(request, policy.as_deref());
+        let decision = self.evaluate_request_filter(meta, ctx, policy.as_deref());
         let explicitly_allowed =
             decision.action == FilterAction::Allow && decision.matched_rule.is_some();
         let flags = PolicyFlags {
@@ -107,20 +154,20 @@ impl DnsPipeline {
             ..flags
         };
 
-        if let Some(resp) = self.handle_filter_decision(&request, &meta, &decision, flags)? {
+        if let Some(resp) = self.handle_filter_decision(request, meta, &decision, flags)? {
             return Ok(resp);
         }
 
         if !flags.explicitly_allowed {
             let p = policy.as_deref();
             if let Some(resp) =
-                self.check_safesearch_interceptor(&request, &meta, p, flags.blocking_disabled)?
+                self.check_safesearch_interceptor(request, meta, p, flags.blocking_disabled)?
             {
                 return Ok(resp);
             }
         }
 
-        if let Some(resp) = self.check_private_ptr_block(&request, &meta)? {
+        if let Some(resp) = self.check_private_ptr_block(request, meta)? {
             return Ok(resp);
         }
 
@@ -136,28 +183,29 @@ impl DnsPipeline {
             upstream_scope,
         };
 
-        if let Some(resp) = self
-            .try_serve_from_cache(
-                &request,
-                raw_query,
-                &meta,
-                policy.as_deref(),
-                &upstream,
-                &cache_key,
-                &decision,
-                flags,
-            )
-            .await?
+        if !(flags.dnssec_on && flags.client_cd)
+            && let Some(resp) = self
+                .try_serve_from_cache(
+                    request,
+                    raw_query,
+                    meta,
+                    policy.as_deref(),
+                    &upstream,
+                    &cache_key,
+                    &decision,
+                    flags,
+                )
+                .await?
         {
             return Ok(resp);
         }
 
         let upstream_query =
-            Self::build_upstream_query(&request, raw_query, ecs_subnet, flags.dnssec_on);
+            Self::build_upstream_query(request, raw_query, ecs_subnet, flags.dnssec_on);
         self.forward_with_singleflight(
-            &request,
+            request,
             &upstream_query,
-            &meta,
+            meta,
             policy.as_deref(),
             &upstream,
             is_local_route,
@@ -234,6 +282,7 @@ impl DnsPipeline {
                 .unwrap_or_else(|| self.block_mode()),
             dnssec_on: self.dnssec_enabled.load(Ordering::Relaxed),
             client_wants_do: has_dnssec_ok(request),
+            client_cd: request.checking_disabled,
         }
     }
 
@@ -331,6 +380,12 @@ impl DnsPipeline {
         match &decision.action {
             FilterAction::Block if !flags.blocking_disabled => {
                 let (resp, rcode) = build_blocked_response(request, meta.qtype, flags.block_mode)?;
+                let resp = self.maybe_attach_ede(
+                    request,
+                    resp,
+                    EDE_BLOCKED,
+                    Some("Blocked by filter rule"),
+                );
                 self.emit_log(
                     meta,
                     QueryOutcome::Blocked,
@@ -430,10 +485,10 @@ impl DnsPipeline {
     }
 
     fn enforce_acl(&self, request: &Message, meta: &LogMeta) -> Result<Option<Vec<u8>>> {
-        let rule = match self.acl.load().check(meta.client_addr.ip()) {
+        let (rule, ede_text) = match self.acl.load().check(meta.client_addr.ip()) {
             AclDecision::Allow => return Ok(None),
-            AclDecision::DeniedAcl => "acl:denied",
-            AclDecision::RateLimited => "acl:ratelimit",
+            AclDecision::DeniedAcl => ("acl:denied", "Blocked by ACL"),
+            AclDecision::RateLimited => ("acl:ratelimit", "Client rate limited"),
         };
         self.emit_log(
             meta,
@@ -444,7 +499,13 @@ impl DnsPipeline {
             "REFUSED",
             Vec::new(),
         );
-        build_error_response(request, ResponseCode::Refused).map(Some)
+        let resp = build_error_response(request, ResponseCode::Refused)?;
+        Ok(Some(self.maybe_attach_ede(
+            request,
+            resp,
+            EDE_PROHIBITED,
+            Some(ede_text),
+        )))
     }
 
     fn build_upstream_query(
@@ -478,7 +539,7 @@ impl DnsPipeline {
             .await
             .map_err(|e| ExchangeError::UpstreamFailed(e.to_string()))?;
 
-        if flags.dnssec_on {
+        if flags.dnssec_on && !flags.client_cd {
             match self
                 .dnssec_validator
                 .validate_and_process(&resp_bytes, upstream, flags.client_wants_do)
@@ -489,6 +550,15 @@ impl DnsPipeline {
                     tracing::warn!(domain = %clean_domain, error = %err, "DNSSEC validation failed");
                     return Err(ExchangeError::DnssecBogus(upstream_label));
                 }
+            }
+        } else if flags.dnssec_on
+            && flags.client_cd
+            && !flags.client_wants_do
+            && let Ok(mut msg) = Message::from_vec(&resp_bytes)
+        {
+            crate::dnssec::strip_dnssec_records(&mut msg);
+            if let Ok(stripped) = msg.to_vec() {
+                resp_bytes = stripped;
             }
         }
         Ok((resp_bytes, upstream_label))
@@ -606,8 +676,7 @@ impl DnsPipeline {
                 } else {
                     false
                 };
-                if !rebinding_hit
-                    && !cname_hit
+                if !(rebinding_hit || cname_hit || flags.dnssec_on && flags.client_cd)
                     && let Some(ref msg) = parsed
                 {
                     let cache = self.cache.load();
@@ -627,7 +696,15 @@ impl DnsPipeline {
                     "SERVFAIL",
                     Vec::new(),
                 );
-                Err(build_error_response(request, ResponseCode::ServFail))
+                let resp = build_error_response(request, ResponseCode::ServFail).map(|bytes| {
+                    self.maybe_attach_ede(
+                        request,
+                        bytes,
+                        EDE_DNSSEC_BOGUS,
+                        Some("DNSSEC validation failed"),
+                    )
+                });
+                Err(resp)
             }
             Err(ExchangeError::UpstreamFailed(err)) => {
                 tracing::warn!(domain = %meta.domain, error = %err, "all upstreams failed");
@@ -641,7 +718,15 @@ impl DnsPipeline {
                     "SERVFAIL",
                     Vec::new(),
                 );
-                Err(build_error_response(request, ResponseCode::ServFail))
+                let resp = build_error_response(request, ResponseCode::ServFail).map(|bytes| {
+                    self.maybe_attach_ede(
+                        request,
+                        bytes,
+                        EDE_NO_REACHABLE_AUTHORITY,
+                        Some("All upstream servers failed"),
+                    )
+                });
+                Err(resp)
             }
         }
     }
@@ -687,72 +772,5 @@ impl DnsPipeline {
                 Err(build_error_response(request, ResponseCode::ServFail))
             }
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn finalize_upstream_response(
-        &self,
-        request: &Message,
-        meta: &LogMeta,
-        policy: Option<&ResolvedClientPolicy>,
-        upstream: &UpstreamPool,
-        is_local_route: bool,
-        decision: &FilterDecision,
-        flags: PolicyFlags,
-        resp_bytes: Vec<u8>,
-        upstream_label: String,
-        parsed_msg: Option<Message>,
-    ) -> Result<Vec<u8>> {
-        if !flags.blocking_disabled
-            && !flags.explicitly_allowed
-            && !is_local_route
-            && self.dns_rebinding_protection.load(Ordering::Relaxed)
-            && parsed_msg.as_ref().is_some_and(contains_rebinding_ip_msg)
-        {
-            let (blocked_bytes, rcode) =
-                build_blocked_response(request, meta.qtype, flags.block_mode)?;
-            self.emit_log(
-                meta,
-                QueryOutcome::Blocked,
-                Some("security:dns-rebinding".to_string()),
-                Some("security".to_string()),
-                Some(upstream_label),
-                rcode,
-                extract_answer_summaries(&blocked_bytes),
-            );
-            return Ok(blocked_bytes);
-        }
-
-        if !flags.blocking_disabled
-            && !flags.explicitly_allowed
-            && flags.cname_cloaking_on
-            && let Some(ref msg) = parsed_msg
-            && let Some(blk) =
-                self.check_cname_cloaking_msg(policy, meta, request, msg, flags.block_mode)?
-        {
-            self.emit_log(
-                meta,
-                QueryOutcome::Blocked,
-                Some(blk.rule),
-                blk.list,
-                Some(upstream_label),
-                blk.rcode,
-                extract_answer_summaries(&blk.bytes),
-            );
-            return Ok(blk.bytes);
-        }
-
-        self.post_process_and_log(
-            request,
-            meta,
-            upstream,
-            resp_bytes,
-            parsed_msg,
-            QueryOutcome::Forwarded,
-            decision.matched_rule.clone(),
-            decision.matched_list.clone(),
-            upstream_label,
-        )
-        .await
     }
 }

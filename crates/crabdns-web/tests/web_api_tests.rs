@@ -1102,8 +1102,7 @@ async fn test_initial_setup_wizard_endpoints() {
         .await
         .unwrap();
     assert_eq!(cfg_res.status(), StatusCode::OK);
-    let cfg_json: serde_json::Value =
-        serde_json::from_str(&cfg_res.text().await.unwrap()).unwrap();
+    let cfg_json: serde_json::Value = serde_json::from_str(&cfg_res.text().await.unwrap()).unwrap();
     assert_eq!(cfg_json["web_auth_enabled"], true);
     assert_eq!(cfg_json["dnssec_enabled"], true);
     assert_eq!(cfg_json["upstreams"][0], "1.1.1.1:53");

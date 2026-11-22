@@ -135,6 +135,14 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         dns64_prefixes: Some(cfg.dns64_prefixes.clone()),
         svcb_strip_ech: Some(cfg.svcb_strip_ech),
         svcb_strip_hints: Some(cfg.svcb_strip_hints),
+        ede_enabled: Some(cfg.ede_enabled),
+        dns_cookies_enabled: Some(cfg.dns_cookies_enabled),
+        dns_cookies_require_valid: Some(cfg.dns_cookies_require_valid),
+        max_udp_payload_size: Some(cfg.max_udp_payload_size),
+        rrl_enabled: Some(cfg.rrl_enabled),
+        rrl_responses_per_second: Some(cfg.rrl_responses_per_second),
+        rrl_slip: Some(cfg.rrl_slip),
+        rrl_window_secs: Some(cfg.rrl_window_secs),
     }
 }
 
@@ -410,6 +418,23 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
     }
     next.svcb_strip_ech = payload.svcb_strip_ech.unwrap_or(current.svcb_strip_ech);
     next.svcb_strip_hints = payload.svcb_strip_hints.unwrap_or(current.svcb_strip_hints);
+    next.ede_enabled = payload.ede_enabled.unwrap_or(current.ede_enabled);
+    next.dns_cookies_enabled = payload
+        .dns_cookies_enabled
+        .unwrap_or(current.dns_cookies_enabled);
+    next.dns_cookies_require_valid = payload
+        .dns_cookies_require_valid
+        .unwrap_or(current.dns_cookies_require_valid);
+    next.max_udp_payload_size = payload
+        .max_udp_payload_size
+        .unwrap_or(current.max_udp_payload_size)
+        .max(512);
+    next.rrl_enabled = payload.rrl_enabled.unwrap_or(current.rrl_enabled);
+    next.rrl_responses_per_second = payload
+        .rrl_responses_per_second
+        .unwrap_or(current.rrl_responses_per_second);
+    next.rrl_slip = payload.rrl_slip.unwrap_or(current.rrl_slip);
+    next.rrl_window_secs = payload.rrl_window_secs.unwrap_or(current.rrl_window_secs);
 }
 
 struct CompiledRuntime {
@@ -510,6 +535,15 @@ fn apply_compiled_to_pipeline(
     pipe.set_safesearch(next.safesearch.clone());
     let _ = pipe.reload_dns64(next.dns64_enabled, &next.dns64_prefixes);
     pipe.set_svcb_sanitization(next.svcb_strip_ech, next.svcb_strip_hints);
+    pipe.set_ede_enabled(next.ede_enabled);
+    pipe.set_dns_cookies(next.dns_cookies_enabled, next.dns_cookies_require_valid);
+    pipe.set_max_udp_payload_size(next.max_udp_payload_size);
+    pipe.set_rrl(crabdns_core::RrlConfig {
+        enabled: next.rrl_enabled,
+        responses_per_second: next.rrl_responses_per_second,
+        slip: next.rrl_slip,
+        window_secs: next.rrl_window_secs,
+    });
     pipe.reload_ddr(DdrConfig {
         enabled: next.ddr_enabled,
         hostname: next.ddr_hostname.clone(),

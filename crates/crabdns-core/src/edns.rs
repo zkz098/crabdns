@@ -155,6 +155,112 @@ pub fn set_dnssec_ok(msg: &mut Message) {
     edns.set_dnssec_ok(true);
 }
 
+pub const EDNS_OPTION_EDE: u16 = 15;
+pub const EDE_DNSSEC_BOGUS: u16 = 6;
+pub const EDE_BLOCKED: u16 = 15;
+pub const EDE_FILTERED: u16 = 17;
+pub const EDE_PROHIBITED: u16 = 18;
+pub const EDE_NO_REACHABLE_AUTHORITY: u16 = 22;
+pub const EDE_NETWORK_ERROR: u16 = 23;
+pub const DEFAULT_MAX_UDP_PAYLOAD: u16 = 1232;
+
+/// Attaches an RFC 8914 Extended DNS Error option to `response` if `request` included EDNS0.
+pub fn attach_ede_to_message(
+    request: &Message,
+    response: &mut Message,
+    info_code: u16,
+    extra_text: Option<&str>,
+) {
+    if request.edns.is_none() {
+        return;
+    }
+    let mut data = Vec::with_capacity(2 + extra_text.map_or(0, str::len));
+    data.extend_from_slice(&info_code.to_be_bytes());
+    if let Some(text) = extra_text {
+        data.extend_from_slice(text.as_bytes());
+    }
+    let edns = response.edns.get_or_insert_with(Edns::new);
+    if edns.max_payload() < DEFAULT_MAX_UDP_PAYLOAD {
+        edns.set_max_payload(DEFAULT_MAX_UDP_PAYLOAD);
+    }
+    edns.options_mut()
+        .insert(EdnsOption::Unknown(EDNS_OPTION_EDE, data));
+}
+
+/// Attaches an RFC 8914 Extended DNS Error option to serialized `resp_bytes` if `request` included EDNS0.
+pub fn attach_ede_to_wire(
+    request: &Message,
+    resp_bytes: Vec<u8>,
+    info_code: u16,
+    extra_text: Option<&str>,
+) -> Vec<u8> {
+    if request.edns.is_none() {
+        return resp_bytes;
+    }
+    let Ok(mut msg) = Message::from_vec(&resp_bytes) else {
+        return resp_bytes;
+    };
+    attach_ede_to_message(request, &mut msg, info_code, extra_text);
+    msg.to_vec().unwrap_or(resp_bytes)
+}
+
+/// Computes the effective UDP payload size limit from client EDNS0 and server cap (RFC 9715).
+pub fn effective_udp_payload_limit(request: &Message, server_max_udp: u16) -> usize {
+    let client_max = request
+        .edns
+        .as_ref()
+        .map_or(512, |e| e.max_payload().max(512));
+    let server_cap = server_max_udp.max(512);
+    usize::from(client_max.min(server_cap))
+}
+
+/// Truncates `resp_bytes` with `TC=1` if it exceeds `max_udp` bytes, or forces `TC=1` truncation.
+pub fn truncate_dns_response(
+    request: &Message,
+    resp_bytes: Vec<u8>,
+    max_udp: usize,
+    force_tc: bool,
+) -> Vec<u8> {
+    if !force_tc && resp_bytes.len() <= max_udp {
+        return resp_bytes;
+    }
+    let mut msg = Message::from_vec(&resp_bytes).unwrap_or_else(|_| {
+        let mut fallback = Message::new(
+            request.id,
+            hickory_proto::op::MessageType::Response,
+            request.op_code,
+        );
+        fallback.metadata.recursion_desired = request.recursion_desired;
+        fallback.metadata.recursion_available = true;
+        fallback.metadata.response_code = hickory_proto::op::ResponseCode::NoError;
+        if let Some(q) = request.queries.first() {
+            fallback.add_query(q.clone());
+        }
+        fallback
+    });
+    msg.metadata.truncation = true;
+    msg.additionals.clear();
+    if let Ok(wire) = msg.to_vec()
+        && wire.len() <= max_udp
+    {
+        return wire;
+    }
+    msg.authorities.clear();
+    if let Ok(wire) = msg.to_vec()
+        && wire.len() <= max_udp
+    {
+        return wire;
+    }
+    msg.answers.clear();
+    if let Ok(wire) = msg.to_vec()
+        && wire.len() <= max_udp
+    {
+        return wire;
+    }
+    msg.edns = None;
+    msg.to_vec().unwrap_or(resp_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

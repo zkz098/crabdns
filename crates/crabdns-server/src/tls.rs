@@ -8,11 +8,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use aws_lc_rs::digest::{SHA256, digest};
 use axum::serve::Listener;
 use chrono::Utc;
 use crabdns_core::DnsPipeline;
 use crabdns_web::tls_api::{TlsReloader, TlsStatusResponse};
-use aws_lc_rs::digest::{SHA256, digest};
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};

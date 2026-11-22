@@ -1,11 +1,14 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use quinn::crypto::rustls::QuicClientConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 
 use crate::error::{CoreError, Result};
 
@@ -282,6 +285,124 @@ pub(crate) async fn exchange_doh(
         out.extend_from_slice(&chunk);
     }
     Ok(out)
+}
+
+pub(crate) fn build_doq_client_config() -> Result<quinn::ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut tls_config = RustlsClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls_config.alpn_protocols = vec![b"doq".to_vec()];
+    let quic_crypto = QuicClientConfig::try_from(tls_config)
+        .map_err(|e| CoreError::Upstream(format!("DoQ TLS config error: {e}")))?;
+    let mut client_cfg = quinn::ClientConfig::new(Arc::new(quic_crypto));
+    let mut transport = quinn::TransportConfig::default();
+    if let Ok(idle) = quinn::IdleTimeout::try_from(CONN_POOL_IDLE_TTL) {
+        transport.max_idle_timeout(Some(idle));
+    }
+    client_cfg.transport_config(Arc::new(transport));
+    Ok(client_cfg)
+}
+
+async fn doq_roundtrip(conn: &quinn::Connection, query_wire: &[u8]) -> Result<Vec<u8>> {
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoQ open_bi failed: {e}")))?;
+
+    let mut doq_query = query_wire.to_vec();
+    if doq_query.len() >= 2 {
+        doq_query[0] = 0;
+        doq_query[1] = 0;
+    }
+    let len = u16::try_from(doq_query.len())
+        .map_err(|_| CoreError::Protocol("DNS message exceeds 65535 bytes".to_string()))?;
+    send.write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoQ write len failed: {e}")))?;
+    send.write_all(&doq_query)
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoQ write body failed: {e}")))?;
+    send.finish()
+        .map_err(|e| CoreError::Upstream(format!("DoQ finish stream failed: {e}")))?;
+
+    let mut len_buf = [0_u8; 2];
+    recv.read_exact(&mut len_buf)
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoQ read len failed: {e}")))?;
+    let resp_len = usize::from(u16::from_be_bytes(len_buf));
+    let mut resp = vec![0_u8; resp_len];
+    recv.read_exact(&mut resp)
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoQ read body failed: {e}")))?;
+
+    if query_wire.len() >= 2 && resp.len() >= 2 {
+        resp[0] = query_wire[0];
+        resp[1] = query_wire[1];
+    }
+    Ok(resp)
+}
+
+pub(crate) async fn try_exchange_doq_pooled(
+    pool: &ConnPool<quinn::Connection>,
+    query_wire: &[u8],
+) -> Option<Vec<u8>> {
+    for _ in 0..MAX_POOLED_RETRIES {
+        let conn = pool.pop_fresh()?;
+        if conn.close_reason().is_some() {
+            continue;
+        }
+        if let Ok(resp) = doq_roundtrip(&conn, query_wire).await {
+            pool.put(conn);
+            return Some(resp);
+        }
+    }
+    None
+}
+
+pub(crate) async fn exchange_doq_addrs(
+    client_config: &quinn::ClientConfig,
+    addrs: &[SocketAddr],
+    pool: &ConnPool<quinn::Connection>,
+    server_name: &str,
+    query_wire: &[u8],
+) -> Result<Vec<u8>> {
+    let mut last_err = CoreError::Upstream("no resolved socket addresses for DoQ".to_string());
+    for &addr in addrs {
+        match exchange_doq_one(client_config, addr, pool, server_name, query_wire).await {
+            Ok(resp) => return Ok(resp),
+            Err(err) => last_err = err,
+        }
+    }
+    Err(last_err)
+}
+
+async fn exchange_doq_one(
+    client_config: &quinn::ClientConfig,
+    addr: SocketAddr,
+    pool: &ConnPool<quinn::Connection>,
+    server_name: &str,
+    query_wire: &[u8],
+) -> Result<Vec<u8>> {
+    let bind_addr: SocketAddr = if addr.is_ipv4() {
+        "0.0.0.0:0".parse().expect("valid v4 bind")
+    } else {
+        "[::]:0".parse().expect("valid v6 bind")
+    };
+    let mut endpoint = quinn::Endpoint::client(bind_addr)
+        .map_err(|e| CoreError::Upstream(format!("DoQ endpoint bind failed: {e}")))?;
+    endpoint.set_default_client_config(client_config.clone());
+
+    let conn = endpoint
+        .connect(addr, server_name)
+        .map_err(|e| CoreError::Upstream(format!("DoQ connect setup failed: {e}")))?
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoQ handshake failed: {e}")))?;
+
+    let resp = doq_roundtrip(&conn, query_wire).await?;
+    pool.put(conn);
+    Ok(resp)
 }
 
 async fn tcp_roundtrip<S: AsyncReadExt + AsyncWriteExt + Unpin>(

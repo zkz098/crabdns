@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use hickory_proto::rr::RecordType;
@@ -14,14 +14,16 @@ use crate::clients::{
 };
 use crate::clock::monotonic_now_ms;
 use crate::config::{BlockMode, SplitDnsRule, UpstreamStrategy};
+use crate::cookies::DnsCookieEngine;
 use crate::device_names::{DhcpLeaseTable, MdnsNameResolver};
 use crate::dns64::Dns64Config;
 use crate::dnssec::DnssecValidator;
-use crate::edns::EcsConfig;
+use crate::edns::{DEFAULT_MAX_UDP_PAYLOAD, EcsConfig};
 use crate::error::Result;
 use crate::filter::{FilterDecision, FilterEngine};
 use crate::filter_rules::FilterQueryContext;
 use crate::lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter, is_private_ptr_domain};
+use crate::rrl::{ResponseRateLimiter, RrlConfig};
 use crate::safesearch::SafeSearchConfig;
 use crate::security::is_private_or_special_ip;
 use crate::singleflight::Singleflight;
@@ -71,6 +73,10 @@ pub struct DnsPipeline {
     pub(crate) dns64: ArcSwap<Dns64Config>,
     pub(crate) svcb_strip_ech: AtomicBool,
     pub(crate) svcb_strip_hints: AtomicBool,
+    pub(crate) ede_enabled: AtomicBool,
+    pub(crate) dns_cookies: DnsCookieEngine,
+    pub(crate) max_udp_payload_size: AtomicU16,
+    pub(crate) rrl: ResponseRateLimiter,
     pub(crate) latency: QueryLatencyHistogram,
     counters: ServerRuntimeCounters,
 }
@@ -133,6 +139,10 @@ impl DnsPipeline {
             dns64: ArcSwap::from_pointee(Dns64Config::default()),
             svcb_strip_ech: AtomicBool::new(false),
             svcb_strip_hints: AtomicBool::new(false),
+            ede_enabled: AtomicBool::new(true),
+            dns_cookies: DnsCookieEngine::new(),
+            max_udp_payload_size: AtomicU16::new(DEFAULT_MAX_UDP_PAYLOAD),
+            rrl: ResponseRateLimiter::default(),
             latency: QueryLatencyHistogram::default(),
             counters: ServerRuntimeCounters::default(),
         }
@@ -538,6 +548,24 @@ impl DnsPipeline {
     pub fn set_svcb_sanitization(&self, strip_ech: bool, strip_hints: bool) {
         self.svcb_strip_ech.store(strip_ech, Ordering::Relaxed);
         self.svcb_strip_hints.store(strip_hints, Ordering::Relaxed);
+    }
+
+    pub fn set_ede_enabled(&self, enabled: bool) {
+        self.ede_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_dns_cookies(&self, enabled: bool, require_valid: bool) {
+        self.dns_cookies.set_enabled(enabled);
+        self.dns_cookies.set_require_valid(require_valid);
+    }
+
+    pub fn set_max_udp_payload_size(&self, max_bytes: u16) {
+        self.max_udp_payload_size
+            .store(max_bytes.max(512), Ordering::Relaxed);
+    }
+
+    pub fn set_rrl(&self, cfg: RrlConfig) {
+        self.rrl.update_config(cfg);
     }
 
     pub(crate) fn svcb_sanitize_options(&self) -> SvcbSanitizeOptions {

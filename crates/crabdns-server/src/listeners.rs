@@ -172,7 +172,9 @@ pub(crate) async fn run_udp_server(
                     let _permit = permit;
                     match pipe.handle_packet(&packet, peer).await {
                         Ok(resp) => {
-                            let _ = sock.send_to(&resp, peer).await;
+                            if !resp.is_empty() {
+                                let _ = sock.send_to(&resp, peer).await;
+                            }
                         }
                         Err(err) => {
                             tracing::debug!(peer = %peer, error = %err, "failed to handle UDP DNS query");

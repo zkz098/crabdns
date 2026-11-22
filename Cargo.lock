@@ -622,6 +622,7 @@ name = "crabdns-core"
 version = "0.1.2"
 dependencies = [
  "arc-swap",
+ "aws-lc-rs",
  "bytes",
  "chrono",
  "criterion",
@@ -632,6 +633,7 @@ dependencies = [
  "hickory-proto",
  "moka",
  "proptest",
+ "quinn",
  "regex",
  "reqwest",
  "rustls",

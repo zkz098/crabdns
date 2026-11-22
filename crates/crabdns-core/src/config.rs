@@ -153,6 +153,22 @@ pub struct Config {
     pub svcb_strip_ech: bool,
     #[serde(default)]
     pub svcb_strip_hints: bool,
+    #[serde(default = "default_true")]
+    pub ede_enabled: bool,
+    #[serde(default)]
+    pub dns_cookies_enabled: bool,
+    #[serde(default)]
+    pub dns_cookies_require_valid: bool,
+    #[serde(default = "default_max_udp_payload_size")]
+    pub max_udp_payload_size: u16,
+    #[serde(default)]
+    pub rrl_enabled: bool,
+    #[serde(default = "default_rrl_responses_per_second")]
+    pub rrl_responses_per_second: u32,
+    #[serde(default = "default_rrl_slip")]
+    pub rrl_slip: u32,
+    #[serde(default = "default_rrl_window_secs")]
+    pub rrl_window_secs: u64,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -222,6 +238,22 @@ fn default_dns64_prefixes() -> Vec<String> {
     vec![crate::dns64::DEFAULT_DNS64_PREFIX.to_string()]
 }
 
+fn default_max_udp_payload_size() -> u16 {
+    1232
+}
+
+fn default_rrl_responses_per_second() -> u32 {
+    10
+}
+
+fn default_rrl_slip() -> u32 {
+    2
+}
+
+fn default_rrl_window_secs() -> u64 {
+    15
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -283,6 +315,14 @@ impl Default for Config {
             dns64_prefixes: default_dns64_prefixes(),
             svcb_strip_ech: false,
             svcb_strip_hints: false,
+            ede_enabled: true,
+            dns_cookies_enabled: false,
+            dns_cookies_require_valid: false,
+            max_udp_payload_size: default_max_udp_payload_size(),
+            rrl_enabled: false,
+            rrl_responses_per_second: default_rrl_responses_per_second(),
+            rrl_slip: default_rrl_slip(),
+            rrl_window_secs: default_rrl_window_secs(),
         }
     }
 }
