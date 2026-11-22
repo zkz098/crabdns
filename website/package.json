@@ -17,7 +17,7 @@
     "@unocss/preset-icons": "^66.1.0",
     "@unocss/preset-wind3": "^66.1.0",
     "@unocss/reset": "^66.1.0",
-    "astro": "^5.7.0",
+    "astro": "^7.4.7",
     "solid-js": "^1.9.19",
     "unocss": "^66.1.0"
   },
