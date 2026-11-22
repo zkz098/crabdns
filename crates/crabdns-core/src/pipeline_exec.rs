@@ -368,6 +368,27 @@ impl DnsPipeline {
             return Ok(Some(resp));
         }
 
+        if self.dhcp_leases_enabled.load(Ordering::Relaxed)
+            && self.dhcp_leases_forward_enabled.load(Ordering::Relaxed)
+            && let Some(matched) = self.dhcp_leases.load().lookup_forward(
+                &meta.domain,
+                meta.qtype,
+                &self.dhcp_leases_domain.load(),
+            )
+        {
+            let resp = build_hosts_response(request, &matched)?;
+            self.emit_log(
+                meta,
+                QueryOutcome::Rewritten,
+                Some("dhcp:lease".to_string()),
+                Some("dhcp".to_string()),
+                None,
+                "NOERROR",
+                extract_answer_summaries(&resp),
+            );
+            return Ok(Some(resp));
+        }
+
         Ok(None)
     }
 

@@ -8,10 +8,11 @@ use crabdns_core::{
 };
 
 pub mod client_stats;
+pub mod config_history;
 mod log_sink;
 mod models;
-
 pub use client_stats::{ClientActivityStats, ClientProtocolCounts, ClientStatsTracker};
+pub use config_history::ConfigSnapshotMeta;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 pub use log_sink::spawn_log_sink;
 use models::{
@@ -26,7 +27,6 @@ pub use models::{
     TimeSeriesPoint, TopItem,
 };
 use tokio::sync::Mutex;
-
 pub struct StorageEngine {
     db: Database,
     logs: Keyspace,

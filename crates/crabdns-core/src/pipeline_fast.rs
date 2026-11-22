@@ -165,6 +165,16 @@ impl DnsPipeline {
         {
             return true;
         }
+        if self.dhcp_leases_enabled.load(Ordering::Relaxed)
+            && self.dhcp_leases_forward_enabled.load(Ordering::Relaxed)
+            && self
+                .dhcp_leases
+                .load()
+                .lookup_forward(clean, qtype, &self.dhcp_leases_domain.load())
+                .is_some()
+        {
+            return true;
+        }
         false
     }
 

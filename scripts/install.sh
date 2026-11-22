@@ -13,6 +13,9 @@ DATA_DIR=""
 DNS_LISTEN=""
 WEB_LISTEN="0.0.0.0:3000"
 OPENWRT_DNSMASQ="none"
+SYSTEMD_RESOLVED="none"
+PROFILE="default"
+TAKEOVER=0
 UNINSTALL=0
 PURGE=0
 
@@ -32,6 +35,9 @@ Options:
   --data-dir <path>          Data directory (default: /etc/crabdns/data on OpenWrt, /var/lib/crabdns on Linux)
   --dns-listen <addr>        DNS listen address (default: 0.0.0.0:5353, or 0.0.0.0:53 with takeover)
   --web-listen <addr>        Web UI listen address (default: 0.0.0.0:3000)
+  --profile <mode>           Initial config preset: default | home | smb (default: default)
+  --takeover                 Take over port 53 automatically (OpenWrt dnsmasq or Linux systemd-resolved)
+  --systemd-resolved <mode>  Linux systemd-resolved integration: none | takeover (default: none)
   --openwrt-dnsmasq <mode>   OpenWrt dnsmasq integration: none | upstream | takeover (default: none)
   --uninstall                Stop, disable, and remove CrabDNS binary and service
   --purge                    Also remove config and data directory when uninstalling
@@ -148,6 +154,20 @@ while [ $# -gt 0 ]; do
             OPENWRT_DNSMASQ="$2"
             shift 2
             ;;
+        --systemd-resolved)
+            [ $# -ge 2 ] || err "--systemd-resolved requires an argument"
+            SYSTEMD_RESOLVED="$2"
+            shift 2
+            ;;
+        --profile)
+            [ $# -ge 2 ] || err "--profile requires an argument"
+            PROFILE="$2"
+            shift 2
+            ;;
+        --takeover)
+            TAKEOVER=1
+            shift
+            ;;
         --uninstall)
             UNINSTALL=1
             shift
@@ -176,13 +196,35 @@ if [ -z "$DATA_DIR" ]; then
     fi
 fi
 
+if [ "$TAKEOVER" -eq 1 ]; then
+    if is_openwrt; then
+        [ "$OPENWRT_DNSMASQ" = "none" ] && OPENWRT_DNSMASQ="takeover"
+    else
+        [ "$SYSTEMD_RESOLVED" = "none" ] && SYSTEMD_RESOLVED="takeover"
+    fi
+    [ -z "$DNS_LISTEN" ] && DNS_LISTEN="0.0.0.0:53"
+fi
+
 if [ -z "$DNS_LISTEN" ]; then
-    if [ "$OPENWRT_DNSMASQ" = "takeover" ]; then
+    if [ "$OPENWRT_DNSMASQ" = "takeover" ] || [ "$SYSTEMD_RESOLVED" = "takeover" ]; then
         DNS_LISTEN="0.0.0.0:53"
     else
         DNS_LISTEN="0.0.0.0:5353"
     fi
 fi
+
+restore_systemd_resolved() {
+    if [ -f /etc/systemd/resolved.conf.d/99-crabdns.conf ]; then
+        rm -f /etc/systemd/resolved.conf.d/99-crabdns.conf
+        if [ -f "${CONFIG_DIR}/resolv.conf.bak" ]; then
+            cp -a "${CONFIG_DIR}/resolv.conf.bak" /etc/resolv.conf || true
+        fi
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl restart systemd-resolved >/dev/null 2>&1 || true
+        fi
+        log "Restored systemd-resolved configuration."
+    fi
+}
 
 uninstall_crabdns() {
     if is_openwrt; then
@@ -196,6 +238,7 @@ uninstall_crabdns() {
         systemctl disable crabdns >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/crabdns.service
         systemctl daemon-reload >/dev/null 2>&1 || true
+        restore_systemd_resolved
     fi
 
     rm -f "$INSTALL_BIN"
@@ -271,10 +314,85 @@ listen_dns = "${DNS_LISTEN}"
 listen_web = "${WEB_LISTEN}"
 data_dir = "${DATA_DIR}"
 EOF
-    log "Created default config at $CONFIG_FILE"
+    case "$PROFILE" in
+        home)
+            cat >>"$CONFIG_FILE" <<'EOF'
+hosts_enabled = true
+dhcp_leases_enabled = true
+dhcp_leases_forward_enabled = true
+dhcp_leases_domain = "lan"
+mdns_enabled = true
+private_ptr_enabled = true
+dns_rebinding_protection = true
+EOF
+            ;;
+        smb)
+            cat >>"$CONFIG_FILE" <<'EOF'
+hosts_enabled = true
+dhcp_leases_enabled = true
+dhcp_leases_forward_enabled = true
+dhcp_leases_domain = "corp.lan"
+private_ptr_enabled = true
+dns_rebinding_protection = true
+block_any_queries = true
+rrl_enabled = true
+EOF
+            ;;
+        default) ;;
+        *)
+            err "Invalid --profile: $PROFILE (expected: default, home, smb)"
+            ;;
+    esac
+    log "Created config at $CONFIG_FILE (profile: $PROFILE)"
 else
     log "Preserving existing config at $CONFIG_FILE"
 fi
+
+configure_systemd_resolved() {
+    mode="$1"
+    case "$mode" in
+        none)
+            return 0
+            ;;
+        takeover)
+            if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+                mkdir -p /etc/systemd/resolved.conf.d
+                cat >/etc/systemd/resolved.conf.d/99-crabdns.conf <<'EOF'
+[Resolve]
+DNSStubListener=no
+DNS=127.0.0.1
+EOF
+                if [ -e /etc/resolv.conf ] && [ ! -f "${CONFIG_DIR}/resolv.conf.bak" ]; then
+                    cp -a /etc/resolv.conf "${CONFIG_DIR}/resolv.conf.bak" || true
+                fi
+                rm -f /etc/resolv.conf
+                printf 'nameserver 127.0.0.1\n' >/etc/resolv.conf
+                systemctl restart systemd-resolved
+                log "Disabled systemd-resolved stub listener and pointed /etc/resolv.conf to 127.0.0.1"
+            else
+                log "systemd-resolved is not active; skipping stub listener takeover."
+            fi
+            ;;
+        *)
+            err "Invalid --systemd-resolved mode: $mode (expected: none, takeover)"
+            ;;
+    esac
+}
+
+check_port_53_conflict() {
+    case "$DNS_LISTEN" in
+        *:53) ;;
+        *) return 0 ;;
+    esac
+    if command -v ss >/dev/null 2>&1; then
+        conflict="$(ss -tulnp 2>/dev/null | grep -E '[:.]53[[:space:]]' | grep -v 'crabdns' || true)"
+        if [ -n "$conflict" ]; then
+            log "WARNING: Port 53 appears to be in use:"
+            printf '%s\n' "$conflict" >&2
+            err "Port 53 conflict detected. Re-run with --takeover (or --systemd-resolved takeover / --openwrt-dnsmasq takeover) or choose --dns-listen 0.0.0.0:5353."
+        fi
+    fi
+}
 
 configure_openwrt_dnsmasq() {
     mode="$1"
@@ -333,6 +451,8 @@ EOF
         log "Note: dnsmasq was not modified. Configure dnsmasq forwarding or re-run with --openwrt-dnsmasq upstream|takeover."
     fi
 elif command -v systemctl >/dev/null 2>&1; then
+    configure_systemd_resolved "$SYSTEMD_RESOLVED"
+    check_port_53_conflict
     cat >/etc/systemd/system/crabdns.service <<EOF
 [Unit]
 Description=CrabDNS Ad-blocking DNS Server

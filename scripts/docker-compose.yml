@@ -1,0 +1,19 @@
+# CrabDNS Docker Compose template for Home Lab / SMB Intranet gateways.
+# Uses host networking so CrabDNS can bind port 53 directly, receive mDNS
+# multicast traffic, and identify real LAN client IPs without NAT masking.
+
+services:
+  crabdns:
+    image: ghcr.io/zkz098/crabdns:latest
+    container_name: crabdns
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_BIND_SERVICE
+    volumes:
+      - ./data:/var/lib/crabdns
+      - ./config.toml:/etc/crabdns/config.toml:ro
+      # Optional: mount router/host DHCP leases and hosts for local device resolution
+      # - /var/lib/misc/dnsmasq.leases:/var/lib/misc/dnsmasq.leases:ro
+      # - /etc/hosts:/etc/hosts:ro
+    command: ["--config", "/etc/crabdns/config.toml"]

@@ -222,7 +222,9 @@ const en = {
   rulesTesterMatched: "Matched rule",
   rulesTesterNoMatch: "No rule matched (forwarded)",
   settingsSplitDnsLabel: "Split DNS Rules (domain=upstream1,upstream2 per line)",
-  settingsSplitDnsHint: "Example: corp.local=udp://10.0.0.1:53,udp://10.0.0.2:53",
+  settingsSplitDnsHint:
+    "Example: corp.local=udp://10.0.0.1:53 or https://.../cn.txt=https://dns.alidns.com/dns-query",
+  settingsSplitDnsRefreshBtn: "Refresh Lists",
   settingsCnameCloakingLabel: "CNAME Cloaking Blocking (inspect CNAME targets)",
   settingsDohEnabledLabel: "Enable Inbound DNS-over-HTTPS (/dns-query)",
   settingsAllowPrivateSubsLabel: "Allow Private/Localhost Subscription URLs",
@@ -346,6 +348,10 @@ const en = {
     "Permission denied: binding ports below 1024 requires root or CAP_NET_BIND_SERVICE",
   portCheckStatusInvalid: "Invalid address format (expected IP:port, e.g. 0.0.0.0:53)",
   settingsDhcpLeasesLabel: "Parse DHCP Leases File for Hostnames",
+  settingsDhcpLeasesForwardLabel: "Auto-Resolve DHCP Hostnames (A/AAAA/PTR)",
+  tooltipDhcpLeasesForward:
+    "Automatically answer A/AAAA/PTR queries for DHCP-leased hostnames under the configured LAN domain (e.g. nas.lan).",
+  settingsDhcpLeasesDomainLabel: "DHCP Local Domain Suffix",
   settingsDhcpLeasesPathLabel: "DHCP Leases Path (dnsmasq / ISC / Kea)",
   settingsMdnsLabel: "Discover LAN Hostnames via mDNS (.local)",
   settingsSniHostnamesLabel: "DoT / DoQ SNI ClientID Base Hostnames (one per line)",
@@ -449,6 +455,12 @@ const en = {
   subsPresetAddBtn: "Subscribe",
 
   backupTitle: "System Backup & Restore",
+  configHistoryTitle: "Configuration History & Rollback",
+  configHistorySubtitle:
+    "Automatically saved snapshots on every config change (up to 20). Roll back to any previous state in one click.",
+  configHistoryEmpty: "No configuration snapshots recorded yet.",
+  configHistoryRollbackBtn: "Rollback",
+  configHistoryRolledBack: "Configuration rolled back and applied.",
   backupSubtitle:
     "Export or restore runtime configuration, custom rules, subscriptions, DNS rewrites, and client profiles as a single JSON snapshot.",
   backupExportBtn: "Export Backup",
@@ -771,7 +783,9 @@ const zhCN: Record<TranslationKey, string> = {
   rulesTesterMatched: "命中规则",
   rulesTesterNoMatch: "未命中规则（将转发上游）",
   settingsSplitDnsLabel: "分流解析规则（每行一条：域名=上游1,上游2）",
-  settingsSplitDnsHint: "示例：corp.local=udp://10.0.0.1:53,udp://10.0.0.2:53",
+  settingsSplitDnsHint:
+    "示例：corp.local=udp://10.0.0.1:53 或 https://.../cn.txt=https://dns.alidns.com/dns-query",
+  settingsSplitDnsRefreshBtn: "刷新分流订阅",
   settingsCnameCloakingLabel: "CNAME 伪装拦截（检查上游返回的 CNAME 目标）",
   settingsDohEnabledLabel: "启用入站 DNS-over-HTTPS (/dns-query)",
   settingsAllowPrivateSubsLabel: "允许内网/本地地址作为规则订阅源",
@@ -892,6 +906,10 @@ const zhCN: Record<TranslationKey, string> = {
   portCheckStatusPermission: "权限不足：绑定 1024 以下端口需要 root 或 CAP_NET_BIND_SERVICE 权限",
   portCheckStatusInvalid: "地址格式无效，请使用 IP:端口 格式（如 0.0.0.0:53）",
   settingsDhcpLeasesLabel: "读取 DHCP Lease 文件解析设备主机名",
+  settingsDhcpLeasesForwardLabel: "DHCP 租约自动正向解析 (A/AAAA/PTR)",
+  tooltipDhcpLeasesForward:
+    "自动将 DHCP 租约中的设备主机名解析为内网 A/AAAA/PTR 记录（如 nas.lan），无需手动维护 Hosts。",
+  settingsDhcpLeasesDomainLabel: "DHCP 本地域名后缀",
   settingsDhcpLeasesPathLabel: "DHCP Lease 文件路径（dnsmasq / ISC / Kea）",
   settingsMdnsLabel: "启用 mDNS (.local) 局域网设备名发现",
   settingsSniHostnamesLabel: "DoT / DoQ SNI ClientID 根域名（每行一个）",
@@ -994,6 +1012,12 @@ const zhCN: Record<TranslationKey, string> = {
   subsPresetAddBtn: "一键订阅",
 
   backupTitle: "整机配置备份与恢复",
+  configHistoryTitle: "配置变更历史与一键回滚",
+  configHistorySubtitle:
+    "每次保存配置或导入备份时自动留存快照（最多保留 20 份），支持一键回滚并热生效。",
+  configHistoryEmpty: "暂无配置变更历史快照。",
+  configHistoryRollbackBtn: "一键回滚",
+  configHistoryRolledBack: "已回滚并热应用该历史配置。",
   backupSubtitle:
     "将运行时配置、自定义规则、订阅列表（含规则缓存）、DNS 重写与客户端分组策略打包为单个 JSON 文件一键导出或恢复。",
   backupExportBtn: "导出备份 JSON",

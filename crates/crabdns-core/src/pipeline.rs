@@ -64,6 +64,8 @@ pub struct DnsPipeline {
     pub(crate) hosts_enabled: AtomicBool,
     pub(crate) hosts_table: ArcSwap<HostsTable>,
     pub(crate) dhcp_leases_enabled: AtomicBool,
+    pub(crate) dhcp_leases_forward_enabled: AtomicBool,
+    pub(crate) dhcp_leases_domain: ArcSwap<String>,
     pub(crate) dhcp_leases: ArcSwap<DhcpLeaseTable>,
     pub(crate) neighbor_table: ArcSwap<NeighborTable>,
     pub(crate) mdns_enabled: AtomicBool,
@@ -132,6 +134,8 @@ impl DnsPipeline {
             hosts_enabled: AtomicBool::new(false),
             hosts_table: ArcSwap::from_pointee(HostsTable::default()),
             dhcp_leases_enabled: AtomicBool::new(false),
+            dhcp_leases_forward_enabled: AtomicBool::new(false),
+            dhcp_leases_domain: ArcSwap::from_pointee("lan".to_string()),
             dhcp_leases: ArcSwap::from_pointee(DhcpLeaseTable::default()),
             neighbor_table: ArcSwap::from_pointee(NeighborTable::default()),
             mdns_enabled: AtomicBool::new(false),
@@ -418,19 +422,24 @@ impl DnsPipeline {
         timeout_ms: u64,
         strategy: UpstreamStrategy,
     ) -> Result<()> {
-        self.reload_split_dns_with_bootstrap(rules, timeout_ms, strategy, &[])
+        self.reload_split_dns_with_resolver(rules, timeout_ms, strategy, &[], |_| None)
     }
 
-    pub fn reload_split_dns_with_bootstrap(
+    pub fn reload_split_dns_with_resolver<F: Fn(&str) -> Option<String>>(
         &self,
         rules: &[SplitDnsRule],
         timeout_ms: u64,
         strategy: UpstreamStrategy,
         bootstrap_dns: &[String],
+        resolve_url: F,
     ) -> Result<()> {
-        let router =
-            SplitUpstreamRouter::new_with_bootstrap(rules, timeout_ms, strategy, bootstrap_dns)?;
-        self.swap_split_dns(router);
+        self.swap_split_dns(SplitUpstreamRouter::new_with_resolver(
+            rules,
+            timeout_ms,
+            strategy,
+            bootstrap_dns,
+            resolve_url,
+        )?);
         Ok(())
     }
 
@@ -483,6 +492,13 @@ impl DnsPipeline {
 
     pub fn set_dhcp_leases_enabled(&self, enabled: bool) {
         self.dhcp_leases_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_dhcp_leases_forward(&self, enabled: bool, domain: impl Into<String>) {
+        self.dhcp_leases_forward_enabled
+            .store(enabled, Ordering::Relaxed);
+        let norm = domain.into().trim().trim_matches('.').to_ascii_lowercase();
+        self.dhcp_leases_domain.store(Arc::new(norm));
     }
 
     pub fn reload_dhcp_leases_table(&self, table: DhcpLeaseTable) {

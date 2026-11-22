@@ -183,6 +183,8 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.hosts_path = saved_cfg.hosts_path;
     config.dhcp_leases_enabled = saved_cfg.dhcp_leases_enabled;
     config.dhcp_leases_path = saved_cfg.dhcp_leases_path;
+    config.dhcp_leases_forward_enabled = saved_cfg.dhcp_leases_forward_enabled;
+    config.dhcp_leases_domain = saved_cfg.dhcp_leases_domain;
     config.mdns_enabled = saved_cfg.mdns_enabled;
     config.sni_client_id_hostnames = saved_cfg.sni_client_id_hostnames;
     config.private_ptr_enabled = saved_cfg.private_ptr_enabled;
@@ -286,11 +288,12 @@ fn configure_pipeline(
     pipeline.set_cname_cloaking(cfg.cname_cloaking_blocking);
     pipeline.set_rdns_enabled(cfg.rdns_enabled);
     pipeline.reload_acl(&cfg.allow_cidrs, &cfg.deny_cidrs, cfg.rate_limit_qps)?;
-    pipeline.reload_split_dns_with_bootstrap(
+    pipeline.reload_split_dns_with_resolver(
         &cfg.split_dns,
         cfg.upstream_timeout_ms,
         cfg.upstream_strategy,
         &cfg.bootstrap_dns,
+        |url| storage.load_split_dns_list(url).ok().flatten(),
     )?;
     pipeline.reload_ecs(
         cfg.ecs_enabled,
@@ -307,6 +310,10 @@ fn configure_pipeline(
         }
     }
     pipeline.set_dhcp_leases_enabled(cfg.dhcp_leases_enabled);
+    pipeline.set_dhcp_leases_forward(
+        cfg.dhcp_leases_forward_enabled,
+        cfg.dhcp_leases_domain.clone(),
+    );
     if cfg.dhcp_leases_enabled {
         let resolved_dhcp = crabdns_core::resolve_dhcp_leases_path(cfg.dhcp_leases_path.as_deref());
         if let Err(err) = pipeline.reload_dhcp_leases_from_path(std::path::Path::new(resolved_dhcp))

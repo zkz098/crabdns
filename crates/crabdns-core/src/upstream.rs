@@ -500,6 +500,11 @@ impl UpstreamPool {
             .collect()
     }
 
+    pub fn has_healthy_endpoint(&self) -> bool {
+        let now_ms = monotonic_now_ms();
+        self.health.iter().any(|h| h.is_healthy(now_ms))
+    }
+
     pub async fn probe_all(&self) {
         // Minimal DNS query for root NS (ID=0x4242, RD=1, QDCOUNT=1, QNAME=., QTYPE=NS, QCLASS=IN)
         const PROBE_QUERY: [u8; 17] = [

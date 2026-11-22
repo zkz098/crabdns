@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 use crate::clients::ip_to_ptr_domain;
 use crate::error::Result;
+use crate::lan::{HostsMatch, parse_ptr_ip};
 use crate::neighbor::normalize_mac;
 use crate::upstream::next_tx_id;
 
@@ -69,6 +70,8 @@ pub fn resolve_dhcp_leases_path(configured: Option<&str>) -> &str {
 pub struct DhcpLeaseTable {
     entries: HashMap<IpAddr, String, RandomState>,
     mac_entries: HashMap<IpAddr, String, RandomState>,
+    host_v4: HashMap<String, Vec<Ipv4Addr>, RandomState>,
+    host_v6: HashMap<String, Vec<Ipv6Addr>, RandomState>,
 }
 
 impl DhcpLeaseTable {
@@ -121,10 +124,7 @@ impl DhcpLeaseTable {
                 entries.insert(ip, host);
             }
         }
-        Self {
-            entries,
-            mac_entries,
-        }
+        Self::from_maps(entries, mac_entries)
     }
 
     fn parse_isc_dhcpd(content: &str) -> Self {
@@ -139,10 +139,7 @@ impl DhcpLeaseTable {
             }
             block.process_line(line, &mut entries, &mut mac_entries);
         }
-        Self {
-            entries,
-            mac_entries,
-        }
+        Self::from_maps(entries, mac_entries)
     }
 
     fn parse_kea_csv(content: &str) -> Self {
@@ -191,9 +188,90 @@ impl DhcpLeaseTable {
                 entries.insert(ip, host);
             }
         }
+        Self::from_maps(entries, mac_entries)
+    }
+
+    fn from_maps(
+        entries: HashMap<IpAddr, String, RandomState>,
+        mac_entries: HashMap<IpAddr, String, RandomState>,
+    ) -> Self {
+        let mut host_v4: HashMap<String, Vec<Ipv4Addr>, RandomState> =
+            HashMap::with_hasher(RandomState::default());
+        let mut host_v6: HashMap<String, Vec<Ipv6Addr>, RandomState> =
+            HashMap::with_hasher(RandomState::default());
+        for (&ip, host) in &entries {
+            let norm = host.trim_end_matches('.').to_ascii_lowercase();
+            if norm.is_empty() {
+                continue;
+            }
+            match ip {
+                IpAddr::V4(v4) => {
+                    let list = host_v4.entry(norm).or_default();
+                    if !list.contains(&v4) {
+                        list.push(v4);
+                    }
+                }
+                IpAddr::V6(v6) => {
+                    let list = host_v6.entry(norm).or_default();
+                    if !list.contains(&v6) {
+                        list.push(v6);
+                    }
+                }
+            }
+        }
         Self {
             entries,
             mac_entries,
+            host_v4,
+            host_v6,
+        }
+    }
+
+    /// Resolves a DHCP lease hostname (bare or `<host>.<local_domain>`) or PTR query.
+    pub fn lookup_forward(
+        &self,
+        clean_domain: &str,
+        qtype: RecordType,
+        local_domain: &str,
+    ) -> Option<HostsMatch> {
+        let norm = clean_domain
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if norm.is_empty() {
+            return None;
+        }
+        let suffix = local_domain.trim().trim_matches('.').to_ascii_lowercase();
+        if qtype == RecordType::PTR {
+            let ip = parse_ptr_ip(&norm)?;
+            let host = self.entries.get(&ip)?.to_ascii_lowercase();
+            let fqdn = if suffix.is_empty() || host.contains('.') {
+                host
+            } else {
+                format!("{host}.{suffix}")
+            };
+            return Some(HostsMatch::Ptr(fqdn));
+        }
+
+        let stripped = if suffix.is_empty() {
+            None
+        } else {
+            norm.strip_suffix(&format!(".{suffix}"))
+        };
+        match qtype {
+            RecordType::A => self
+                .host_v4
+                .get(&norm)
+                .or_else(|| stripped.and_then(|label| self.host_v4.get(label)))
+                .cloned()
+                .map(HostsMatch::V4),
+            RecordType::AAAA => self
+                .host_v6
+                .get(&norm)
+                .or_else(|| stripped.and_then(|label| self.host_v6.get(label)))
+                .cloned()
+                .map(HostsMatch::V6),
+            _ => None,
         }
     }
 
@@ -608,5 +686,34 @@ lease 192.168.2.11 {
             default_dhcp_leases_path()
         );
         assert_eq!(resolve_dhcp_leases_path(None), default_dhcp_leases_path());
+    }
+
+    #[test]
+    fn test_dhcp_lease_forward_and_ptr_lookup() {
+        let content = "1710000000 aa:bb:cc:dd:ee:01 192.168.1.50 nas 01:aa\n\
+                       1710000000 aa:bb:cc:dd:ee:01 fd00::50 nas 01:aa\n";
+        let table = DhcpLeaseTable::parse(content);
+
+        assert_eq!(
+            table.lookup_forward("nas.lan", RecordType::A, "lan"),
+            Some(HostsMatch::V4(vec![Ipv4Addr::new(192, 168, 1, 50)]))
+        );
+        assert_eq!(
+            table.lookup_forward("nas", RecordType::A, "lan"),
+            Some(HostsMatch::V4(vec![Ipv4Addr::new(192, 168, 1, 50)]))
+        );
+        assert_eq!(
+            table.lookup_forward("nas.lan", RecordType::AAAA, "lan"),
+            Some(HostsMatch::V6(vec!["fd00::50".parse().unwrap()]))
+        );
+        assert_eq!(
+            table.lookup_forward("50.1.168.192.in-addr.arpa", RecordType::PTR, "lan"),
+            Some(HostsMatch::Ptr("nas.lan".to_string()))
+        );
+        assert!(
+            table
+                .lookup_forward("other.lan", RecordType::A, "lan")
+                .is_none()
+        );
     }
 }

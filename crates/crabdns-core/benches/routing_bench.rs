@@ -38,7 +38,10 @@ fn bench_split_dns(c: &mut Criterion) {
     let rules: Vec<SplitDnsRule> = (0..100)
         .map(|i| SplitDnsRule {
             domain: format!("corp-{i}.internal"),
+            domains_file: None,
+            domains_url: None,
             upstreams: vec!["127.0.0.1:5353".to_string()],
+            fallback_to_default: true,
         })
         .collect();
 

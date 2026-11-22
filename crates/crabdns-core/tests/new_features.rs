@@ -60,7 +60,10 @@ async fn test_split_dns_routing() {
         .reload_split_dns(
             &[SplitDnsRule {
                 domain: "corp.local".to_string(),
+                domains_file: None,
+                domains_url: None,
                 upstreams: vec![format!("udp://{corp_upstream}")],
+                fallback_to_default: true,
             }],
             1000,
             UpstreamStrategy::Failover,

@@ -32,6 +32,7 @@ import type { SafeSearchConfig } from "./types/SafeSearchConfig";
 import type { SetupCompletePayload } from "./types/SetupCompletePayload";
 import type { SetupStatusResponse } from "./types/SetupStatusResponse";
 import type { SplitDnsRule } from "./types/SplitDnsRule";
+import type { ConfigSnapshotMeta } from "./types/ConfigSnapshotMeta";
 import type { StatsResponse } from "./types/StatsResponse";
 import type { TestRuleResponse } from "./types/TestRuleResponse";
 import type { TlsStatusResponse } from "./types/TlsStatusResponse";
@@ -97,6 +98,11 @@ export default function App() {
   const [hostsPath, setHostsPath] = createSignal("");
   const [dhcpLeasesEnabled, setDhcpLeasesEnabled] = createSignal(false);
   const [dhcpLeasesPath, setDhcpLeasesPath] = createSignal("");
+  const [dhcpLeasesForwardEnabled, setDhcpLeasesForwardEnabled] = createSignal(false);
+  const [dhcpLeasesDomain, setDhcpLeasesDomain] = createSignal("lan");
+  const [configHistory, setConfigHistory] = createSignal<ConfigSnapshotMeta[]>([]);
+  const [rollbackBusy, setRollbackBusy] = createSignal(false);
+  const [refreshingSplitDns, setRefreshingSplitDns] = createSignal(false);
   const [mdnsEnabled, setMdnsEnabled] = createSignal(false);
   const [sniClientIdHostnamesText, setSniClientIdHostnamesText] = createSignal("");
   const [privatePtrEnabled, setPrivatePtrEnabled] = createSignal(false);
@@ -299,6 +305,66 @@ export default function App() {
       setBackupMessage(t("rulesNetworkError"));
     } finally {
       setBackupBusy(false);
+    }
+  }
+
+  async function fetchConfigHistory() {
+    try {
+      const res = await fetch("/api/config/history");
+      if (res.ok) {
+        const list: ConfigSnapshotMeta[] = await res.json();
+        setConfigHistory(list);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function rollbackConfigSnapshot(id: string) {
+    setRollbackBusy(true);
+    setBackupIsError(false);
+    setBackupMessage("");
+    try {
+      const res = await fetch(`/api/config/rollback/${encodeURIComponent(id)}`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        const updated: ConfigResponse = await res.json();
+        applyConfigToForm(updated);
+        await Promise.all([fetchConfigHistory(), fetchUpstreamHealth()]);
+        setBackupMessage(t("configHistoryRolledBack"));
+      } else {
+        const errBody = await res.json().catch(() => null);
+        setBackupIsError(true);
+        setBackupMessage(errBody?.error ?? t("rulesFailed"));
+      }
+    } catch {
+      setBackupIsError(true);
+      setBackupMessage(t("rulesNetworkError"));
+    } finally {
+      setRollbackBusy(false);
+    }
+  }
+
+  async function refreshSplitDnsLists() {
+    setRefreshingSplitDns(true);
+    setConfigIsError(false);
+    setConfigMessage("");
+    try {
+      const res = await fetch("/api/split-dns/refresh", { method: "POST" });
+      if (res.ok) {
+        const body = (await res.json()) as { updated?: number };
+        setConfigMessage(`${t("settingsSaved")} (${body.updated ?? 0})`);
+      } else {
+        const errBody = await res.json().catch(() => null);
+        setConfigIsError(true);
+        setConfigMessage(errBody?.error ?? t("rulesFailed"));
+      }
+    } catch {
+      setConfigIsError(true);
+      setConfigMessage(t("rulesNetworkError"));
+    } finally {
+      setRefreshingSplitDns(false);
     }
   }
 
@@ -571,7 +637,17 @@ export default function App() {
     setAuthEnabled(data.web_auth_enabled);
     setAuthUsername(data.web_username || "admin");
     setSplitDnsText(
-      (data.split_dns ?? []).map((r) => `${r.domain}=${r.upstreams.join(",")}`).join("\n"),
+      (data.split_dns ?? [])
+        .map((r) => {
+          const lhs = r.domains_url
+            ? r.domains_url
+            : r.domains_file
+              ? `file:${r.domains_file}`
+              : r.domain;
+          const suffix = r.fallback_to_default === false ? "|nofallback" : "";
+          return `${lhs}=${r.upstreams.join(",")}${suffix}`;
+        })
+        .join("\n"),
     );
     setCnameCloakingBlocking(data.cname_cloaking_blocking);
     setDohEnabled(data.doh_enabled);
@@ -585,6 +661,8 @@ export default function App() {
     setHostsPath(data.hosts_path ?? "");
     setDhcpLeasesEnabled(data.dhcp_leases_enabled);
     setDhcpLeasesPath(data.dhcp_leases_path ?? "");
+    setDhcpLeasesForwardEnabled(data.dhcp_leases_forward_enabled);
+    setDhcpLeasesDomain(data.dhcp_leases_domain || "lan");
     setMdnsEnabled(data.mdns_enabled);
     setSniClientIdHostnamesText((data.sni_client_id_hostnames ?? []).join("\n"));
     setPrivatePtrEnabled(data.private_ptr_enabled);
@@ -1087,6 +1165,7 @@ export default function App() {
       if (res.ok) {
         const data: ConfigResponse = await res.json();
         applyConfigToForm(data);
+        void fetchConfigHistory();
       }
     } catch {
       // ignore
@@ -1123,16 +1202,39 @@ export default function App() {
         .filter((s) => s.length > 0);
     const parseSplitDns = (text: string): SplitDnsRule[] =>
       parseLines(text)
-        .map((line) => {
+        .map((line): SplitDnsRule | null => {
           const eq = line.indexOf("=");
           if (eq <= 0) return null;
-          const domain = line.slice(0, eq).trim();
-          const upstreams = line
-            .slice(eq + 1)
+          const lhs = line.slice(0, eq).trim();
+          let rhs = line.slice(eq + 1).trim();
+          let fallback_to_default = true;
+          if (rhs.endsWith("|nofallback")) {
+            fallback_to_default = false;
+            rhs = rhs.slice(0, -"|nofallback".length).trim();
+          }
+          const upstreams = rhs
             .split(",")
             .map((s) => s.trim())
             .filter((s) => s.length > 0);
-          return domain && upstreams.length > 0 ? { domain, upstreams } : null;
+          if (upstreams.length === 0) return null;
+          if (lhs.startsWith("http://") || lhs.startsWith("https://")) {
+            return {
+              domain: "",
+              domains_file: null,
+              domains_url: lhs,
+              upstreams,
+              fallback_to_default,
+            };
+          }
+          if (lhs.startsWith("file:")) {
+            const domains_file = lhs.slice(5).trim();
+            return domains_file
+              ? { domain: "", domains_file, domains_url: null, upstreams, fallback_to_default }
+              : null;
+          }
+          return lhs
+            ? { domain: lhs, domains_file: null, domains_url: null, upstreams, fallback_to_default }
+            : null;
         })
         .filter((item): item is SplitDnsRule => item !== null);
     const payload: ConfigUpdatePayload = {
@@ -1164,6 +1266,8 @@ export default function App() {
       hosts_path: hostsPath().trim(),
       dhcp_leases_enabled: dhcpLeasesEnabled(),
       dhcp_leases_path: dhcpLeasesPath().trim(),
+      dhcp_leases_forward_enabled: dhcpLeasesForwardEnabled(),
+      dhcp_leases_domain: dhcpLeasesDomain().trim() || "lan",
       mdns_enabled: mdnsEnabled(),
       sni_client_id_hostnames: parseLines(sniClientIdHostnamesText()),
       private_ptr_enabled: privatePtrEnabled(),
@@ -1212,7 +1316,12 @@ export default function App() {
         applyConfigToForm(updated);
         setConfigIsError(false);
         setConfigMessage(t("settingsSaved"));
-        await Promise.all([fetchStats(), fetchTlsStatus(), fetchAcmeStatus()]);
+        await Promise.all([
+          fetchStats(),
+          fetchTlsStatus(),
+          fetchAcmeStatus(),
+          fetchConfigHistory(),
+        ]);
       } else {
         setConfigIsError(true);
         const errBody = await res.json().catch(() => null);
@@ -1467,6 +1576,8 @@ export default function App() {
                 onCachePersistChange={setCachePersistEnabled}
                 splitDnsText={splitDnsText()}
                 onSplitDnsChange={setSplitDnsText}
+                refreshingSplitDns={refreshingSplitDns()}
+                onRefreshSplitDns={refreshSplitDnsLists}
                 cnameCloakingBlocking={cnameCloakingBlocking()}
                 onCnameCloakingChange={setCnameCloakingBlocking}
                 dohEnabled={dohEnabled()}
@@ -1491,6 +1602,10 @@ export default function App() {
                 onDhcpLeasesEnabledChange={setDhcpLeasesEnabled}
                 dhcpLeasesPath={dhcpLeasesPath()}
                 onDhcpLeasesPathChange={setDhcpLeasesPath}
+                dhcpLeasesForwardEnabled={dhcpLeasesForwardEnabled()}
+                onDhcpLeasesForwardEnabledChange={setDhcpLeasesForwardEnabled}
+                dhcpLeasesDomain={dhcpLeasesDomain()}
+                onDhcpLeasesDomainChange={setDhcpLeasesDomain}
                 mdnsEnabled={mdnsEnabled()}
                 onMdnsEnabledChange={setMdnsEnabled}
                 sniClientIdHostnamesText={sniClientIdHostnamesText()}
@@ -1566,6 +1681,10 @@ export default function App() {
                 backupMessage={backupMessage()}
                 backupIsError={backupIsError()}
                 backupBusy={backupBusy()}
+                configHistory={configHistory()}
+                rollbackBusy={rollbackBusy()}
+                onRefreshHistory={fetchConfigHistory}
+                onRollbackConfig={rollbackConfigSnapshot}
                 updateStatus={updateStatus()}
                 updateBusy={updateBusy()}
                 updateMessage={updateMessage()}

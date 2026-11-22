@@ -63,6 +63,8 @@ pub struct ConfigResponse {
     pub hosts_path: Option<String>,
     pub dhcp_leases_enabled: bool,
     pub dhcp_leases_path: Option<String>,
+    pub dhcp_leases_forward_enabled: bool,
+    pub dhcp_leases_domain: String,
     pub mdns_enabled: bool,
     pub private_ptr_enabled: bool,
     pub private_ptr_upstreams: Vec<String>,
@@ -138,6 +140,8 @@ impl From<&Config> for ConfigResponse {
             hosts_path: cfg.hosts_path.clone(),
             dhcp_leases_enabled: cfg.dhcp_leases_enabled,
             dhcp_leases_path: cfg.dhcp_leases_path.clone(),
+            dhcp_leases_forward_enabled: cfg.dhcp_leases_forward_enabled,
+            dhcp_leases_domain: cfg.dhcp_leases_domain.clone(),
             mdns_enabled: cfg.mdns_enabled,
             private_ptr_enabled: cfg.private_ptr_enabled,
             private_ptr_upstreams: cfg.private_ptr_upstreams.clone(),
@@ -229,6 +233,10 @@ pub struct ConfigUpdatePayload {
     pub dhcp_leases_enabled: Option<bool>,
     #[serde(default)]
     pub dhcp_leases_path: Option<String>,
+    #[serde(default)]
+    pub dhcp_leases_forward_enabled: Option<bool>,
+    #[serde(default)]
+    pub dhcp_leases_domain: Option<String>,
     #[serde(default)]
     pub mdns_enabled: Option<bool>,
     #[serde(default)]
@@ -344,6 +352,14 @@ fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) 
     )
 }
 
+#[allow(clippy::needless_pass_by_value)]
+fn internal_error(err: impl ToString) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": err.to_string() })),
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn update_config(
     State(state): State<RouterState>,
@@ -392,9 +408,18 @@ pub async fn update_config(
         .into_iter()
         .map(|rule| SplitDnsRule {
             domain: rule.domain.trim().to_string(),
+            domains_file: rule
+                .domains_file
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
+            domains_url: rule
+                .domains_url
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty()),
             upstreams: clean_string_list(rule.upstreams),
+            fallback_to_default: rule.fallback_to_default,
         })
-        .filter(|rule| !rule.domain.is_empty())
+        .filter(|r| !r.domain.is_empty() || r.domains_file.is_some() || r.domains_url.is_some())
         .collect();
     let cname_cloaking_blocking = payload
         .cname_cloaking_blocking
@@ -417,6 +442,14 @@ pub async fn update_config(
         payload.dhcp_leases_path,
         current.dhcp_leases_path.as_deref(),
     );
+    let dhcp_leases_forward_enabled = payload
+        .dhcp_leases_forward_enabled
+        .unwrap_or(current.dhcp_leases_forward_enabled);
+    let dhcp_leases_domain = payload
+        .dhcp_leases_domain
+        .map(|d| d.trim().trim_matches('.').to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| current.dhcp_leases_domain.clone());
     let mdns_enabled = payload.mdns_enabled.unwrap_or(current.mdns_enabled);
     let sni_client_id_hostnames = clean_string_list(
         payload
@@ -526,11 +559,12 @@ pub async fn update_config(
         &bootstrap_dns,
     )
     .map_err(|err| bad_request(err.to_string()))?;
-    let next_split_dns = SplitUpstreamRouter::new_with_bootstrap(
+    let next_split_dns = SplitUpstreamRouter::new_with_resolver(
         &split_dns,
         payload.upstream_timeout_ms,
         strategy,
         &bootstrap_dns,
+        |url| state.app.storage.load_split_dns_list(url).ok().flatten(),
     )
     .map_err(|err| bad_request(err.to_string()))?;
     let next_private_ptr = PrivatePtrRouter::new(
@@ -629,6 +663,8 @@ pub async fn update_config(
     next.hosts_path = hosts_path;
     next.dhcp_leases_enabled = dhcp_leases_enabled;
     next.dhcp_leases_path = dhcp_leases_path;
+    next.dhcp_leases_forward_enabled = dhcp_leases_forward_enabled;
+    next.dhcp_leases_domain = dhcp_leases_domain.clone();
     next.mdns_enabled = mdns_enabled;
     next.sni_client_id_hostnames = sni_client_id_hostnames;
     next.private_ptr_enabled = private_ptr_enabled;
@@ -659,76 +695,55 @@ pub async fn update_config(
     // Phase 2: Persist config first, then atomically swap all runtime state.
     let storage = Arc::clone(&state.app.storage);
     let to_save = next.clone();
-    tokio::task::spawn_blocking(move || storage.save_config(&to_save))
-        .await
-        .map_err(|err| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": err.to_string() })),
-            )
-        })?
-        .map_err(|err| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": err.to_string() })),
-            )
-        })?;
+    let prev_snapshot = current.clone();
+    tokio::task::spawn_blocking(move || -> crabdns_storage::Result<()> {
+        if storage.list_config_history()?.is_empty() {
+            let _ = storage.record_config_snapshot(&prev_snapshot, "initial");
+        }
+        storage.save_config(&to_save)?;
+        let _ = storage.record_config_snapshot(&to_save, "settings_update");
+        Ok(())
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
 
-    state.app.pipeline.swap_acl(next_acl);
-    state.app.pipeline.swap_ecs(next_ecs);
-    state.app.pipeline.swap_upstream(next_upstream);
-    state.app.pipeline.swap_split_dns(next_split_dns);
-    state.app.pipeline.swap_private_ptr(next_private_ptr);
-    state.app.pipeline.swap_clients(next_clients);
+    let pipe = &state.app.pipeline;
+    pipe.swap_acl(next_acl);
+    pipe.swap_ecs(next_ecs);
+    pipe.swap_upstream(next_upstream);
+    pipe.swap_split_dns(next_split_dns);
+    pipe.swap_private_ptr(next_private_ptr);
+    pipe.swap_clients(next_clients);
     if let Some(table) = hosts_table_opt {
-        state.app.pipeline.reload_hosts_table(table);
+        pipe.reload_hosts_table(table);
     }
     if let Some(dhcp_table) = dhcp_table_opt {
-        state.app.pipeline.reload_dhcp_leases_table(dhcp_table);
+        pipe.reload_dhcp_leases_table(dhcp_table);
     }
-    state.app.pipeline.set_block_mode(block_mode);
-    state
-        .app
-        .pipeline
-        .set_cname_cloaking(cname_cloaking_blocking);
-    state.app.pipeline.set_dnssec_enabled(dnssec_enabled);
-    state.app.pipeline.set_hosts_enabled(hosts_enabled);
-    state
-        .app
-        .pipeline
-        .set_dhcp_leases_enabled(dhcp_leases_enabled);
-    state.app.pipeline.set_mdns_enabled(mdns_enabled);
-    state
-        .app
-        .pipeline
-        .set_dns_rebinding_protection(dns_rebinding_protection);
-    state.app.pipeline.set_block_any_queries(block_any_queries);
-    state.app.pipeline.set_rdns_enabled(rdns_enabled);
-    state.app.pipeline.set_safesearch(safesearch);
-    let _ = state
-        .app
-        .pipeline
-        .reload_dns64(dns64_enabled, &dns64_prefixes);
-    state
-        .app
-        .pipeline
-        .set_svcb_sanitization(svcb_strip_ech, svcb_strip_hints);
-    state.app.pipeline.set_ede_enabled(ede_enabled);
-    state
-        .app
-        .pipeline
-        .set_dns_cookies(dns_cookies_enabled, dns_cookies_require_valid);
-    state
-        .app
-        .pipeline
-        .set_max_udp_payload_size(max_udp_payload_size);
-    state.app.pipeline.set_rrl(crabdns_core::RrlConfig {
+    pipe.set_block_mode(block_mode);
+    pipe.set_cname_cloaking(cname_cloaking_blocking);
+    pipe.set_dnssec_enabled(dnssec_enabled);
+    pipe.set_hosts_enabled(hosts_enabled);
+    pipe.set_dhcp_leases_enabled(dhcp_leases_enabled);
+    pipe.set_dhcp_leases_forward(dhcp_leases_forward_enabled, dhcp_leases_domain);
+    pipe.set_mdns_enabled(mdns_enabled);
+    pipe.set_dns_rebinding_protection(dns_rebinding_protection);
+    pipe.set_block_any_queries(block_any_queries);
+    pipe.set_rdns_enabled(rdns_enabled);
+    pipe.set_safesearch(safesearch);
+    let _ = pipe.reload_dns64(dns64_enabled, &dns64_prefixes);
+    pipe.set_svcb_sanitization(svcb_strip_ech, svcb_strip_hints);
+    pipe.set_ede_enabled(ede_enabled);
+    pipe.set_dns_cookies(dns_cookies_enabled, dns_cookies_require_valid);
+    pipe.set_max_udp_payload_size(max_udp_payload_size);
+    pipe.set_rrl(crabdns_core::RrlConfig {
         enabled: rrl_enabled,
         responses_per_second: rrl_responses_per_second,
         slip: rrl_slip,
         window_secs: rrl_window_secs,
     });
-    state.app.pipeline.reload_ddr(DdrConfig {
+    pipe.reload_ddr(DdrConfig {
         enabled: ddr_enabled,
         hostname: ddr_hostname,
         dot_port: current.listen_dot.map(|a| a.port()),
@@ -755,6 +770,7 @@ pub async fn update_config(
         );
     }
 
+    crate::split_dns_sync::maybe_spawn_split_dns_sync(&state, &next);
     let response = ConfigResponse::from(&next);
     state.app.config.store(Arc::new(next));
     Ok(Json(response))
@@ -774,18 +790,8 @@ async fn compile_clients_for_config(
         ))
     })
     .await
-    .map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        )
-    })?
-    .map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        )
-    })?;
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
 
     ClientRegistry::compile(&clients, &groups, timeout_ms, strategy, bootstrap_dns)
         .map_err(|err| bad_request(err.to_string()))

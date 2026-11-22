@@ -94,6 +94,35 @@ pub fn spawn_subscription_refresh_task(
         let client_private = crabdns_web::subscriptions::build_subscription_http_client(true);
         let mut interval = delay_interval(Duration::from_hours(24));
         interval.tick().await;
+        // On startup, immediately fetch any configured split-DNS remote lists not yet cached.
+        {
+            let cfg_now = config.load_full();
+            let missing_split = cfg_now.split_dns.iter().any(|r| {
+                r.domains_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .is_some_and(|u| storage.load_split_dns_list(u).ok().flatten().is_none())
+            });
+            if missing_split {
+                let client = if cfg_now.allow_private_subscriptions {
+                    &client_private
+                } else {
+                    &client_public
+                };
+                if let Err(err) = crabdns_web::split_dns_sync::refresh_split_dns_subscriptions_job(
+                    client,
+                    &cfg_now,
+                    &storage,
+                    &pipeline,
+                    cfg_now.allow_private_subscriptions,
+                )
+                .await
+                {
+                    tracing::warn!(error = %err, "initial split-DNS subscription fetch failed");
+                }
+            }
+        }
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
@@ -102,7 +131,8 @@ pub fn spawn_subscription_refresh_task(
                     }
                 }
                 _ = interval.tick() => {
-                    let allow_private = config.load().allow_private_subscriptions;
+                    let cfg_now = config.load_full();
+                    let allow_private = cfg_now.allow_private_subscriptions;
                     let client = if allow_private {
                         &client_private
                     } else {
@@ -118,6 +148,18 @@ pub fn spawn_subscription_refresh_task(
                         .await
                     {
                         tracing::warn!(error = %err, "scheduled subscription refresh failed");
+                    }
+                    if let Err(err) =
+                        crabdns_web::split_dns_sync::refresh_split_dns_subscriptions_job(
+                            client,
+                            &cfg_now,
+                            &storage,
+                            &pipeline,
+                            allow_private,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %err, "scheduled split-DNS refresh failed");
                     }
                 }
             }

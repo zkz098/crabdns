@@ -1,9 +1,10 @@
-import { Show, createSignal } from "solid-js";
+import { For, Show, createSignal } from "solid-js";
 import { t } from "../i18n";
 import type { AcmeChallengeType } from "../types/AcmeChallengeType";
 import type { AcmeStatusResponse } from "../types/AcmeStatusResponse";
 import type { BlockMode } from "../types/BlockMode";
 import type { ConfigResponse } from "../types/ConfigResponse";
+import type { ConfigSnapshotMeta } from "../types/ConfigSnapshotMeta";
 import type { SafeSearchConfig } from "../types/SafeSearchConfig";
 import type { TlsStatusResponse } from "../types/TlsStatusResponse";
 import type { UpdateStatusResponse } from "../types/UpdateStatusResponse";
@@ -57,6 +58,8 @@ interface SettingsViewProps {
   onCachePersistChange: (val: boolean) => void;
   splitDnsText: string;
   onSplitDnsChange: (val: string) => void;
+  refreshingSplitDns?: boolean;
+  onRefreshSplitDns?: () => Promise<void> | void;
   cnameCloakingBlocking: boolean;
   onCnameCloakingChange: (val: boolean) => void;
   dohEnabled: boolean;
@@ -81,6 +84,10 @@ interface SettingsViewProps {
   onDhcpLeasesEnabledChange: (val: boolean) => void;
   dhcpLeasesPath: string;
   onDhcpLeasesPathChange: (val: string) => void;
+  dhcpLeasesForwardEnabled: boolean;
+  onDhcpLeasesForwardEnabledChange: (val: boolean) => void;
+  dhcpLeasesDomain: string;
+  onDhcpLeasesDomainChange: (val: string) => void;
   mdnsEnabled: boolean;
   onMdnsEnabledChange: (val: boolean) => void;
   sniClientIdHostnamesText: string;
@@ -156,6 +163,10 @@ interface SettingsViewProps {
   backupMessage?: string;
   backupIsError?: boolean;
   backupBusy?: boolean;
+  configHistory?: ConfigSnapshotMeta[];
+  rollbackBusy?: boolean;
+  onRefreshHistory?: () => Promise<void> | void;
+  onRollbackConfig?: (id: string) => Promise<void> | void;
   updateStatus?: UpdateStatusResponse | null;
   updateBusy?: boolean;
   updateMessage?: string;
@@ -441,9 +452,21 @@ export function SettingsView(props: SettingsViewProps) {
                       <span>{t("settingsSplitDnsLabel")}</span>
                       <InfoTooltip text={t("tooltipSplitDns")} align="left" />
                     </label>
-                    <span class="text-[11px] text-[#8f8f8f] dark:text-[#71717a]">
-                      {t("settingsSplitDnsHint")}
-                    </span>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="text-[11px] text-[#8f8f8f] dark:text-[#71717a]">
+                        {t("settingsSplitDnsHint")}
+                      </span>
+                      <Show when={props.onRefreshSplitDns}>
+                        <button
+                          type="button"
+                          disabled={props.refreshingSplitDns}
+                          onClick={() => props.onRefreshSplitDns?.()}
+                          class="h-6 px-2 rounded text-[11px] font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] cursor-pointer transition-colors disabled:opacity-50"
+                        >
+                          {t("settingsSplitDnsRefreshBtn")}
+                        </button>
+                      </Show>
+                    </div>
                   </div>
                   <textarea
                     value={props.splitDnsText}
@@ -674,6 +697,18 @@ export function SettingsView(props: SettingsViewProps) {
                   <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
                     <input
                       type="checkbox"
+                      checked={props.dhcpLeasesForwardEnabled}
+                      onChange={(e) =>
+                        props.onDhcpLeasesForwardEnabledChange(e.currentTarget.checked)
+                      }
+                      class="rounded border-[#eaeaea] dark:border-[#262626]"
+                    />
+                    <span>{t("settingsDhcpLeasesForwardLabel")}</span>
+                    <InfoTooltip text={t("tooltipDhcpLeasesForward")} />
+                  </label>
+                  <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+                    <input
+                      type="checkbox"
                       checked={props.mdnsEnabled}
                       onChange={(e) => props.onMdnsEnabledChange(e.currentTarget.checked)}
                       class="rounded border-[#eaeaea] dark:border-[#262626]"
@@ -734,6 +769,18 @@ export function SettingsView(props: SettingsViewProps) {
                       placeholder="/var/lib/misc/dnsmasq.leases"
                       value={props.dhcpLeasesPath}
                       onInput={(e) => props.onDhcpLeasesPathChange(e.currentTarget.value)}
+                      class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                      {t("settingsDhcpLeasesDomainLabel")}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="lan"
+                      value={props.dhcpLeasesDomain}
+                      onInput={(e) => props.onDhcpLeasesDomainChange(e.currentTarget.value)}
                       class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
                     />
                   </div>
@@ -1380,6 +1427,69 @@ export function SettingsView(props: SettingsViewProps) {
                   } text-sm shrink-0 mt-0.5`}
                 />
                 <span class="min-w-0">{props.backupMessage}</span>
+              </div>
+            </Show>
+          </div>
+        </Show>
+
+        {/* Configuration History & Rollback */}
+        <Show when={props.onRollbackConfig}>
+          <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div class="min-w-0 flex-1 space-y-1">
+                <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                  {t("configHistoryTitle")}
+                </p>
+                <p class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                  {t("configHistorySubtitle")}
+                </p>
+              </div>
+              <Show when={props.onRefreshHistory}>
+                <button
+                  type="button"
+                  disabled={props.rollbackBusy}
+                  onClick={() => props.onRefreshHistory?.()}
+                  class="h-8 px-3 rounded-lg text-xs font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50 shrink-0"
+                >
+                  <span class="i-ri-refresh-line text-sm" />
+                </button>
+              </Show>
+            </div>
+            <Show
+              when={(props.configHistory?.length ?? 0) > 0}
+              fallback={
+                <p class="text-[11px] text-[#8f8f8f] dark:text-[#71717a]">
+                  {t("configHistoryEmpty")}
+                </p>
+              }
+            >
+              <div class="max-h-52 overflow-y-auto divide-y divide-[#eaeaea] dark:divide-[#262626] border border-[#eaeaea] dark:border-[#262626] rounded-lg bg-[#fafafa] dark:bg-[#050505]">
+                <For each={props.configHistory ?? []}>
+                  {(snap) => (
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-2 font-mono text-[11px] text-[#171717] dark:text-[#ededed]">
+                          <span>{new Date(Number(snap.created_at) * 1000).toLocaleString()}</span>
+                          <span class="px-1.5 py-0.5 rounded bg-[#eaeaea] dark:bg-[#1f1f1f] text-[10px]">
+                            {snap.reason}
+                          </span>
+                        </div>
+                        <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa] truncate">
+                          {snap.listen_dns} · {snap.upstreams_count} upstreams ·{" "}
+                          {snap.split_dns_count} split rules
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={props.rollbackBusy}
+                        onClick={() => props.onRollbackConfig?.(snap.id)}
+                        class="h-7 px-2.5 rounded-md text-[11px] font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] cursor-pointer transition-colors disabled:opacity-50 shrink-0"
+                      >
+                        {t("configHistoryRollbackBtn")}
+                      </button>
+                    </div>
+                  )}
+                </For>
               </div>
             </Show>
           </div>

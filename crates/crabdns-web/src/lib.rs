@@ -24,12 +24,14 @@ pub mod auth;
 pub mod backup_api;
 pub mod clients_api;
 pub mod config_api;
+pub mod config_history_api;
 pub mod controls;
 pub mod doh;
 pub mod metrics;
 pub mod proxy;
 pub mod rewrites_api;
 pub mod setup_api;
+pub mod split_dns_sync;
 pub mod subscriptions;
 pub mod tls_api;
 pub mod update_api;
@@ -170,6 +172,14 @@ pub fn build_router_with_managers(
             "/api/backup",
             get(backup_api::export_backup).post(backup_api::import_backup),
         )
+        .route(
+            "/api/config/history",
+            get(config_history_api::list_config_history),
+        )
+        .route(
+            "/api/config/rollback/{id}",
+            post(config_history_api::rollback_config),
+        )
         .route("/api/rules", get(get_rules).put(update_rules))
         .route("/api/rules/quick", post(controls::quick_rule))
         .route("/api/rules/test", post(controls::test_rule))
@@ -188,6 +198,10 @@ pub fn build_router_with_managers(
         .route(
             "/api/subscriptions",
             get(subscriptions::list_subscriptions).post(subscriptions::create_subscription),
+        )
+        .route(
+            "/api/split-dns/refresh",
+            post(split_dns_sync::refresh_split_dns),
         )
         .route(
             "/api/subscriptions/refresh",

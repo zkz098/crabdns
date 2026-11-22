@@ -26,6 +26,7 @@ pub mod safesearch;
 pub mod security;
 pub mod singleflight;
 pub mod split_dns;
+mod split_dns_trie;
 pub mod svcb;
 pub mod upstream;
 pub mod upstream_probe;

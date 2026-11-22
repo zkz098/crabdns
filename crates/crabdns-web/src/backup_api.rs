@@ -118,6 +118,8 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         hosts_path: cfg.hosts_path.clone(),
         dhcp_leases_enabled: Some(cfg.dhcp_leases_enabled),
         dhcp_leases_path: cfg.dhcp_leases_path.clone(),
+        dhcp_leases_forward_enabled: Some(cfg.dhcp_leases_forward_enabled),
+        dhcp_leases_domain: Some(cfg.dhcp_leases_domain.clone()),
         mdns_enabled: Some(cfg.mdns_enabled),
         sni_client_id_hostnames: Some(cfg.sni_client_id_hostnames.clone()),
         private_ptr_enabled: Some(cfg.private_ptr_enabled),
@@ -361,9 +363,18 @@ fn merge_config_payload(current: &Config, mut payload: ConfigUpdatePayload) -> A
             .into_iter()
             .map(|r| SplitDnsRule {
                 domain: r.domain.trim().to_string(),
+                domains_file: r
+                    .domains_file
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty()),
+                domains_url: r
+                    .domains_url
+                    .map(|u| u.trim().to_string())
+                    .filter(|u| !u.is_empty()),
                 upstreams: clean_string_list(r.upstreams),
+                fallback_to_default: r.fallback_to_default,
             })
-            .filter(|r| !r.domain.is_empty())
+            .filter(|r| !r.domain.is_empty() || r.domains_file.is_some() || r.domains_url.is_some())
             .collect();
     }
     apply_optional_flags(&mut next, current, payload);
@@ -392,6 +403,17 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
         payload.dhcp_leases_path,
         current.dhcp_leases_path.as_deref(),
     );
+    next.dhcp_leases_forward_enabled = payload
+        .dhcp_leases_forward_enabled
+        .unwrap_or(current.dhcp_leases_forward_enabled);
+    if let Some(domain) = payload.dhcp_leases_domain {
+        let trimmed = domain.trim().trim_matches('.').to_ascii_lowercase();
+        next.dhcp_leases_domain = if trimmed.is_empty() {
+            "lan".to_string()
+        } else {
+            trimmed
+        };
+    }
     next.mdns_enabled = payload.mdns_enabled.unwrap_or(current.mdns_enabled);
     if let Some(v) = payload.sni_client_id_hostnames {
         next.sni_client_id_hostnames = clean_string_list(v);
@@ -444,7 +466,7 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
     next.rrl_window_secs = payload.rrl_window_secs.unwrap_or(current.rrl_window_secs);
 }
 
-struct CompiledRuntime {
+pub(crate) struct CompiledRuntime {
     acl: AccessController,
     ecs: EcsConfig,
     upstream: UpstreamPool,
@@ -453,10 +475,11 @@ struct CompiledRuntime {
     clients: ClientRegistry,
 }
 
-fn compile_runtime_components(
+pub(crate) fn compile_runtime_components(
     next: &Config,
     clients: &[ClientProfile],
     groups: &[ClientGroup],
+    storage: &crabdns_storage::StorageEngine,
 ) -> ApiResult<CompiledRuntime> {
     parse_cidr_list(&next.trusted_proxies)
         .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -476,11 +499,12 @@ fn compile_runtime_components(
         &next.bootstrap_dns,
     )
     .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let split_dns = SplitUpstreamRouter::new_with_bootstrap(
+    let split_dns = SplitUpstreamRouter::new_with_resolver(
         &next.split_dns,
         next.upstream_timeout_ms,
         next.upstream_strategy,
         &next.bootstrap_dns,
+        |url| storage.load_split_dns_list(url).ok().flatten(),
     )
     .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
     let private_ptr = PrivatePtrRouter::new(
@@ -509,7 +533,7 @@ fn compile_runtime_components(
     })
 }
 
-fn apply_compiled_to_pipeline(
+pub(crate) fn apply_compiled_to_pipeline(
     state: &RouterState,
     current: &Config,
     next: &Config,
@@ -535,6 +559,10 @@ fn apply_compiled_to_pipeline(
     pipe.set_dnssec_enabled(next.dnssec_enabled);
     pipe.set_hosts_enabled(next.hosts_enabled);
     pipe.set_dhcp_leases_enabled(next.dhcp_leases_enabled);
+    pipe.set_dhcp_leases_forward(
+        next.dhcp_leases_forward_enabled,
+        next.dhcp_leases_domain.clone(),
+    );
     pipe.set_mdns_enabled(next.mdns_enabled);
     pipe.set_dns_rebinding_protection(next.dns_rebinding_protection);
     pipe.set_block_any_queries(next.block_any_queries);
@@ -594,7 +622,12 @@ pub async fn import_backup(
         validate_backup_subscriptions(backup.subscriptions, next.allow_private_subscriptions)?;
     let normalized_groups = validate_backup_groups(backup.client_groups)?;
     let normalized_clients = validate_backup_clients(backup.clients)?;
-    let compiled = compile_runtime_components(&next, &normalized_clients, &normalized_groups)?;
+    let compiled = compile_runtime_components(
+        &next,
+        &normalized_clients,
+        &normalized_groups,
+        &state.app.storage,
+    )?;
 
     let hosts_table_opt = if next.hosts_enabled {
         let resolved_hosts = next
@@ -635,6 +668,7 @@ pub async fn import_backup(
     let custom_rules_enabled = backup.custom_rules_enabled;
     tokio::task::spawn_blocking(move || -> crabdns_storage::Result<()> {
         storage.save_config(&to_save_cfg)?;
+        let _ = storage.record_config_snapshot(&to_save_cfg, "backup_import");
         storage.save_custom_rules(&custom_rules)?;
         storage.save_custom_rules_enabled(custom_rules_enabled)?;
         storage.clear_subscription_contents()?;

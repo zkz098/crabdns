@@ -39,8 +39,15 @@ pub enum AcmeChallengeType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SplitDnsRule {
+    #[serde(default)]
     pub domain: String,
+    #[serde(default)]
+    pub domains_file: Option<String>,
+    #[serde(default)]
+    pub domains_url: Option<String>,
     pub upstreams: Vec<String>,
+    #[serde(default = "default_true")]
+    pub fallback_to_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +143,10 @@ pub struct Config {
     pub dhcp_leases_enabled: bool,
     #[serde(default)]
     pub dhcp_leases_path: Option<String>,
+    #[serde(default)]
+    pub dhcp_leases_forward_enabled: bool,
+    #[serde(default = "default_dhcp_leases_domain")]
+    pub dhcp_leases_domain: String,
     #[serde(default)]
     pub mdns_enabled: bool,
     #[serde(default)]
@@ -287,6 +298,10 @@ fn default_acme_renew_before_days() -> u32 {
     30
 }
 
+fn default_dhcp_leases_domain() -> String {
+    "lan".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -335,6 +350,8 @@ impl Default for Config {
             hosts_path: None,
             dhcp_leases_enabled: false,
             dhcp_leases_path: None,
+            dhcp_leases_forward_enabled: false,
+            dhcp_leases_domain: default_dhcp_leases_domain(),
             mdns_enabled: false,
             private_ptr_enabled: false,
             private_ptr_upstreams: Vec::new(),
