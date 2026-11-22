@@ -14,7 +14,9 @@ import type { UpstreamStrategy } from "../types/UpstreamStrategy";
 import { InfoTooltip } from "./InfoTooltip";
 import { PortPrecheckPanel } from "./PortPrecheckPanel";
 import { SetupGuideCard } from "./SetupGuideCard";
+import { SplitDnsList } from "./SplitDnsList";
 import { UpstreamList } from "./UpstreamList";
+import type { SplitDnsRule } from "../types/SplitDnsRule";
 
 interface SettingsViewProps {
   configData: ConfigResponse | null;
@@ -56,8 +58,8 @@ interface SettingsViewProps {
   onCachePrefetchChange: (val: boolean) => void;
   cachePersistEnabled: boolean;
   onCachePersistChange: (val: boolean) => void;
-  splitDnsText: string;
-  onSplitDnsChange: (val: string) => void;
+  splitDnsRules: SplitDnsRule[];
+  onSplitDnsChange: (val: SplitDnsRule[]) => void;
   refreshingSplitDns?: boolean;
   onRefreshSplitDns?: () => Promise<void> | void;
   cnameCloakingBlocking: boolean;
@@ -445,37 +447,13 @@ export function SettingsView(props: SettingsViewProps) {
               </div>
 
               {/* Split DNS & Feature Toggles */}
-              <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
-                <div>
-                  <div class="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                    <label class="inline-flex items-center gap-1.5 text-xs font-medium text-[#171717] dark:text-[#ededed]">
-                      <span>{t("settingsSplitDnsLabel")}</span>
-                      <InfoTooltip text={t("tooltipSplitDns")} align="left" />
-                    </label>
-                    <div class="flex flex-wrap items-center gap-2">
-                      <span class="text-[11px] text-[#8f8f8f] dark:text-[#71717a]">
-                        {t("settingsSplitDnsHint")}
-                      </span>
-                      <Show when={props.onRefreshSplitDns}>
-                        <button
-                          type="button"
-                          disabled={props.refreshingSplitDns}
-                          onClick={() => props.onRefreshSplitDns?.()}
-                          class="h-6 px-2 rounded text-[11px] font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] cursor-pointer transition-colors disabled:opacity-50"
-                        >
-                          {t("settingsSplitDnsRefreshBtn")}
-                        </button>
-                      </Show>
-                    </div>
-                  </div>
-                  <textarea
-                    value={props.splitDnsText}
-                    onInput={(e) => props.onSplitDnsChange(e.currentTarget.value)}
-                    rows={3}
-                    spellcheck={false}
-                    class="w-full font-mono text-xs bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3 text-[#171717] dark:text-[#ededed] outline-none resize-y"
-                  />
-                </div>
+              <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-4">
+                <SplitDnsList
+                  rules={props.splitDnsRules}
+                  onChange={props.onSplitDnsChange}
+                  refreshing={props.refreshingSplitDns}
+                  onRefresh={props.onRefreshSplitDns}
+                />
 
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">

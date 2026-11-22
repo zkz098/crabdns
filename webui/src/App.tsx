@@ -85,7 +85,7 @@ export default function App() {
   const [logRetentionHours, setLogRetentionHours] = createSignal(24);
   const [configMessage, setConfigMessage] = createSignal("");
   const [configIsError, setConfigIsError] = createSignal(false);
-  const [splitDnsText, setSplitDnsText] = createSignal("");
+  const [splitDnsRules, setSplitDnsRules] = createSignal<SplitDnsRule[]>([]);
   const [cnameCloakingBlocking, setCnameCloakingBlocking] = createSignal(true);
   const [dohEnabled, setDohEnabled] = createSignal(true);
   const [allowPrivateSubscriptions, setAllowPrivateSubscriptions] = createSignal(false);
@@ -636,19 +636,7 @@ export default function App() {
     setLogRetentionHours(data.log_retention_hours);
     setAuthEnabled(data.web_auth_enabled);
     setAuthUsername(data.web_username || "admin");
-    setSplitDnsText(
-      (data.split_dns ?? [])
-        .map((r) => {
-          const lhs = r.domains_url
-            ? r.domains_url
-            : r.domains_file
-              ? `file:${r.domains_file}`
-              : r.domain;
-          const suffix = r.fallback_to_default === false ? "|nofallback" : "";
-          return `${lhs}=${r.upstreams.join(",")}${suffix}`;
-        })
-        .join("\n"),
-    );
+    setSplitDnsRules(data.split_dns ?? []);
     setCnameCloakingBlocking(data.cname_cloaking_blocking);
     setDohEnabled(data.doh_enabled);
     setAllowPrivateSubscriptions(data.allow_private_subscriptions);
@@ -1200,43 +1188,6 @@ export default function App() {
         .split("\n")
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
-    const parseSplitDns = (text: string): SplitDnsRule[] =>
-      parseLines(text)
-        .map((line): SplitDnsRule | null => {
-          const eq = line.indexOf("=");
-          if (eq <= 0) return null;
-          const lhs = line.slice(0, eq).trim();
-          let rhs = line.slice(eq + 1).trim();
-          let fallback_to_default = true;
-          if (rhs.endsWith("|nofallback")) {
-            fallback_to_default = false;
-            rhs = rhs.slice(0, -"|nofallback".length).trim();
-          }
-          const upstreams = rhs
-            .split(",")
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0);
-          if (upstreams.length === 0) return null;
-          if (lhs.startsWith("http://") || lhs.startsWith("https://")) {
-            return {
-              domain: "",
-              domains_file: null,
-              domains_url: lhs,
-              upstreams,
-              fallback_to_default,
-            };
-          }
-          if (lhs.startsWith("file:")) {
-            const domains_file = lhs.slice(5).trim();
-            return domains_file
-              ? { domain: "", domains_file, domains_url: null, upstreams, fallback_to_default }
-              : null;
-          }
-          return lhs
-            ? { domain: lhs, domains_file: null, domains_url: null, upstreams, fallback_to_default }
-            : null;
-        })
-        .filter((item): item is SplitDnsRule => item !== null);
     const payload: ConfigUpdatePayload = {
       upstreams: parseLines(upstreamsText()),
       bootstrap_dns: parseLines(bootstrapDnsText()),
@@ -1253,7 +1204,7 @@ export default function App() {
       allow_cidrs: parseLines(allowCidrsText()),
       deny_cidrs: parseLines(denyCidrsText()),
       rate_limit_qps: Number(rateLimitQps()),
-      split_dns: parseSplitDns(splitDnsText()),
+      split_dns: splitDnsRules(),
       cname_cloaking_blocking: cnameCloakingBlocking(),
       doh_enabled: dohEnabled(),
       allow_private_subscriptions: allowPrivateSubscriptions(),
@@ -1574,8 +1525,8 @@ export default function App() {
                 onCachePrefetchChange={setCachePrefetchEnabled}
                 cachePersistEnabled={cachePersistEnabled()}
                 onCachePersistChange={setCachePersistEnabled}
-                splitDnsText={splitDnsText()}
-                onSplitDnsChange={setSplitDnsText}
+                splitDnsRules={splitDnsRules()}
+                onSplitDnsChange={setSplitDnsRules}
                 refreshingSplitDns={refreshingSplitDns()}
                 onRefreshSplitDns={refreshSplitDnsLists}
                 cnameCloakingBlocking={cnameCloakingBlocking()}
