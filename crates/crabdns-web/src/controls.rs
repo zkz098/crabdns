@@ -61,6 +61,8 @@ pub struct QuickRuleResponse {
 pub struct TestRulePayload {
     pub domain: String,
     #[serde(default)]
+    pub qtype: Option<String>,
+    #[serde(default)]
     pub client_ip: Option<String>,
     #[serde(default)]
     pub client_id: Option<String>,
@@ -223,7 +225,13 @@ pub async fn test_rule(
     let decision = state
         .app
         .pipeline
-        .evaluate_filter_for_client(&clean, parsed_ip, client_id);
+        .evaluate_filter_for_client_with_qtype_str(
+            &clean,
+            payload.qtype.as_deref(),
+            parsed_ip,
+            client_id,
+        )
+        .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
     let (action, rewrite) = match decision.action {
         FilterAction::Block => ("block".to_string(), None),
         FilterAction::Allow => {

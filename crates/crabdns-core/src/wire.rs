@@ -6,7 +6,7 @@ use hickory_proto::rr::{Name, RData, Record, RecordType};
 
 use crate::config::BlockMode;
 use crate::error::{CoreError, Result};
-use crate::filter::RewriteAction;
+use crate::filter_rules::RewriteAction;
 
 const OPT_RECORD_TYPE: u16 = 41;
 const DEFAULT_CACHE_TTL_SECS: u32 = 60;

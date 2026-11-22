@@ -177,6 +177,146 @@ pub fn spawn_hosts_watch_task(
     })
 }
 
+pub fn spawn_dhcp_lease_refresh_task(
+    config: Arc<ArcSwap<Config>>,
+    pipeline: Arc<DnsPipeline>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = delay_interval(Duration::from_secs(30));
+        let mut last_mtime: Option<SystemTime> = None;
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    let cfg = config.load();
+                    if !cfg.dhcp_leases_enabled {
+                        last_mtime = None;
+                        continue;
+                    }
+                    let path_str = cfg
+                        .dhcp_leases_path
+                        .as_deref()
+                        .unwrap_or("/var/lib/misc/dnsmasq.leases");
+                    let path = std::path::Path::new(path_str);
+                    let Ok(meta) = tokio::fs::metadata(path).await else {
+                        continue;
+                    };
+                    let Ok(mtime) = meta.modified() else {
+                        continue;
+                    };
+                    if last_mtime != Some(mtime) {
+                        let pipe = Arc::clone(&pipeline);
+                        let path_buf = path.to_path_buf();
+                        match tokio::task::spawn_blocking(move || {
+                            pipe.reload_dhcp_leases_from_path(&path_buf)
+                        })
+                        .await
+                        {
+                            Ok(Ok(_)) => {
+                                last_mtime = Some(mtime);
+                            }
+                            Ok(Err(err)) => {
+                                tracing::warn!(path = %path_str, error = %err, "failed to reload DHCP leases file");
+                            }
+                            Err(err) => {
+                                tracing::warn!(path = %path_str, error = %err, "DHCP leases reload task panicked");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+pub fn spawn_mdns_listener_task(
+    config: Arc<ArcSwap<Config>>,
+    pipeline: Arc<DnsPipeline>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut socket: Option<tokio::net::UdpSocket> = None;
+        let notify = pipeline.mdns_notify();
+        let mut buf = [0_u8; 4096];
+
+        loop {
+            if !config.load().mdns_enabled {
+                socket = None;
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    () = notify.notified() => {}
+                }
+                continue;
+            }
+
+            if socket.is_none() {
+                match bind_mdns_multicast_socket() {
+                    Ok(sock) => socket = Some(sock),
+                    Err(err) => {
+                        tracing::debug!(error = %err, "passive mDNS multicast listener unavailable; using on-demand PTR queries");
+                        tokio::select! {
+                            _ = shutdown_rx.changed() => {
+                                if *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                            () = tokio::time::sleep(Duration::from_secs(30)) => {}
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(ref sock) = socket {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    () = notify.notified() => {}
+                    recv_res = sock.recv_from(&mut buf) => {
+                        match recv_res {
+                            Ok((len, _)) => {
+                                pipeline.mdns_resolver().ingest_mdns_packet(&buf[..len]);
+                            }
+                            Err(err) => {
+                                tracing::debug!(error = %err, "mDNS multicast recv error");
+                                socket = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn bind_mdns_multicast_socket() -> std::io::Result<tokio::net::UdpSocket> {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    let domain = socket2::Domain::IPV4;
+    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    sock.set_reuse_address(true)?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true)?;
+    sock.set_nonblocking(true)?;
+    let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5353));
+    sock.bind(&bind_addr.into())?;
+    sock.join_multicast_v4(&Ipv4Addr::new(224, 0, 0, 251), &Ipv4Addr::UNSPECIFIED)?;
+    let std_sock: std::net::UdpSocket = sock.into();
+    tokio::net::UdpSocket::from_std(std_sock)
+}
+
 pub fn spawn_cache_persist_task(
     config: Arc<ArcSwap<Config>>,
     pipeline: Arc<DnsPipeline>,

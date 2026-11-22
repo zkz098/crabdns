@@ -3,10 +3,12 @@ pub mod cache;
 pub mod clients;
 mod clock;
 pub mod config;
+pub mod device_names;
 pub mod dnssec;
 pub mod edns;
 pub mod error;
 pub mod filter;
+pub mod filter_rules;
 pub mod lan;
 pub mod pipeline;
 mod pipeline_exec;
@@ -25,10 +27,14 @@ pub use clients::{
     ResolvedClientPolicy, ip_to_ptr_domain, validate_client_id, validate_client_identifier,
 };
 pub use config::{BlockMode, Config, SplitDnsRule, UpstreamStrategy};
+pub use device_names::{DhcpLeaseTable, MdnsNameResolver};
 pub use dnssec::{DnssecValidator, ValidationOutcome};
 pub use edns::EcsConfig;
 pub use error::{CoreError, Result};
-pub use filter::{FilterAction, FilterDecision, FilterEngine, FilterStats, RewriteAction};
+pub use filter::{FilterAction, FilterDecision, FilterEngine, FilterStats};
+pub use filter_rules::{
+    DnsRewriteEntry, DnsRewriteKind, FilterQueryContext, RewriteAction, validate_dns_rewrite,
+};
 pub use lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter};
 pub use pipeline::{
     DnsPipeline, LatencyHistogramSnapshot, PipelineRuntimeMetrics, QueryContext, QueryEvent,

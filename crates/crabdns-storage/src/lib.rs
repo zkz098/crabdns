@@ -1,12 +1,16 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crabdns_core::{
-    ClientGroup, ClientProfile, Config, PersistedCacheEntry, QueryEvent, QueryOutcome,
-    QueryProtocol,
+    ClientGroup, ClientProfile, Config, DnsRewriteEntry, PersistedCacheEntry, QueryEvent,
+    QueryOutcome, QueryProtocol,
 };
+
+pub mod client_stats;
+pub use client_stats::{ClientActivityStats, ClientProtocolCounts, ClientStatsTracker};
 use dashmap::DashMap;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use foldhash::fast::RandomState;
@@ -71,6 +75,7 @@ const KEY_COUNTERS: &[u8] = b"counters";
 const KEY_RUNTIME_CONFIG: &[u8] = b"runtime_config";
 const KEY_CLIENTS: &[u8] = b"clients";
 const KEY_CLIENT_GROUPS: &[u8] = b"client_groups";
+const KEY_DNS_REWRITES: &[u8] = b"dns_rewrites";
 
 const FJALL_CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const FJALL_MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -182,9 +187,11 @@ pub struct StorageEngine {
     domain_counts: BoundedCountMap,
     blocked_counts: BoundedCountMap,
     client_counts: BoundedCountMap,
+    client_stats: ClientStatsTracker,
     sub_lock: Mutex<()>,
     client_lock: Mutex<()>,
     config_lock: Mutex<()>,
+    rewrite_lock: Mutex<()>,
     log_batches_written: AtomicU64,
     log_batch_failures: AtomicU64,
     log_flush_total_us: AtomicU64,
@@ -232,9 +239,11 @@ impl StorageEngine {
             domain_counts: BoundedCountMap::new(),
             blocked_counts: BoundedCountMap::new(),
             client_counts: BoundedCountMap::new(),
+            client_stats: ClientStatsTracker::new(),
             sub_lock: Mutex::new(()),
             client_lock: Mutex::new(()),
             config_lock: Mutex::new(()),
+            rewrite_lock: Mutex::new(()),
             log_batches_written: AtomicU64::new(0),
             log_batch_failures: AtomicU64::new(0),
             log_flush_total_us: AtomicU64::new(0),
@@ -261,6 +270,10 @@ impl StorageEngine {
 
     pub fn config_lock(&self) -> &Mutex<()> {
         &self.config_lock
+    }
+
+    pub fn rewrite_lock(&self) -> &Mutex<()> {
+        &self.rewrite_lock
     }
 
     pub fn record_batch(&self, events: &[QueryEvent]) -> Result<()> {
@@ -331,6 +344,7 @@ impl StorageEngine {
             }
             self.domain_counts.increment(&event.domain);
             self.client_counts.increment(&event.client_ip);
+            self.client_stats.record(event);
         }
         Ok(())
     }
@@ -490,6 +504,27 @@ impl StorageEngine {
         let bytes = serde_json::to_vec(groups)?;
         self.meta.insert(KEY_CLIENT_GROUPS, bytes)?;
         Ok(())
+    }
+
+    pub fn list_dns_rewrites(&self) -> Result<Vec<DnsRewriteEntry>> {
+        match self.meta.get(KEY_DNS_REWRITES)? {
+            Some(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn save_dns_rewrites(&self, rewrites: &[DnsRewriteEntry]) -> Result<()> {
+        let bytes = serde_json::to_vec(rewrites)?;
+        self.meta.insert(KEY_DNS_REWRITES, bytes)?;
+        Ok(())
+    }
+
+    pub fn client_activity_list(&self) -> Vec<(String, ClientActivityStats)> {
+        self.client_stats.list_ip_stats()
+    }
+
+    pub fn profile_activity_map(&self) -> HashMap<String, ClientActivityStats> {
+        self.client_stats.profile_stats_map()
     }
 
     pub fn client_query_counts(&self) -> Vec<(String, u64)> {
@@ -659,6 +694,7 @@ fn protocol_label(protocol: QueryProtocol) -> &'static str {
         QueryProtocol::Udp => "udp",
         QueryProtocol::Tcp => "tcp",
         QueryProtocol::Dot => "dot",
+        QueryProtocol::Doq => "doq",
         QueryProtocol::Doh => "doh",
     }
 }
@@ -765,6 +801,8 @@ mod tests {
                 timestamp: Utc::now(),
                 client_ip: "127.0.0.1".to_string(),
                 client_name: None,
+                client_id: None,
+                profile_id: None,
                 protocol: QueryProtocol::Udp,
                 domain: "ads.example.com".to_string(),
                 qtype: "A".to_string(),
@@ -780,6 +818,8 @@ mod tests {
                 timestamp: Utc::now(),
                 client_ip: "127.0.0.1".to_string(),
                 client_name: Some("nas-box".to_string()),
+                client_id: None,
+                profile_id: None,
                 protocol: QueryProtocol::Doh,
                 domain: "rust-lang.org".to_string(),
                 qtype: "AAAA".to_string(),
@@ -838,6 +878,8 @@ mod tests {
             timestamp: Utc::now(),
             client_ip: "10.0.0.5".to_string(),
             client_name: None,
+            client_id: None,
+            profile_id: None,
             protocol: QueryProtocol::Udp,
             domain: "sink.example.com".to_string(),
             qtype: "A".to_string(),
@@ -899,6 +941,8 @@ mod tests {
             timestamp: now - chrono::TimeDelta::hours(48),
             client_ip: "192.168.1.55".to_string(),
             client_name: Some("Living Room TV".to_string()),
+            client_id: None,
+            profile_id: Some("cli-1".to_string()),
             protocol: QueryProtocol::Udp,
             domain: "old.example.com".to_string(),
             qtype: "A".to_string(),

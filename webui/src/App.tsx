@@ -5,6 +5,7 @@ import { Header } from "./components/Header";
 import { LoginView } from "./components/LoginView";
 import { LogsView } from "./components/LogsView";
 import { MobileNav } from "./components/MobileNav";
+import { RewritesView } from "./components/RewritesView";
 import { RulesView } from "./components/RulesView";
 import { SettingsView } from "./components/SettingsView";
 import type { TabKey } from "./components/types";
@@ -18,6 +19,8 @@ import type { ClientsOverviewResponse } from "./types/ClientsOverviewResponse";
 import type { ConfigResponse } from "./types/ConfigResponse";
 import type { ConfigUpdatePayload } from "./types/ConfigUpdatePayload";
 import type { CreateSubscriptionPayload } from "./types/CreateSubscriptionPayload";
+import type { DnsRewriteEntry } from "./types/DnsRewriteEntry";
+import type { DnsRewritePayload } from "./types/DnsRewritePayload";
 import type { FilterSubscription } from "./types/FilterSubscription";
 import type { QueryEvent } from "./types/QueryEvent";
 import type { QuickRuleResponse } from "./types/QuickRuleResponse";
@@ -82,6 +85,10 @@ export default function App() {
   const [dnssecEnabled, setDnssecEnabled] = createSignal(false);
   const [hostsEnabled, setHostsEnabled] = createSignal(false);
   const [hostsPath, setHostsPath] = createSignal("");
+  const [dhcpLeasesEnabled, setDhcpLeasesEnabled] = createSignal(false);
+  const [dhcpLeasesPath, setDhcpLeasesPath] = createSignal("");
+  const [mdnsEnabled, setMdnsEnabled] = createSignal(false);
+  const [sniClientIdHostnamesText, setSniClientIdHostnamesText] = createSignal("");
   const [privatePtrEnabled, setPrivatePtrEnabled] = createSignal(false);
   const [privatePtrUpstreamsText, setPrivatePtrUpstreamsText] = createSignal("");
   const [ddrEnabled, setDdrEnabled] = createSignal(false);
@@ -100,6 +107,10 @@ export default function App() {
   const [clientsMessage, setClientsMessage] = createSignal("");
   const [clientsIsError, setClientsIsError] = createSignal(false);
   const [clientsSaving, setClientsSaving] = createSignal(false);
+  const [rewrites, setRewrites] = createSignal<DnsRewriteEntry[]>([]);
+  const [rewritesMessage, setRewritesMessage] = createSignal("");
+  const [rewritesIsError, setRewritesIsError] = createSignal(false);
+  const [rewritesSaving, setRewritesSaving] = createSignal(false);
   const [blockingStatus, setBlockingStatus] = createSignal<BlockingStatusResponse | null>(null);
   const [cacheFlushedMsg, setCacheFlushedMsg] = createSignal("");
   const [quickRuleMsg, setQuickRuleMsg] = createSignal("");
@@ -303,6 +314,10 @@ export default function App() {
     setDnssecEnabled(data.dnssec_enabled);
     setHostsEnabled(data.hosts_enabled);
     setHostsPath(data.hosts_path ?? "");
+    setDhcpLeasesEnabled(data.dhcp_leases_enabled);
+    setDhcpLeasesPath(data.dhcp_leases_path ?? "");
+    setMdnsEnabled(data.mdns_enabled);
+    setSniClientIdHostnamesText((data.sni_client_id_hostnames ?? []).join("\n"));
     setPrivatePtrEnabled(data.private_ptr_enabled);
     setPrivatePtrUpstreamsText((data.private_ptr_upstreams ?? []).join("\n"));
     setDdrEnabled(data.ddr_enabled);
@@ -395,6 +410,72 @@ export default function App() {
 
   async function deleteClientProfile(id: string): Promise<void> {
     await mutateClientsApi(`/api/clients/${encodeURIComponent(id)}`, "DELETE");
+  }
+
+  function showRewritesToast(msg: string, isError = false) {
+    setRewritesIsError(isError);
+    setRewritesMessage(msg);
+    setTimeout(() => setRewritesMessage(""), 3000);
+  }
+
+  async function fetchRewrites() {
+    try {
+      const res = await fetch("/api/rewrites");
+      if (res.ok) setRewrites(await res.json());
+    } catch {
+      // ignore
+    }
+  }
+
+  async function mutateRewritesApi(
+    url: string,
+    method: string,
+    body?: unknown,
+    toastKey: "rewritesSavedToast" | "rewritesDeletedToast" = "rewritesSavedToast",
+  ): Promise<boolean> {
+    setRewritesSaving(true);
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      if (res.ok) {
+        await Promise.all([fetchRewrites(), fetchStats()]);
+        showRewritesToast(t(toastKey));
+        return true;
+      }
+      const errBody = await res.json().catch(() => null);
+      showRewritesToast(errBody?.error ?? t("rulesFailed"), true);
+      return false;
+    } catch {
+      showRewritesToast(t("rulesNetworkError"), true);
+      return false;
+    } finally {
+      setRewritesSaving(false);
+    }
+  }
+
+  async function createRewrite(payload: DnsRewritePayload): Promise<boolean> {
+    return mutateRewritesApi("/api/rewrites", "POST", payload, "rewritesSavedToast");
+  }
+
+  async function updateRewrite(id: string, payload: DnsRewritePayload): Promise<boolean> {
+    return mutateRewritesApi(
+      `/api/rewrites/${encodeURIComponent(id)}`,
+      "PUT",
+      payload,
+      "rewritesSavedToast",
+    );
+  }
+
+  async function deleteRewrite(id: string): Promise<void> {
+    await mutateRewritesApi(
+      `/api/rewrites/${encodeURIComponent(id)}`,
+      "DELETE",
+      undefined,
+      "rewritesDeletedToast",
+    );
   }
 
   async function fetchTlsStatus() {
@@ -500,6 +581,7 @@ export default function App() {
 
   async function testRule(
     domain: string,
+    qtype?: string | null,
     clientIp?: string | null,
     clientId?: string | null,
   ): Promise<TestRuleResponse | null> {
@@ -509,6 +591,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           domain,
+          qtype: qtype ?? null,
           client_ip: clientIp ?? null,
           client_id: clientId ?? null,
         }),
@@ -618,6 +701,7 @@ export default function App() {
           fetchLogs(),
           fetchRules(),
           fetchSubscriptions(),
+          fetchRewrites(),
           fetchConfig(),
           fetchUpstreamHealth(),
           fetchClients(),
@@ -750,6 +834,10 @@ export default function App() {
       dnssec_enabled: dnssecEnabled(),
       hosts_enabled: hostsEnabled(),
       hosts_path: hostsPath().trim(),
+      dhcp_leases_enabled: dhcpLeasesEnabled(),
+      dhcp_leases_path: dhcpLeasesPath().trim(),
+      mdns_enabled: mdnsEnabled(),
+      sni_client_id_hostnames: parseLines(sniClientIdHostnamesText()),
       private_ptr_enabled: privatePtrEnabled(),
       private_ptr_upstreams: parseLines(privatePtrUpstreamsText()),
       ddr_enabled: ddrEnabled(),
@@ -796,6 +884,8 @@ export default function App() {
     } else if (next === "rules") {
       fetchRules();
       fetchSubscriptions();
+    } else if (next === "rewrites") {
+      fetchRewrites();
     } else if (next === "clients") {
       fetchClients();
     } else if (next === "settings") {
@@ -812,6 +902,7 @@ export default function App() {
         fetchLogs();
         fetchRules();
         fetchSubscriptions();
+        fetchRewrites();
         fetchConfig();
         fetchUpstreamHealth();
         fetchBlockingStatus();
@@ -946,6 +1037,19 @@ export default function App() {
             />
           </Show>
 
+          <Show when={tab() === "rewrites"}>
+            <RewritesView
+              rewrites={rewrites()}
+              message={rewritesMessage()}
+              isError={rewritesIsError()}
+              saving={rewritesSaving()}
+              onCreate={createRewrite}
+              onUpdate={updateRewrite}
+              onDelete={deleteRewrite}
+              onRefresh={() => void fetchRewrites()}
+            />
+          </Show>
+
           <Show when={tab() === "settings"}>
             <SettingsView
               configData={configData()}
@@ -1009,6 +1113,14 @@ export default function App() {
               onHostsEnabledChange={setHostsEnabled}
               hostsPath={hostsPath()}
               onHostsPathChange={setHostsPath}
+              dhcpLeasesEnabled={dhcpLeasesEnabled()}
+              onDhcpLeasesEnabledChange={setDhcpLeasesEnabled}
+              dhcpLeasesPath={dhcpLeasesPath()}
+              onDhcpLeasesPathChange={setDhcpLeasesPath}
+              mdnsEnabled={mdnsEnabled()}
+              onMdnsEnabledChange={setMdnsEnabled}
+              sniClientIdHostnamesText={sniClientIdHostnamesText()}
+              onSniClientIdHostnamesChange={setSniClientIdHostnamesText}
               privatePtrEnabled={privatePtrEnabled()}
               onPrivatePtrEnabledChange={setPrivatePtrEnabled}
               privatePtrUpstreamsText={privatePtrUpstreamsText()}

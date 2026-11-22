@@ -13,6 +13,8 @@ fn sample_events(count: usize) -> Vec<QueryEvent> {
             timestamp: now,
             client_ip: format!("192.168.1.{}", (i % 250) + 1),
             client_name: None,
+            client_id: None,
+            profile_id: None,
             protocol: QueryProtocol::Udp,
             domain: format!("host-{}.example.com", i % 500),
             qtype: "A".to_string(),

@@ -16,6 +16,10 @@ pub struct TlsStatusResponse {
     pub https_listen: Option<String>,
     pub dot_enabled: bool,
     pub dot_listen: Option<String>,
+    #[serde(default)]
+    pub doq_enabled: bool,
+    #[serde(default)]
+    pub doq_listen: Option<String>,
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
     pub last_loaded_at: Option<DateTime<Utc>>,
@@ -43,6 +47,8 @@ pub async fn get_tls_status(State(state): State<RouterState>) -> Json<TlsStatusR
         https_listen: cfg.listen_web_tls.map(|a| a.to_string()),
         dot_enabled: false,
         dot_listen: cfg.listen_dot.map(|a| a.to_string()),
+        doq_enabled: false,
+        doq_listen: cfg.listen_doq.map(|a| a.to_string()),
         cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
         key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
         last_loaded_at: None,

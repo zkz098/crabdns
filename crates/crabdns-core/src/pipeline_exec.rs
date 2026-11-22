@@ -14,6 +14,7 @@ use crate::config::BlockMode;
 use crate::edns::{apply_ecs_to_message, has_dnssec_ok, resolve_ecs_subnet, set_dnssec_ok};
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision};
+use crate::filter_rules::FilterQueryContext;
 use crate::lan::{build_ddr_response, build_hosts_response, is_ddr_query, is_private_ptr_domain};
 use crate::pipeline::{DnsPipeline, QueryContext, QueryEvent, QueryOutcome, QueryProtocol};
 use crate::security::{build_rfc8482_any_response, contains_rebinding_ip_msg};
@@ -28,6 +29,8 @@ use crate::wire::{
 pub(crate) struct LogMeta {
     pub client_addr: SocketAddr,
     pub client_name: Option<String>,
+    pub client_id: Option<String>,
+    pub profile_id: Option<String>,
     pub protocol: QueryProtocol,
     pub domain: String,
     pub qtype: RecordType,
@@ -121,7 +124,9 @@ impl DnsPipeline {
         };
         let meta = LogMeta {
             client_addr: ctx.client_addr,
-            client_name,
+            client_name: client_name.clone(),
+            client_id: ctx.client_id.clone(),
+            profile_id: policy.as_deref().map(|p| p.profile_id.clone()),
             protocol: ctx.protocol,
             domain: clean_domain,
             qtype,
@@ -133,8 +138,7 @@ impl DnsPipeline {
         }
 
         let flags = self.build_policy_flags(&request, policy.as_deref());
-        let decision =
-            ClientRegistry::evaluate_domain(policy.as_deref(), &self.filter, &meta.domain);
+        let decision = self.evaluate_request_filter(&meta, &ctx, policy.as_deref());
         let explicitly_allowed =
             decision.action == FilterAction::Allow && decision.matched_rule.is_some();
         let flags = PolicyFlags {
@@ -189,6 +193,24 @@ impl DnsPipeline {
             flags,
         )
         .await
+    }
+
+    fn evaluate_request_filter(
+        &self,
+        meta: &LogMeta,
+        ctx: &QueryContext,
+        policy: Option<&ResolvedClientPolicy>,
+    ) -> FilterDecision {
+        let empty_tags: &[String] = &[];
+        let filter_ctx = FilterQueryContext {
+            domain: &meta.domain,
+            qtype: Some(meta.qtype),
+            client_ip: Some(ctx.client_addr.ip()),
+            client_id: ctx.client_id.as_deref(),
+            client_name: meta.client_name.as_deref(),
+            client_tags: policy.map_or(empty_tags, |p| p.tags.as_slice()),
+        };
+        ClientRegistry::evaluate_domain_with_context(policy, &self.filter, &filter_ctx)
     }
 
     fn build_policy_flags(
@@ -373,7 +395,7 @@ impl DnsPipeline {
             && flags.cname_cloaking_on
             && let Some(ref resp_msg) = parsed_hit
             && let Some(blk) =
-                self.check_cname_cloaking_msg(policy, request, resp_msg, flags.block_mode)?
+                self.check_cname_cloaking_msg(policy, meta, request, resp_msg, flags.block_mode)?
         {
             self.emit_log(
                 meta,
@@ -569,7 +591,13 @@ impl DnsPipeline {
                     && flags.cname_cloaking_on
                     && let Some(ref msg) = parsed
                 {
-                    match self.check_cname_cloaking_msg(policy, request, msg, flags.block_mode) {
+                    match self.check_cname_cloaking_msg(
+                        policy,
+                        meta,
+                        request,
+                        msg,
+                        flags.block_mode,
+                    ) {
                         Ok(hit) => hit.is_some(),
                         Err(err) => return Err(Err(err)),
                     }
@@ -697,7 +725,7 @@ impl DnsPipeline {
             && flags.cname_cloaking_on
             && let Some(msg) = parsed_msg
             && let Some(blk) =
-                self.check_cname_cloaking_msg(policy, request, msg, flags.block_mode)?
+                self.check_cname_cloaking_msg(policy, meta, request, msg, flags.block_mode)?
         {
             self.emit_log(
                 meta,
@@ -733,6 +761,7 @@ impl DnsPipeline {
     fn check_cname_cloaking_msg(
         &self,
         policy: Option<&ResolvedClientPolicy>,
+        meta: &LogMeta,
         request: &Message,
         resp_msg: &Message,
         block_mode: BlockMode,
@@ -741,11 +770,21 @@ impl DnsPipeline {
             .queries
             .first()
             .map_or(RecordType::A, hickory_proto::op::Query::query_type);
+        let empty_tags: &[String] = &[];
         for answer in &resp_msg.answers {
             if let RData::CNAME(cname) = &answer.data {
                 let target = cname.to_utf8();
                 let target_clean = target.trim_end_matches('.');
-                let decision = ClientRegistry::evaluate_domain(policy, &self.filter, target_clean);
+                let ctx = FilterQueryContext {
+                    domain: target_clean,
+                    qtype: Some(qtype),
+                    client_ip: Some(meta.client_addr.ip()),
+                    client_id: meta.client_id.as_deref(),
+                    client_name: meta.client_name.as_deref(),
+                    client_tags: policy.map_or(empty_tags, |p| p.tags.as_slice()),
+                };
+                let decision =
+                    ClientRegistry::evaluate_domain_with_context(policy, &self.filter, &ctx);
                 if decision.action == FilterAction::Block {
                     let (bytes, rcode) = build_blocked_response(request, qtype, block_mode)?;
                     let rule = decision
@@ -824,6 +863,8 @@ impl DnsPipeline {
             timestamp: Utc::now(),
             client_ip: meta.client_addr.ip().to_string(),
             client_name: meta.client_name.clone(),
+            client_id: meta.client_id.clone(),
+            profile_id: meta.profile_id.clone(),
             protocol: meta.protocol,
             domain: meta.domain.clone(),
             qtype: meta.qtype.to_string(),

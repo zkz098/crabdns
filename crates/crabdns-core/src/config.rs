@@ -91,6 +91,10 @@ pub struct Config {
     #[serde(default)]
     pub listen_dot: Option<SocketAddr>,
     #[serde(default)]
+    pub listen_doq: Option<SocketAddr>,
+    #[serde(default)]
+    pub sni_client_id_hostnames: Vec<String>,
+    #[serde(default)]
     pub tls_cert_path: Option<PathBuf>,
     #[serde(default)]
     pub tls_key_path: Option<PathBuf>,
@@ -114,6 +118,12 @@ pub struct Config {
     pub hosts_enabled: bool,
     #[serde(default)]
     pub hosts_path: Option<String>,
+    #[serde(default)]
+    pub dhcp_leases_enabled: bool,
+    #[serde(default)]
+    pub dhcp_leases_path: Option<String>,
+    #[serde(default)]
+    pub mdns_enabled: bool,
     #[serde(default)]
     pub private_ptr_enabled: bool,
     #[serde(default)]
@@ -225,6 +235,8 @@ impl Default for Config {
             cname_cloaking_blocking: true,
             doh_enabled: true,
             listen_dot: None,
+            listen_doq: None,
+            sni_client_id_hostnames: Vec::new(),
             tls_cert_path: None,
             tls_key_path: None,
             tcp_max_connections: default_tcp_max_connections(),
@@ -237,6 +249,9 @@ impl Default for Config {
             dnssec_enabled: false,
             hosts_enabled: false,
             hosts_path: None,
+            dhcp_leases_enabled: false,
+            dhcp_leases_path: None,
+            mdns_enabled: false,
             private_ptr_enabled: false,
             private_ptr_upstreams: Vec::new(),
             ddr_enabled: false,

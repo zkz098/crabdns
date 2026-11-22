@@ -69,6 +69,14 @@ interface SettingsViewProps {
   onHostsEnabledChange: (val: boolean) => void;
   hostsPath: string;
   onHostsPathChange: (val: string) => void;
+  dhcpLeasesEnabled: boolean;
+  onDhcpLeasesEnabledChange: (val: boolean) => void;
+  dhcpLeasesPath: string;
+  onDhcpLeasesPathChange: (val: string) => void;
+  mdnsEnabled: boolean;
+  onMdnsEnabledChange: (val: boolean) => void;
+  sniClientIdHostnamesText: string;
+  onSniClientIdHostnamesChange: (val: string) => void;
   privatePtrEnabled: boolean;
   onPrivatePtrEnabledChange: (val: boolean) => void;
   privatePtrUpstreamsText: string;
@@ -798,7 +806,7 @@ export function SettingsView(props: SettingsViewProps) {
           <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
             {t("settingsLanTitle")}
           </p>
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
               <input
                 type="checkbox"
@@ -807,6 +815,24 @@ export function SettingsView(props: SettingsViewProps) {
                 class="rounded border-[#eaeaea] dark:border-[#262626]"
               />
               {t("settingsHostsLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.dhcpLeasesEnabled}
+                onChange={(e) => props.onDhcpLeasesEnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsDhcpLeasesLabel")}
+            </label>
+            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={props.mdnsEnabled}
+                onChange={(e) => props.onMdnsEnabledChange(e.currentTarget.checked)}
+                class="rounded border-[#eaeaea] dark:border-[#262626]"
+              />
+              {t("settingsMdnsLabel")}
             </label>
             <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
               <input
@@ -836,7 +862,7 @@ export function SettingsView(props: SettingsViewProps) {
               {t("settingsRdnsLabel")}
             </label>
           </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
                 {t("settingsHostsPathLabel")}
@@ -846,6 +872,18 @@ export function SettingsView(props: SettingsViewProps) {
                 placeholder="/etc/hosts"
                 value={props.hostsPath}
                 onInput={(e) => props.onHostsPathChange(e.currentTarget.value)}
+                class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+              />
+            </div>
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsDhcpLeasesPathLabel")}
+              </label>
+              <input
+                type="text"
+                placeholder="/var/lib/misc/dnsmasq.leases"
+                value={props.dhcpLeasesPath}
+                onInput={(e) => props.onDhcpLeasesPathChange(e.currentTarget.value)}
                 class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
               />
             </div>
@@ -861,6 +899,19 @@ export function SettingsView(props: SettingsViewProps) {
                 class="w-full h-9 bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
               />
             </div>
+          </div>
+          <div>
+            <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+              {t("settingsSniHostnamesLabel")}
+            </label>
+            <textarea
+              rows={2}
+              spellcheck={false}
+              placeholder="dot.example.com"
+              value={props.sniClientIdHostnamesText}
+              onInput={(e) => props.onSniClientIdHostnamesChange(e.currentTarget.value)}
+              class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-2.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+            />
           </div>
           <div>
             <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
@@ -899,7 +950,11 @@ export function SettingsView(props: SettingsViewProps) {
                 type="button"
                 disabled={
                   props.reloadingTls ||
-                  !(props.tlsStatus?.https_enabled || props.tlsStatus?.dot_enabled)
+                  !(
+                    props.tlsStatus?.https_enabled ||
+                    props.tlsStatus?.dot_enabled ||
+                    props.tlsStatus?.doq_enabled
+                  )
                 }
                 onClick={props.onReloadTls}
                 class="h-8 px-3 rounded-lg text-xs font-medium border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#171717] dark:text-[#ededed] cursor-pointer disabled:opacity-50"
@@ -937,7 +992,12 @@ export function SettingsView(props: SettingsViewProps) {
           </div>
 
           <Show
-            when={props.tlsStatus && (props.tlsStatus.https_enabled || props.tlsStatus.dot_enabled)}
+            when={
+              props.tlsStatus &&
+              (props.tlsStatus.https_enabled ||
+                props.tlsStatus.dot_enabled ||
+                props.tlsStatus.doq_enabled)
+            }
             fallback={
               <p class="text-[11px] text-[#8f8f8f] dark:text-[#71717a]">
                 {t("settingsTlsInactive")}
@@ -1057,7 +1117,7 @@ export function SettingsView(props: SettingsViewProps) {
             <p class="text-xs font-medium text-[#666666] dark:text-[#a1a1aa]">
               {t("settingsReadonlyTitle")}
             </p>
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 text-xs">
               <div class="bg-[#fafafa] dark:bg-[#050505] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3">
                 <span class="text-[#8f8f8f] dark:text-[#71717a] block mb-0.5">
                   {t("settingsDnsListen")}
@@ -1088,6 +1148,14 @@ export function SettingsView(props: SettingsViewProps) {
                 </span>
                 <span class="font-mono text-[#171717] dark:text-[#ededed] break-all">
                   {cfg().listen_dot ?? "-"}
+                </span>
+              </div>
+              <div class="bg-[#fafafa] dark:bg-[#050505] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3">
+                <span class="text-[#8f8f8f] dark:text-[#71717a] block mb-0.5">
+                  {t("settingsDoqListen")}
+                </span>
+                <span class="font-mono text-[#171717] dark:text-[#ededed] break-all">
+                  {cfg().listen_doq ?? "-"}
                 </span>
               </div>
               <div class="bg-[#fafafa] dark:bg-[#050505] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3">

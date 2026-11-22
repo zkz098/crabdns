@@ -2,4 +2,4 @@
 import type { QueryOutcome } from "./QueryOutcome";
 import type { QueryProtocol } from "./QueryProtocol";
 
-export type QueryEvent = { timestamp: string, client_ip: string, client_name: string | null, protocol: QueryProtocol, domain: string, qtype: string, outcome: QueryOutcome, matched_rule: string | null, matched_list: string | null, upstream: string | null, elapsed_us: number, rcode: string, answers: Array<string>, };
+export type QueryEvent = { timestamp: string, client_ip: string, client_name: string | null, client_id: string | null, profile_id: string | null, protocol: QueryProtocol, domain: string, qtype: string, outcome: QueryOutcome, matched_rule: string | null, matched_list: string | null, upstream: string | null, elapsed_us: number, rcode: string, answers: Array<string>, };

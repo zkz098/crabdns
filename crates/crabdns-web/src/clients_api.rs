@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -5,10 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use crabdns_core::{
     BlockMode, ClientGroup, ClientProfile, ClientRegistry, validate_client_identifier,
 };
+use crabdns_storage::{ClientActivityStats, ClientProtocolCounts, TopItem};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -29,6 +31,20 @@ pub struct DiscoveredClient {
     pub name_source: String,
     #[ts(type = "number")]
     pub query_count: u64,
+    #[ts(type = "number")]
+    pub blocked_count: u64,
+    #[ts(type = "number")]
+    pub cached_count: u64,
+    #[ts(type = "number")]
+    pub rewritten_count: u64,
+    #[ts(type = "number")]
+    pub error_count: u64,
+    pub block_rate: f64,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub last_client_id: Option<String>,
+    pub protocols: ClientProtocolCounts,
+    pub top_domains: Vec<TopItem>,
+    pub top_blocked: Vec<TopItem>,
     pub profile_id: Option<String>,
     pub group_id: Option<String>,
 }
@@ -39,6 +55,7 @@ pub struct ClientsOverviewResponse {
     pub clients: Vec<ClientProfile>,
     pub groups: Vec<ClientGroup>,
     pub discovered: Vec<DiscoveredClient>,
+    pub profile_stats: HashMap<String, ClientActivityStats>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -185,19 +202,21 @@ pub async fn list_clients_overview(
     State(state): State<RouterState>,
 ) -> ApiResult<Json<ClientsOverviewResponse>> {
     let storage = Arc::clone(&state.app.storage);
-    let (clients, groups, counts) = tokio::task::spawn_blocking(move || {
+    let (clients, groups, activity_list, profile_stats) = tokio::task::spawn_blocking(move || {
         let clients = storage.list_clients()?;
         let groups = storage.list_client_groups()?;
-        let counts = storage.client_query_counts();
-        Ok::<_, crabdns_storage::StorageError>((clients, groups, counts))
+        let activity_list = storage.client_activity_list();
+        let profile_stats = storage.profile_activity_map();
+        Ok::<_, crabdns_storage::StorageError>((clients, groups, activity_list, profile_stats))
     })
     .await
     .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let discovered = counts
+
+    let discovered = activity_list
         .into_iter()
         .take(200)
-        .map(|(ip_str, query_count)| {
+        .map(|(ip_str, act)| {
             if let Ok(ip) = ip_str.parse::<IpAddr>() {
                 let (resolved_name, name_source) =
                     state.app.pipeline.resolve_client_display_name(ip, None);
@@ -206,7 +225,17 @@ pub async fn list_clients_overview(
                     ip: ip_str,
                     resolved_name,
                     name_source: name_source.to_string(),
-                    query_count,
+                    query_count: act.total_queries,
+                    blocked_count: act.blocked_queries,
+                    cached_count: act.cached_queries,
+                    rewritten_count: act.rewritten_queries,
+                    error_count: act.error_queries,
+                    block_rate: act.block_rate,
+                    last_seen: act.last_seen,
+                    last_client_id: act.last_client_id,
+                    protocols: act.protocols,
+                    top_domains: act.top_domains,
+                    top_blocked: act.top_blocked,
                     profile_id: matched.as_ref().map(|m| m.0.clone()),
                     group_id: matched.and_then(|m| m.2),
                 }
@@ -215,7 +244,17 @@ pub async fn list_clients_overview(
                     ip: ip_str,
                     resolved_name: None,
                     name_source: "unknown".to_string(),
-                    query_count,
+                    query_count: act.total_queries,
+                    blocked_count: act.blocked_queries,
+                    cached_count: act.cached_queries,
+                    rewritten_count: act.rewritten_queries,
+                    error_count: act.error_queries,
+                    block_rate: act.block_rate,
+                    last_seen: act.last_seen,
+                    last_client_id: act.last_client_id,
+                    protocols: act.protocols,
+                    top_domains: act.top_domains,
+                    top_blocked: act.top_blocked,
                     profile_id: None,
                     group_id: None,
                 }
@@ -227,6 +266,7 @@ pub async fn list_clients_overview(
         clients,
         groups,
         discovered,
+        profile_stats,
     }))
 }
 

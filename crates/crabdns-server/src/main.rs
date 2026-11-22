@@ -34,6 +34,9 @@ struct Cli {
 
     #[arg(long)]
     dot_listen: Option<SocketAddr>,
+
+    #[arg(long)]
+    doq_listen: Option<SocketAddr>,
 }
 
 #[tokio::main]
@@ -57,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(addr) = cli.dot_listen {
         config.listen_dot = Some(addr);
+    }
+    if let Some(addr) = cli.doq_listen {
+        config.listen_doq = Some(addr);
     }
 
     let server = spawn_server(config).await?;

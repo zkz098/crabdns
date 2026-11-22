@@ -6,8 +6,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
-    AccessController, BlockMode, ClientRegistry, Config, DdrConfig, EcsConfig, HostsTable,
-    PrivatePtrRouter, SplitDnsRule, SplitUpstreamRouter, UpstreamPool, UpstreamStrategy,
+    AccessController, BlockMode, ClientRegistry, Config, DdrConfig, DhcpLeaseTable, EcsConfig,
+    HostsTable, PrivatePtrRouter, SplitDnsRule, SplitUpstreamRouter, UpstreamPool,
+    UpstreamStrategy,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -22,6 +23,8 @@ pub struct ConfigResponse {
     pub listen_web: String,
     pub listen_web_tls: Option<String>,
     pub listen_dot: Option<String>,
+    pub listen_doq: Option<String>,
+    pub sni_client_id_hostnames: Vec<String>,
     pub tls_cert_path: Option<String>,
     pub tls_key_path: Option<String>,
     pub data_dir: String,
@@ -56,6 +59,9 @@ pub struct ConfigResponse {
     pub dnssec_enabled: bool,
     pub hosts_enabled: bool,
     pub hosts_path: Option<String>,
+    pub dhcp_leases_enabled: bool,
+    pub dhcp_leases_path: Option<String>,
+    pub mdns_enabled: bool,
     pub private_ptr_enabled: bool,
     pub private_ptr_upstreams: Vec<String>,
     pub ddr_enabled: bool,
@@ -73,6 +79,8 @@ impl From<&Config> for ConfigResponse {
             listen_web: cfg.listen_web.to_string(),
             listen_web_tls: cfg.listen_web_tls.map(|addr| addr.to_string()),
             listen_dot: cfg.listen_dot.map(|addr| addr.to_string()),
+            listen_doq: cfg.listen_doq.map(|addr| addr.to_string()),
+            sni_client_id_hostnames: cfg.sni_client_id_hostnames.clone(),
             tls_cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
             tls_key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
             data_dir: cfg.data_dir.display().to_string(),
@@ -104,6 +112,9 @@ impl From<&Config> for ConfigResponse {
             dnssec_enabled: cfg.dnssec_enabled,
             hosts_enabled: cfg.hosts_enabled,
             hosts_path: cfg.hosts_path.clone(),
+            dhcp_leases_enabled: cfg.dhcp_leases_enabled,
+            dhcp_leases_path: cfg.dhcp_leases_path.clone(),
+            mdns_enabled: cfg.mdns_enabled,
             private_ptr_enabled: cfg.private_ptr_enabled,
             private_ptr_upstreams: cfg.private_ptr_upstreams.clone(),
             ddr_enabled: cfg.ddr_enabled,
@@ -170,6 +181,14 @@ pub struct ConfigUpdatePayload {
     pub hosts_enabled: Option<bool>,
     #[serde(default)]
     pub hosts_path: Option<String>,
+    #[serde(default)]
+    pub dhcp_leases_enabled: Option<bool>,
+    #[serde(default)]
+    pub dhcp_leases_path: Option<String>,
+    #[serde(default)]
+    pub mdns_enabled: Option<bool>,
+    #[serde(default)]
+    pub sni_client_id_hostnames: Option<Vec<String>>,
     #[serde(default)]
     pub private_ptr_enabled: Option<bool>,
     #[serde(default)]
@@ -306,6 +325,19 @@ pub async fn update_config(
     let dnssec_enabled = payload.dnssec_enabled.unwrap_or(current.dnssec_enabled);
     let hosts_enabled = payload.hosts_enabled.unwrap_or(current.hosts_enabled);
     let hosts_path = merge_opt_string(payload.hosts_path, current.hosts_path.as_deref());
+    let dhcp_leases_enabled = payload
+        .dhcp_leases_enabled
+        .unwrap_or(current.dhcp_leases_enabled);
+    let dhcp_leases_path = merge_opt_string(
+        payload.dhcp_leases_path,
+        current.dhcp_leases_path.as_deref(),
+    );
+    let mdns_enabled = payload.mdns_enabled.unwrap_or(current.mdns_enabled);
+    let sni_client_id_hostnames = clean_string_list(
+        payload
+            .sni_client_id_hostnames
+            .unwrap_or_else(|| current.sni_client_id_hostnames.clone()),
+    );
     let private_ptr_enabled = payload
         .private_ptr_enabled
         .unwrap_or(current.private_ptr_enabled);
@@ -414,6 +446,31 @@ pub async fn update_config(
         None
     };
 
+    let dhcp_table_opt = if dhcp_leases_enabled {
+        let resolved_dhcp = dhcp_leases_path
+            .as_deref()
+            .unwrap_or("/var/lib/misc/dnsmasq.leases")
+            .to_string();
+        let path_for_log = resolved_dhcp.clone();
+        match tokio::task::spawn_blocking(move || {
+            DhcpLeaseTable::from_file(Path::new(&resolved_dhcp))
+        })
+        .await
+        {
+            Ok(Ok(table)) => Some(table),
+            Ok(Err(err)) => {
+                tracing::warn!(path = %path_for_log, error = %err, "failed to load DHCP leases file");
+                None
+            }
+            Err(err) => {
+                tracing::warn!(path = %path_for_log, error = %err, "DHCP leases load task panicked");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     if (tls_cert_path != current.tls_cert_path || tls_key_path != current.tls_key_path)
         && let Some(reloader) = &state.app.tls_reloader
         && let Err(err) = reloader.reload(tls_cert_path.as_deref(), tls_key_path.as_deref())
@@ -448,6 +505,10 @@ pub async fn update_config(
     next.dnssec_enabled = dnssec_enabled;
     next.hosts_enabled = hosts_enabled;
     next.hosts_path = hosts_path;
+    next.dhcp_leases_enabled = dhcp_leases_enabled;
+    next.dhcp_leases_path = dhcp_leases_path;
+    next.mdns_enabled = mdns_enabled;
+    next.sni_client_id_hostnames = sni_client_id_hostnames;
     next.private_ptr_enabled = private_ptr_enabled;
     next.private_ptr_upstreams = private_ptr_upstreams;
     next.ddr_enabled = ddr_enabled;
@@ -486,6 +547,9 @@ pub async fn update_config(
     if let Some(table) = hosts_table_opt {
         state.app.pipeline.reload_hosts_table(table);
     }
+    if let Some(dhcp_table) = dhcp_table_opt {
+        state.app.pipeline.reload_dhcp_leases_table(dhcp_table);
+    }
     state.app.pipeline.set_block_mode(block_mode);
     state
         .app
@@ -496,6 +560,11 @@ pub async fn update_config(
     state
         .app
         .pipeline
+        .set_dhcp_leases_enabled(dhcp_leases_enabled);
+    state.app.pipeline.set_mdns_enabled(mdns_enabled);
+    state
+        .app
+        .pipeline
         .set_dns_rebinding_protection(dns_rebinding_protection);
     state.app.pipeline.set_block_any_queries(block_any_queries);
     state.app.pipeline.set_rdns_enabled(rdns_enabled);
@@ -503,6 +572,7 @@ pub async fn update_config(
         enabled: ddr_enabled,
         hostname: ddr_hostname,
         dot_port: current.listen_dot.map(|a| a.port()),
+        doq_port: current.listen_doq.map(|a| a.port()),
         doh_enabled,
         doh_port: current
             .listen_web_tls

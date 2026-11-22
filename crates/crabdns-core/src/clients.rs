@@ -19,6 +19,7 @@ use crate::acl::IpNet;
 use crate::config::{BlockMode, UpstreamStrategy};
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision, FilterEngine};
+use crate::filter_rules::FilterQueryContext;
 use crate::upstream::{UpstreamPool, next_tx_id};
 
 const RDNS_CACHE_CAPACITY: u64 = 4096;
@@ -135,6 +136,7 @@ pub struct ResolvedClientPolicy {
     pub client_filter: Option<Arc<FilterEngine>>,
     pub group_filter: Option<Arc<FilterEngine>>,
     pub upstream_pool: Option<(String, Arc<UpstreamPool>)>,
+    pub tags: Vec<String>,
 }
 
 struct CompiledGroup<'a> {
@@ -262,15 +264,27 @@ impl ClientRegistry {
         global_filter: &FilterEngine,
         domain: &str,
     ) -> FilterDecision {
+        Self::evaluate_domain_with_context(
+            policy,
+            global_filter,
+            &FilterQueryContext::from_domain(domain),
+        )
+    }
+
+    pub fn evaluate_domain_with_context(
+        policy: Option<&ResolvedClientPolicy>,
+        global_filter: &FilterEngine,
+        ctx: &FilterQueryContext<'_>,
+    ) -> FilterDecision {
         if let Some(p) = policy {
             if let Some(cf) = &p.client_filter {
-                let dec = cf.evaluate(domain);
+                let dec = cf.evaluate_with_context(ctx);
                 if dec.matched_rule.is_some() {
                     return dec;
                 }
             }
             if let Some(gf) = &p.group_filter {
-                let dec = gf.evaluate(domain);
+                let dec = gf.evaluate_with_context(ctx);
                 if dec.matched_rule.is_some() {
                     return dec;
                 }
@@ -283,7 +297,7 @@ impl ClientRegistry {
                 };
             }
         }
-        global_filter.evaluate(domain)
+        global_filter.evaluate_with_context(ctx)
     }
 }
 
@@ -338,6 +352,7 @@ fn build_resolved_policy(
         client_filter,
         group_filter,
         upstream_pool,
+        tags: client.tags.clone(),
     }))
 }
 

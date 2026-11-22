@@ -3,6 +3,7 @@ import { t } from "../i18n";
 import type { CreateSubscriptionPayload } from "../types/CreateSubscriptionPayload";
 import type { FilterSubscription } from "../types/FilterSubscription";
 import type { TestRuleResponse } from "../types/TestRuleResponse";
+import { SelectMenu, type SelectOption } from "./SelectMenu";
 
 interface RulesViewProps {
   rulesText: string;
@@ -24,10 +25,23 @@ interface RulesViewProps {
   onDeleteSubscription: (id: string) => void;
   onTestRule?: (
     domain: string,
+    qtype?: string | null,
     clientIp?: string | null,
     clientId?: string | null,
   ) => Promise<TestRuleResponse | null>;
 }
+
+const QTYPE_TEST_OPTIONS: SelectOption[] = [
+  { value: "", label: () => t("rulesTesterTypeAny") },
+  { value: "A", label: () => "A" },
+  { value: "AAAA", label: () => "AAAA" },
+  { value: "HTTPS", label: () => "HTTPS" },
+  { value: "SVCB", label: () => "SVCB" },
+  { value: "CNAME", label: () => "CNAME" },
+  { value: "TXT", label: () => "TXT" },
+  { value: "MX", label: () => "MX" },
+  { value: "PTR", label: () => "PTR" },
+];
 
 const PRESETS = [
   {
@@ -64,6 +78,7 @@ export function RulesView(props: RulesViewProps) {
   const [newEnabled, setNewEnabled] = createSignal(true);
   const [formError, setFormError] = createSignal("");
   const [testDomain, setTestDomain] = createSignal("");
+  const [testQtype, setTestQtype] = createSignal("A");
   const [testClient, setTestClient] = createSignal("");
   const [testResult, setTestResult] = createSignal<TestRuleResponse | null>(null);
   const [testing, setTesting] = createSignal(false);
@@ -84,7 +99,8 @@ export function RulesView(props: RulesViewProps) {
     }
     setTesting(true);
     try {
-      setTestResult(await props.onTestRule(d, clientIp, clientId));
+      const qt = testQtype().trim() || null;
+      setTestResult(await props.onTestRule(d, qt, clientIp, clientId));
     } finally {
       setTesting(false);
     }
@@ -138,12 +154,18 @@ export function RulesView(props: RulesViewProps) {
               placeholder={t("rulesTesterPlaceholder")}
               class="flex-1 h-9 bg-white dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none focus:border-[#171717] dark:focus:border-[#ededed]"
             />
+            <SelectMenu
+              value={testQtype()}
+              options={QTYPE_TEST_OPTIONS}
+              onChange={setTestQtype}
+              class="sm:w-28"
+            />
             <input
               type="text"
               value={testClient()}
               onInput={(e) => setTestClient(e.currentTarget.value)}
               placeholder={t("rulesTesterClientPlaceholder")}
-              class="sm:w-56 h-9 bg-white dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none focus:border-[#171717] dark:focus:border-[#ededed]"
+              class="sm:w-52 h-9 bg-white dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-3 text-sm font-mono text-[#171717] dark:text-[#ededed] outline-none focus:border-[#171717] dark:focus:border-[#ededed]"
             />
             <button
               type="submit"
@@ -495,7 +517,9 @@ export function RulesView(props: RulesViewProps) {
           onInput={(e) => props.onRulesChange(e.currentTarget.value)}
           rows={12}
           spellcheck={false}
-          placeholder="||doubleclick.net^&#10;@@||safe.doubleclick.net^&#10;||myrouter.local^$dnsrewrite=192.168.1.1"
+          placeholder={
+            "||doubleclick.net^\n@@||safe.doubleclick.net^\n||apple.com^$dnstype=HTTPS|SVCB\n||example.com^$denyallow=api.example.com\n||games.test^$client='kid-phone'|192.168.10.0/24\n/^ad-[0-9]+\\.tracker\\.net$/"
+          }
           class={`w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-3.5 font-mono text-xs leading-relaxed text-[#171717] dark:text-[#ededed] placeholder:text-[#8f8f8f] dark:placeholder:text-[#52525b] outline-none transition-all duration-150 hover:border-[#d4d4d8] dark:hover:border-[#404040] focus:border-[#171717] dark:focus:border-[#ededed] focus:ring-2 focus:ring-black/5 dark:focus:ring-white/10 resize-y min-h-48 ${
             props.rulesEnabled ? "" : "opacity-60"
           }`}

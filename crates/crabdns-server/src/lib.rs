@@ -17,6 +17,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+mod doq;
 mod dot;
 mod tasks;
 mod tls;
@@ -127,6 +128,7 @@ pub struct RunningServer {
     pub web_addr: SocketAddr,
     pub web_tls_addr: Option<SocketAddr>,
     pub dot_addr: Option<SocketAddr>,
+    pub doq_addr: Option<SocketAddr>,
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
     config: Arc<ArcSwap<Config>>,
@@ -134,11 +136,14 @@ pub struct RunningServer {
     udp_tasks: Vec<JoinHandle<()>>,
     tcp_task: JoinHandle<()>,
     dot_task: Option<JoinHandle<()>>,
+    doq_task: Option<JoinHandle<()>>,
     web_task: JoinHandle<()>,
     web_tls_accept_task: Option<JoinHandle<()>>,
     web_tls_task: Option<JoinHandle<()>>,
     sub_refresh_task: JoinHandle<()>,
     hosts_watch_task: JoinHandle<()>,
+    dhcp_watch_task: JoinHandle<()>,
+    mdns_watch_task: JoinHandle<()>,
     cache_persist_task: JoinHandle<()>,
     log_prune_task: JoinHandle<()>,
     tls_watch_task: Option<JoinHandle<()>>,
@@ -155,11 +160,14 @@ impl RunningServer {
         }
         join_with_timeout(self.tcp_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_opt_with_timeout(self.dot_task, SHUTDOWN_JOIN_TIMEOUT).await;
+        join_opt_with_timeout(self.doq_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_with_timeout(self.web_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_opt_with_timeout(self.web_tls_accept_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_opt_with_timeout(self.web_tls_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_with_timeout(self.sub_refresh_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.hosts_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.dhcp_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.mdns_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.cache_persist_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.log_prune_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_opt_with_timeout(self.tls_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
@@ -252,6 +260,10 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.dnssec_enabled = saved_cfg.dnssec_enabled;
     config.hosts_enabled = saved_cfg.hosts_enabled;
     config.hosts_path = saved_cfg.hosts_path;
+    config.dhcp_leases_enabled = saved_cfg.dhcp_leases_enabled;
+    config.dhcp_leases_path = saved_cfg.dhcp_leases_path;
+    config.mdns_enabled = saved_cfg.mdns_enabled;
+    config.sni_client_id_hostnames = saved_cfg.sni_client_id_hostnames;
     config.private_ptr_enabled = saved_cfg.private_ptr_enabled;
     config.private_ptr_upstreams = saved_cfg.private_ptr_upstreams;
     config.ddr_enabled = saved_cfg.ddr_enabled;
@@ -278,7 +290,16 @@ fn init_pipeline(
         .load_custom_rules()?
         .unwrap_or_else(|| cfg.custom_rules.join("\n"));
     let custom_enabled = storage.load_custom_rules_enabled()?;
-    let sub_contents = storage.load_enabled_named_subscription_contents()?;
+    let mut sub_contents = storage.load_enabled_named_subscription_contents()?;
+    let rewrites = storage.list_dns_rewrites()?;
+    let rewrite_lines: Vec<String> = rewrites
+        .into_iter()
+        .filter(|r| r.enabled)
+        .map(|r| r.to_filter_rule())
+        .collect();
+    if !rewrite_lines.is_empty() {
+        sub_contents.push(("rewrites".to_string(), rewrite_lines.join("\n")));
+    }
     filter.reload_from_named_sources(&custom_rules_text, custom_enabled, &sub_contents);
 
     let cache = Arc::new(DnsCache::with_options(
@@ -344,6 +365,18 @@ fn configure_pipeline(
             tracing::warn!(path = %resolved_hosts, error = %err, "failed to load hosts file");
         }
     }
+    pipeline.set_dhcp_leases_enabled(cfg.dhcp_leases_enabled);
+    if cfg.dhcp_leases_enabled {
+        let resolved_dhcp = cfg
+            .dhcp_leases_path
+            .as_deref()
+            .unwrap_or("/var/lib/misc/dnsmasq.leases");
+        if let Err(err) = pipeline.reload_dhcp_leases_from_path(std::path::Path::new(resolved_dhcp))
+        {
+            tracing::warn!(path = %resolved_dhcp, error = %err, "failed to load DHCP leases file");
+        }
+    }
+    pipeline.set_mdns_enabled(cfg.mdns_enabled);
     pipeline.reload_private_ptr(
         cfg.private_ptr_enabled,
         &cfg.private_ptr_upstreams,
@@ -369,11 +402,70 @@ fn configure_pipeline(
 struct WebAndTlsHandles {
     dot_addr: Option<SocketAddr>,
     dot_task: Option<JoinHandle<()>>,
+    doq_addr: Option<SocketAddr>,
+    doq_task: Option<JoinHandle<()>>,
     web_addr: SocketAddr,
     web_task: JoinHandle<()>,
     web_tls_addr: Option<SocketAddr>,
     web_tls_accept_task: Option<JoinHandle<()>>,
     web_tls_task: Option<JoinHandle<()>>,
+}
+
+async fn start_dot_listener(
+    config: &Arc<ArcSwap<Config>>,
+    pipeline: &Arc<DnsPipeline>,
+    tls_manager: &Arc<tls::TlsManager>,
+    max_connections: usize,
+    idle_timeout: Duration,
+    shutdown_rx: &watch::Receiver<bool>,
+) -> anyhow::Result<(Option<SocketAddr>, Option<JoinHandle<()>>)> {
+    let current_cfg = config.load_full();
+    let (Some(addr), Some(acceptor)) = (current_cfg.listen_dot, tls_manager.dot_acceptor()) else {
+        return Ok((None, None));
+    };
+    let dot_listener = dot::bind_dot_listener(addr).await?;
+    let bound_dot = dot_listener.local_addr()?;
+    let task = tokio::spawn(dot::run_dot_server(
+        dot_listener,
+        acceptor,
+        Arc::clone(config),
+        Arc::clone(pipeline),
+        max_connections,
+        idle_timeout,
+        shutdown_rx.clone(),
+    ));
+    Ok((Some(bound_dot), Some(task)))
+}
+
+fn start_doq_listener(
+    config: &Arc<ArcSwap<Config>>,
+    pipeline: &Arc<DnsPipeline>,
+    tls_manager: &Arc<tls::TlsManager>,
+    max_connections: usize,
+    idle_timeout: Duration,
+    shutdown_rx: &watch::Receiver<bool>,
+) -> anyhow::Result<(Option<SocketAddr>, Option<JoinHandle<()>>)> {
+    let cfg = config.load_full();
+    let (Some(addr), Some(cert_p), Some(key_p)) = (
+        cfg.listen_doq,
+        cfg.tls_cert_path.as_deref(),
+        cfg.tls_key_path.as_deref(),
+    ) else {
+        return Ok((None, None));
+    };
+    let quic_cfg = doq::build_doq_server_config(cert_p, key_p, idle_timeout)?;
+    let endpoint = doq::bind_doq_endpoint(addr, quic_cfg)?;
+    let bound = endpoint.local_addr()?;
+    tls_manager.set_doq_endpoint(Some(endpoint.clone()));
+    let task = tokio::spawn(doq::run_doq_server(
+        endpoint,
+        Arc::clone(config),
+        Arc::clone(pipeline),
+        max_connections,
+        idle_timeout,
+        shutdown_rx.clone(),
+    ));
+    Ok((Some(bound), Some(task)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -389,23 +481,24 @@ async fn start_web_and_tls(
 ) -> anyhow::Result<WebAndTlsHandles> {
     let current_cfg = config.load_full();
 
-    let (dot_addr, dot_task) = match (current_cfg.listen_dot, tls_manager.dot_acceptor()) {
-        (Some(addr), Some(acceptor)) => {
-            let dot_listener = dot::bind_dot_listener(addr).await?;
-            let bound_dot = dot_listener.local_addr()?;
-            let task = tokio::spawn(dot::run_dot_server(
-                dot_listener,
-                acceptor,
-                Arc::clone(config),
-                Arc::clone(pipeline),
-                tcp_max_connections,
-                tcp_idle_timeout,
-                shutdown_rx.clone(),
-            ));
-            (Some(bound_dot), Some(task))
-        }
-        _ => (None, None),
-    };
+    let (dot_addr, dot_task) = start_dot_listener(
+        config,
+        pipeline,
+        tls_manager,
+        tcp_max_connections,
+        tcp_idle_timeout,
+        shutdown_rx,
+    )
+    .await?;
+
+    let (quic_addr, quic_task) = start_doq_listener(
+        config,
+        pipeline,
+        tls_manager,
+        tcp_max_connections,
+        tcp_idle_timeout,
+        shutdown_rx,
+    )?;
 
     let web_listener = TcpListener::bind(current_cfg.listen_web).await?;
     let web_addr = web_listener.local_addr()?;
@@ -415,12 +508,13 @@ async fn start_web_and_tls(
         None => None,
     };
     let bound_web_tls = web_tls_listener.as_ref().and_then(|l| l.local_addr().ok());
-    tls_manager.update_bound_addrs(bound_web_tls, dot_addr);
+    tls_manager.update_bound_addrs(bound_web_tls, dot_addr, quic_addr);
 
     pipeline.reload_ddr(DdrConfig {
         enabled: current_cfg.ddr_enabled,
         hostname: current_cfg.ddr_hostname.clone(),
         dot_port: dot_addr.map(|a| a.port()),
+        doq_port: quic_addr.map(|a| a.port()),
         doh_enabled: current_cfg.doh_enabled,
         doh_port: bound_web_tls.map(|a| a.port()).or(Some(web_addr.port())),
     });
@@ -484,6 +578,8 @@ async fn start_web_and_tls(
     Ok(WebAndTlsHandles {
         dot_addr,
         dot_task,
+        doq_addr: quic_addr,
+        doq_task: quic_task,
         web_addr,
         web_task,
         web_tls_addr,
@@ -495,6 +591,8 @@ async fn start_web_and_tls(
 struct BackgroundTasks {
     sub_refresh: JoinHandle<()>,
     hosts_watch: JoinHandle<()>,
+    dhcp_watch: JoinHandle<()>,
+    mdns_watch: JoinHandle<()>,
     cache_persist: JoinHandle<()>,
     log_prune: JoinHandle<()>,
     tls_watch: Option<JoinHandle<()>>,
@@ -529,6 +627,16 @@ fn spawn_background_tasks(
             Arc::clone(&pipeline),
             shutdown_rx.clone(),
         ),
+        dhcp_watch: tasks::spawn_dhcp_lease_refresh_task(
+            Arc::clone(&config),
+            Arc::clone(&pipeline),
+            shutdown_rx.clone(),
+        ),
+        mdns_watch: tasks::spawn_mdns_listener_task(
+            Arc::clone(&config),
+            Arc::clone(&pipeline),
+            shutdown_rx.clone(),
+        ),
         cache_persist: tasks::spawn_cache_persist_task(
             Arc::clone(&config),
             pipeline,
@@ -539,6 +647,7 @@ fn spawn_background_tasks(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let storage = Arc::new(StorageEngine::open(&config.data_dir)?);
 
@@ -554,9 +663,13 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let sink_handle = spawn_log_sink(Arc::clone(&storage), log_rx, live_tx.clone());
     let pipeline = init_pipeline(&current_cfg, &storage, log_tx)?;
 
+    let tcp_max_connections = current_cfg.tcp_max_connections.max(1);
+    let tcp_idle_timeout = Duration::from_secs(current_cfg.tcp_idle_timeout_secs.max(1));
     let tls_manager = Arc::new(tls::TlsManager::new(
         current_cfg.listen_web_tls,
         current_cfg.listen_dot,
+        current_cfg.listen_doq,
+        tcp_idle_timeout,
         current_cfg.tls_cert_path.as_deref(),
         current_cfg.tls_key_path.as_deref(),
     )?);
@@ -568,8 +681,6 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         .clamp(2, 16);
     let udp_sockets = bind_udp_sockets(dns_addr, udp_worker_count)?;
 
-    let tcp_max_connections = current_cfg.tcp_max_connections.max(1);
-    let tcp_idle_timeout = Duration::from_secs(current_cfg.tcp_idle_timeout_secs.max(1));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let web_tls = start_web_and_tls(
@@ -587,6 +698,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     tracing::info!(
         dns = %dns_addr,
         dot = ?web_tls.dot_addr,
+        doq = ?web_tls.doq_addr,
         web = %web_tls.web_addr,
         web_tls = ?web_tls.web_tls_addr,
         "crabdns started"
@@ -611,7 +723,8 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         shutdown_rx.clone(),
     ));
 
-    let tls_active = web_tls.dot_addr.is_some() || web_tls.web_tls_addr.is_some();
+    let tls_active =
+        web_tls.dot_addr.is_some() || web_tls.doq_addr.is_some() || web_tls.web_tls_addr.is_some();
     let bg = spawn_background_tasks(
         Arc::clone(&config),
         Arc::clone(&pipeline),
@@ -626,6 +739,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         web_addr: web_tls.web_addr,
         web_tls_addr: web_tls.web_tls_addr,
         dot_addr: web_tls.dot_addr,
+        doq_addr: web_tls.doq_addr,
         pipeline,
         storage,
         config,
@@ -633,11 +747,14 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         udp_tasks,
         tcp_task,
         dot_task: web_tls.dot_task,
+        doq_task: web_tls.doq_task,
         web_task: web_tls.web_task,
         web_tls_accept_task: web_tls.web_tls_accept_task,
         web_tls_task: web_tls.web_tls_task,
         sub_refresh_task: bg.sub_refresh,
         hosts_watch_task: bg.hosts_watch,
+        dhcp_watch_task: bg.dhcp_watch,
+        mdns_watch_task: bg.mdns_watch,
         cache_persist_task: bg.cache_persist,
         log_prune_task: bg.log_prune,
         tls_watch_task: bg.tls_watch,

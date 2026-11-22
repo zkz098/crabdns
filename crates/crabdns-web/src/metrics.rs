@@ -260,11 +260,13 @@ fn write_runtime_metrics(
          # TYPE crabdns_active_connections gauge\n\
          crabdns_active_connections{{protocol=\"tcp\"}} {}\n\
          crabdns_active_connections{{protocol=\"dot\"}} {}\n\
+         crabdns_active_connections{{protocol=\"doq\"}} {}\n\
          crabdns_active_connections{{protocol=\"web\"}} {}\n\
          # HELP crabdns_rejected_connections_total Rejected client connections by protocol.\n\
          # TYPE crabdns_rejected_connections_total counter\n\
          crabdns_rejected_connections_total{{protocol=\"tcp\"}} {}\n\
          crabdns_rejected_connections_total{{protocol=\"dot\"}} {}\n\
+         crabdns_rejected_connections_total{{protocol=\"doq\"}} {}\n\
          crabdns_rejected_connections_total{{protocol=\"web\"}} {}\n\
          # HELP crabdns_doh_rejected_inflight_total DoH requests rejected due to inflight limit.\n\
          # TYPE crabdns_doh_rejected_inflight_total counter\n\
@@ -309,9 +311,11 @@ fn write_runtime_metrics(
         pipeline.udp_dropped_inflight,
         pipeline.tcp_active_connections,
         pipeline.dot_active_connections,
+        pipeline.doq_active_connections,
         pipeline.web_active_connections,
         pipeline.tcp_rejected_connections,
         pipeline.dot_rejected_connections,
+        pipeline.doq_rejected_connections,
         pipeline.web_rejected_connections,
         pipeline.doh_rejected_inflight,
         pipeline.doh_timed_out,

@@ -26,6 +26,7 @@ pub mod controls;
 pub mod doh;
 pub mod metrics;
 pub mod proxy;
+pub mod rewrites_api;
 pub mod subscriptions;
 pub mod tls_api;
 
@@ -135,6 +136,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/rules", get(get_rules).put(update_rules))
         .route("/api/rules/quick", post(controls::quick_rule))
         .route("/api/rules/test", post(controls::test_rule))
+        .route(
+            "/api/rewrites",
+            get(rewrites_api::list_rewrites).post(rewrites_api::create_rewrite),
+        )
+        .route(
+            "/api/rewrites/{id}",
+            put(rewrites_api::update_rewrite).delete(rewrites_api::delete_rewrite),
+        )
         .route("/api/cache/flush", post(controls::flush_cache))
         .route("/api/blocking/status", get(controls::get_blocking_status))
         .route("/api/blocking/pause", post(controls::pause_blocking))

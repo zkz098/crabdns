@@ -271,13 +271,22 @@ pub fn rebuild_filter_engine(
     let custom_enabled = storage
         .load_custom_rules_enabled()
         .map_err(|e| e.to_string())?;
-    let sub_contents = storage
+    let mut named_sources = storage
         .load_enabled_named_subscription_contents()
         .map_err(|e| e.to_string())?;
+    let rewrites = storage.list_dns_rewrites().map_err(|e| e.to_string())?;
+    let rewrite_lines: Vec<String> = rewrites
+        .into_iter()
+        .filter(|r| r.enabled)
+        .map(|r| r.to_filter_rule())
+        .collect();
+    if !rewrite_lines.is_empty() {
+        named_sources.push(("rewrites".to_string(), rewrite_lines.join("\n")));
+    }
 
     pipeline
         .filter()
-        .reload_from_named_sources(&custom_rules, custom_enabled, &sub_contents);
+        .reload_from_named_sources(&custom_rules, custom_enabled, &named_sources);
     let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     pipeline.record_filter_reload(elapsed_ms);
     Ok(())

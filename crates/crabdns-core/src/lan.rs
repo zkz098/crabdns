@@ -195,6 +195,7 @@ pub struct DdrConfig {
     pub enabled: bool,
     pub hostname: Option<String>,
     pub dot_port: Option<u16>,
+    pub doq_port: Option<u16>,
     pub doh_enabled: bool,
     pub doh_port: Option<u16>,
 }
@@ -239,6 +240,18 @@ pub fn build_ddr_response(request: &Message, cfg: &DdrConfig) -> Result<Vec<u8>>
         resp.add_answer(Record::from_rdata(owner.clone(), 300, RData::SVCB(svcb)));
     }
 
+    if let Some(doq_port) = cfg.doq_port {
+        let mut params = vec![(
+            SvcParamKey::Alpn,
+            SvcParamValue::Alpn(Alpn(vec!["doq".to_string()])),
+        )];
+        if doq_port != 853 {
+            params.push((SvcParamKey::Port, SvcParamValue::Port(doq_port)));
+        }
+        let svcb = SVCB::new(2, target.clone(), params);
+        resp.add_answer(Record::from_rdata(owner.clone(), 300, RData::SVCB(svcb)));
+    }
+
     if cfg.doh_enabled {
         let mut params = vec![
             (
@@ -253,7 +266,7 @@ pub fn build_ddr_response(request: &Message, cfg: &DdrConfig) -> Result<Vec<u8>>
         if let Some(port) = cfg.doh_port.filter(|&p| p != 443) {
             params.push((SvcParamKey::Port, SvcParamValue::Port(port)));
         }
-        let svcb = SVCB::new(2, target, params);
+        let svcb = SVCB::new(3, target, params);
         resp.add_answer(Record::from_rdata(owner, 300, RData::SVCB(svcb)));
     }
 
@@ -317,6 +330,7 @@ fd00::50 nas.local
             enabled: true,
             hostname: Some("dns.home.arpa".to_string()),
             dot_port: Some(853),
+            doq_port: None,
             doh_enabled: true,
             doh_port: Some(443),
         };

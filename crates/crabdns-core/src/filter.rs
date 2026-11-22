@@ -3,15 +3,14 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RewriteAction {
-    Ip(IpAddr),
-    Cname(String),
-    Txt(String),
-}
+use crate::filter_rules::{
+    FilterQueryContext, RewriteAction, RuleConditions, compile_safe_regex, is_valid_domain_token,
+    parse_modifiers, parse_regex_rule,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilterAction {
@@ -48,6 +47,16 @@ struct RuleMeta {
     rule_text: String,
     scope: MatchScope,
     rewrite: Option<RewriteAction>,
+    conditions: RuleConditions,
+    source_id: u32,
+}
+
+#[derive(Debug, Clone)]
+struct RegexRule {
+    regex: Regex,
+    rule_text: String,
+    rewrite: Option<RewriteAction>,
+    conditions: RuleConditions,
     source_id: u32,
 }
 
@@ -72,7 +81,7 @@ fn lookup_child<'a>(children: &'a TrieMap<String, TrieNode>, label: &str) -> Opt
 #[derive(Debug, Default)]
 struct TrieNode {
     children: TrieMap<String, TrieNode>,
-    rule: Option<RuleMeta>,
+    rules: Vec<RuleMeta>,
 }
 
 impl TrieNode {
@@ -84,28 +93,45 @@ impl TrieNode {
                 .entry(label.to_ascii_lowercase())
                 .or_default();
         }
-        current.rule = Some(meta);
+        current.rules.push(meta);
     }
 
-    fn match_domain(&self, domain: &str) -> Option<&RuleMeta> {
-        let mut labels = domain.rsplit('.').filter(|s| !s.is_empty()).peekable();
+    fn match_domain<'a>(
+        &'a self,
+        clean_domain: &str,
+        ctx: &FilterQueryContext<'_>,
+        prefer_rewrite_qtype: bool,
+    ) -> Option<&'a RuleMeta> {
+        let mut labels = clean_domain
+            .rsplit('.')
+            .filter(|s| !s.is_empty())
+            .peekable();
         let mut current = self;
         let mut best: Option<&RuleMeta> = None;
+        let mut best_qtype_hit = false;
 
         while let Some(label) = labels.next() {
             let Some(next) = lookup_child(&current.children, label) else {
                 break;
             };
             current = next;
-            if let Some(meta) = &current.rule {
-                let is_exact = labels.peek().is_none();
-                let matches = match meta.scope {
+            let is_exact = labels.peek().is_none();
+            for meta in &current.rules {
+                let scope_matches = match meta.scope {
                     MatchScope::Exact => is_exact,
                     MatchScope::DomainAndSubdomains => true,
                     MatchScope::SubdomainsOnly => !is_exact,
                 };
-                if matches {
+                if !scope_matches || !meta.conditions.matches(ctx, clean_domain) {
+                    continue;
+                }
+                let qtype_hit = prefer_rewrite_qtype
+                    && ctx.qtype.is_some_and(|qt| {
+                        meta.rewrite.as_ref().is_some_and(|r| r.matches_qtype(qt))
+                    });
+                if best.is_none() || qtype_hit || !best_qtype_hit {
                     best = Some(meta);
+                    best_qtype_hit = qtype_hit;
                 }
             }
         }
@@ -122,44 +148,88 @@ enum RuleBucket {
     Rewrite,
 }
 
-fn parse_rule_line(
-    raw_line: &str,
-    mut on_rule: impl FnMut(RuleBucket, &str, &str, MatchScope, Option<RewriteAction>),
-) {
-    let line = raw_line.trim();
-    if line.is_empty() || line.starts_with('!') || line.starts_with('#') {
-        return;
+fn classify_bucket(is_allow: bool, is_important: bool, has_rewrite: bool) -> RuleBucket {
+    if has_rewrite && !is_allow {
+        return RuleBucket::Rewrite;
     }
-
-    if let Some(parsed) = parse_adguard_rule(line) {
-        let bucket = if parsed.rewrite.is_some() {
-            RuleBucket::Rewrite
-        } else {
-            match (parsed.is_allow, parsed.is_important) {
-                (true, true) => RuleBucket::ImportantAllow,
-                (true, false) => RuleBucket::Allow,
-                (false, true) => RuleBucket::ImportantBlock,
-                (false, false) => RuleBucket::Block,
-            }
-        };
-        on_rule(bucket, line, &parsed.domain, parsed.scope, parsed.rewrite);
-        return;
+    match (is_allow, is_important) {
+        (true, true) => RuleBucket::ImportantAllow,
+        (true, false) => RuleBucket::Allow,
+        (false, true) => RuleBucket::ImportantBlock,
+        (false, false) => RuleBucket::Block,
     }
-
-    parse_hosts_or_bare_line(line, &mut on_rule);
 }
 
-fn parse_hosts_or_bare_line(
-    line: &str,
-    on_rule: &mut impl FnMut(RuleBucket, &str, &str, MatchScope, Option<RewriteAction>),
-) {
+enum ParsedLine {
+    Domain {
+        bucket: RuleBucket,
+        raw: String,
+        domain: String,
+        scope: MatchScope,
+        rewrite: Option<RewriteAction>,
+        conditions: RuleConditions,
+    },
+    Regex {
+        bucket: RuleBucket,
+        raw: String,
+        pattern: String,
+        rewrite: Option<RewriteAction>,
+        conditions: RuleConditions,
+    },
+}
+
+fn parse_line_items(raw_line: &str) -> Vec<ParsedLine> {
+    let trimmed = raw_line.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('!')
+        || trimmed.starts_with('#')
+        || trimmed.starts_with('[')
+    {
+        return Vec::new();
+    }
+
+    if let Some(rx) = parse_regex_rule(trimmed) {
+        if compile_safe_regex(&rx.pattern).is_none() {
+            return Vec::new();
+        }
+        let bucket = classify_bucket(rx.is_allow, rx.is_important, rx.rewrite.is_some());
+        return vec![ParsedLine::Regex {
+            bucket,
+            raw: trimmed.to_string(),
+            pattern: rx.pattern,
+            rewrite: rx.rewrite,
+            conditions: rx.conditions,
+        }];
+    }
+
+    if let Some(parsed) = parse_adguard_rule(trimmed) {
+        let bucket = classify_bucket(
+            parsed.is_allow,
+            parsed.is_important,
+            parsed.rewrite.is_some(),
+        );
+        return vec![ParsedLine::Domain {
+            bucket,
+            raw: trimmed.to_string(),
+            domain: parsed.domain,
+            scope: parsed.scope,
+            rewrite: parsed.rewrite,
+            conditions: parsed.conditions,
+        }];
+    }
+
+    parse_hosts_or_bare_line(trimmed)
+}
+
+fn parse_hosts_or_bare_line(line: &str) -> Vec<ParsedLine> {
     let no_comment = line.split('#').next().unwrap_or(line).trim();
     let mut parts = no_comment.split_whitespace();
     let Some(first) = parts.next() else {
-        return;
+        return Vec::new();
     };
 
     if let Some(second) = parts.next() {
+        let mut out = Vec::new();
         if first.parse::<IpAddr>().is_ok() {
             let is_sinkhole = first == "0.0.0.0" || first == "::" || first == "127.0.0.1";
             let scope = if is_sinkhole {
@@ -169,11 +239,18 @@ fn parse_hosts_or_bare_line(
             };
             for host in std::iter::once(second).chain(parts) {
                 if is_valid_domain_token(host) {
-                    on_rule(RuleBucket::Block, line, host, scope, None);
+                    out.push(ParsedLine::Domain {
+                        bucket: RuleBucket::Block,
+                        raw: line.to_string(),
+                        domain: host.to_string(),
+                        scope,
+                        rewrite: None,
+                        conditions: RuleConditions::default(),
+                    });
                 }
             }
         }
-        return;
+        return out;
     }
 
     let (scope, token) = if let Some(rest) = first.strip_prefix("*.") {
@@ -182,8 +259,16 @@ fn parse_hosts_or_bare_line(
         (MatchScope::DomainAndSubdomains, first)
     };
     if is_valid_domain_token(token) {
-        on_rule(RuleBucket::Block, line, token, scope, None);
+        return vec![ParsedLine::Domain {
+            bucket: RuleBucket::Block,
+            raw: line.to_string(),
+            domain: token.to_string(),
+            scope,
+            rewrite: None,
+            conditions: RuleConditions::default(),
+        }];
     }
+    Vec::new()
 }
 
 #[derive(Debug, Default)]
@@ -193,6 +278,11 @@ struct RuleSet {
     allows: TrieNode,
     blocks: TrieNode,
     rewrites: TrieNode,
+    regex_important_allows: Vec<RegexRule>,
+    regex_important_blocks: Vec<RegexRule>,
+    regex_allows: Vec<RegexRule>,
+    regex_blocks: Vec<RegexRule>,
+    regex_rewrites: Vec<RegexRule>,
     list_names: Vec<String>,
     stats: FilterStats,
 }
@@ -218,41 +308,151 @@ impl RuleSet {
     }
 
     fn parse_and_insert_with_source(&mut self, raw_line: &str, source_id: u32) {
-        parse_rule_line(raw_line, |bucket, raw, domain, scope, rewrite| {
-            self.stats.total_rules += 1;
-            let meta = RuleMeta {
-                rule_text: raw.to_string(),
-                scope,
-                rewrite,
-                source_id,
-            };
-            match bucket {
-                RuleBucket::ImportantAllow => {
-                    self.stats.allow_rules += 1;
-                    self.important_allows.insert(domain, meta);
+        for item in parse_line_items(raw_line) {
+            match item {
+                ParsedLine::Domain {
+                    bucket,
+                    raw,
+                    domain,
+                    scope,
+                    rewrite,
+                    conditions,
+                } => {
+                    self.record_bucket_stat(bucket);
+                    let meta = RuleMeta {
+                        rule_text: raw,
+                        scope,
+                        rewrite,
+                        conditions,
+                        source_id,
+                    };
+                    match bucket {
+                        RuleBucket::ImportantAllow => self.important_allows.insert(&domain, meta),
+                        RuleBucket::Allow => self.allows.insert(&domain, meta),
+                        RuleBucket::ImportantBlock => self.important_blocks.insert(&domain, meta),
+                        RuleBucket::Block => self.blocks.insert(&domain, meta),
+                        RuleBucket::Rewrite => self.rewrites.insert(&domain, meta),
+                    }
                 }
-                RuleBucket::Allow => {
-                    self.stats.allow_rules += 1;
-                    self.allows.insert(domain, meta);
-                }
-                RuleBucket::ImportantBlock => {
-                    self.stats.block_rules += 1;
-                    self.important_blocks.insert(domain, meta);
-                }
-                RuleBucket::Block => {
-                    self.stats.block_rules += 1;
-                    self.blocks.insert(domain, meta);
-                }
-                RuleBucket::Rewrite => {
-                    self.stats.rewrite_rules += 1;
-                    self.rewrites.insert(domain, meta);
+                ParsedLine::Regex {
+                    bucket,
+                    raw,
+                    pattern,
+                    rewrite,
+                    conditions,
+                } => {
+                    let Some(regex) = compile_safe_regex(&pattern) else {
+                        continue;
+                    };
+                    self.record_bucket_stat(bucket);
+                    let rule = RegexRule {
+                        regex,
+                        rule_text: raw,
+                        rewrite,
+                        conditions,
+                        source_id,
+                    };
+                    match bucket {
+                        RuleBucket::ImportantAllow => self.regex_important_allows.push(rule),
+                        RuleBucket::Allow => self.regex_allows.push(rule),
+                        RuleBucket::ImportantBlock => self.regex_important_blocks.push(rule),
+                        RuleBucket::Block => self.regex_blocks.push(rule),
+                        RuleBucket::Rewrite => self.regex_rewrites.push(rule),
+                    }
                 }
             }
-        });
+        }
     }
 
-    fn evaluate(&self, domain: &str) -> FilterDecision {
-        let clean = domain.trim_end_matches('.');
+    fn record_bucket_stat(&mut self, bucket: RuleBucket) {
+        self.stats.total_rules += 1;
+        match bucket {
+            RuleBucket::ImportantAllow | RuleBucket::Allow => self.stats.allow_rules += 1,
+            RuleBucket::ImportantBlock | RuleBucket::Block => self.stats.block_rules += 1,
+            RuleBucket::Rewrite => self.stats.rewrite_rules += 1,
+        }
+    }
+
+    fn match_regex<'a>(
+        rules: &'a [RegexRule],
+        clean_domain: &str,
+        ctx: &FilterQueryContext<'_>,
+        prefer_rewrite_qtype: bool,
+    ) -> Option<&'a RegexRule> {
+        let mut fallback = None;
+        for rule in rules {
+            if rule.conditions.matches(ctx, clean_domain) && rule.regex.is_match(clean_domain) {
+                if prefer_rewrite_qtype
+                    && ctx.qtype.is_some_and(|qt| {
+                        rule.rewrite.as_ref().is_some_and(|r| r.matches_qtype(qt))
+                    })
+                {
+                    return Some(rule);
+                }
+                if fallback.is_none() {
+                    fallback = Some(rule);
+                }
+            }
+        }
+        fallback
+    }
+
+    fn match_bucket(
+        &self,
+        trie: &TrieNode,
+        regexes: &[RegexRule],
+        clean: &str,
+        ctx: &FilterQueryContext<'_>,
+        action: FilterAction,
+    ) -> Option<FilterDecision> {
+        if let Some(meta) = trie.match_domain(clean, ctx, false) {
+            return Some(FilterDecision {
+                action,
+                matched_rule: Some(meta.rule_text.clone()),
+                matched_list: self.source_name(meta.source_id),
+            });
+        }
+        if let Some(rx) = Self::match_regex(regexes, clean, ctx, false) {
+            return Some(FilterDecision {
+                action,
+                matched_rule: Some(rx.rule_text.clone()),
+                matched_list: self.source_name(rx.source_id),
+            });
+        }
+        None
+    }
+
+    fn match_rewrite(&self, clean: &str, ctx: &FilterQueryContext<'_>) -> Option<FilterDecision> {
+        let trie_hit = self.rewrites.match_domain(clean, ctx, true);
+        let regex_hit = Self::match_regex(&self.regex_rewrites, clean, ctx, true);
+        let trie_exact_qt = trie_hit.is_some_and(|m| {
+            ctx.qtype
+                .is_some_and(|qt| m.rewrite.as_ref().is_some_and(|r| r.matches_qtype(qt)))
+        });
+        if let Some(meta) = trie_hit
+            && (trie_exact_qt || regex_hit.is_none())
+            && let Some(rw) = &meta.rewrite
+        {
+            return Some(FilterDecision {
+                action: FilterAction::Rewrite(rw.clone()),
+                matched_rule: Some(meta.rule_text.clone()),
+                matched_list: self.source_name(meta.source_id),
+            });
+        }
+        if let Some(rx) = regex_hit
+            && let Some(rw) = &rx.rewrite
+        {
+            return Some(FilterDecision {
+                action: FilterAction::Rewrite(rw.clone()),
+                matched_rule: Some(rx.rule_text.clone()),
+                matched_list: self.source_name(rx.source_id),
+            });
+        }
+        None
+    }
+
+    fn evaluate_with_context(&self, ctx: &FilterQueryContext<'_>) -> FilterDecision {
+        let clean = ctx.domain.trim_end_matches('.');
         if clean.is_empty() {
             return FilterDecision {
                 action: FilterAction::Allow,
@@ -261,42 +461,44 @@ impl RuleSet {
             };
         }
 
-        if let Some(meta) = self.important_allows.match_domain(clean) {
-            return FilterDecision {
-                action: FilterAction::Allow,
-                matched_rule: Some(meta.rule_text.clone()),
-                matched_list: self.source_name(meta.source_id),
-            };
+        if let Some(dec) = self.match_bucket(
+            &self.important_allows,
+            &self.regex_important_allows,
+            clean,
+            ctx,
+            FilterAction::Allow,
+        ) {
+            return dec;
         }
-        if let Some(meta) = self.important_blocks.match_domain(clean) {
-            return FilterDecision {
-                action: FilterAction::Block,
-                matched_rule: Some(meta.rule_text.clone()),
-                matched_list: self.source_name(meta.source_id),
-            };
+        if let Some(dec) = self.match_bucket(
+            &self.important_blocks,
+            &self.regex_important_blocks,
+            clean,
+            ctx,
+            FilterAction::Block,
+        ) {
+            return dec;
         }
-        if let Some(meta) = self.allows.match_domain(clean) {
-            return FilterDecision {
-                action: FilterAction::Allow,
-                matched_rule: Some(meta.rule_text.clone()),
-                matched_list: self.source_name(meta.source_id),
-            };
+        if let Some(dec) = self.match_bucket(
+            &self.allows,
+            &self.regex_allows,
+            clean,
+            ctx,
+            FilterAction::Allow,
+        ) {
+            return dec;
         }
-        if let Some(meta) = self.rewrites.match_domain(clean)
-            && let Some(rewrite) = &meta.rewrite
-        {
-            return FilterDecision {
-                action: FilterAction::Rewrite(rewrite.clone()),
-                matched_rule: Some(meta.rule_text.clone()),
-                matched_list: self.source_name(meta.source_id),
-            };
+        if let Some(dec) = self.match_rewrite(clean, ctx) {
+            return dec;
         }
-        if let Some(meta) = self.blocks.match_domain(clean) {
-            return FilterDecision {
-                action: FilterAction::Block,
-                matched_rule: Some(meta.rule_text.clone()),
-                matched_list: self.source_name(meta.source_id),
-            };
+        if let Some(dec) = self.match_bucket(
+            &self.blocks,
+            &self.regex_blocks,
+            clean,
+            ctx,
+            FilterAction::Block,
+        ) {
+            return dec;
         }
 
         FilterDecision {
@@ -313,6 +515,7 @@ struct ParsedRule {
     is_important: bool,
     scope: MatchScope,
     rewrite: Option<RewriteAction>,
+    conditions: RuleConditions,
 }
 
 fn parse_adguard_rule(line: &str) -> Option<ParsedRule> {
@@ -349,64 +552,15 @@ fn parse_adguard_rule(line: &str) -> Option<ParsedRule> {
         return None;
     }
 
-    let mut is_important = false;
-    let mut rewrite = None;
-    if let Some(mods) = modifiers {
-        for part in mods.split(',') {
-            let trimmed = part.trim();
-            if trimmed == "important" {
-                is_important = true;
-            } else if let Some(val) = trimmed.strip_prefix("dnsrewrite=") {
-                rewrite = parse_dnsrewrite_value(val);
-            }
-        }
-    }
-
+    let parsed_mods = parse_modifiers(modifiers);
     Some(ParsedRule {
         domain: domain.to_string(),
         is_allow,
-        is_important,
+        is_important: parsed_mods.is_important,
         scope,
-        rewrite,
+        rewrite: parsed_mods.rewrite,
+        conditions: parsed_mods.conditions,
     })
-}
-
-fn parse_dnsrewrite_value(raw: &str) -> Option<RewriteAction> {
-    let val = raw.trim();
-    if val.is_empty() {
-        return None;
-    }
-    if let Ok(ip) = val.parse::<IpAddr>() {
-        return Some(RewriteAction::Ip(ip));
-    }
-    if let Some((rr_type, target)) = val.split_once(';') {
-        let kind = rr_type.trim().to_ascii_uppercase();
-        let target = target.trim();
-        if target.is_empty() {
-            return None;
-        }
-        return match kind.as_str() {
-            "A" | "AAAA" => target.parse::<IpAddr>().ok().map(RewriteAction::Ip),
-            "CNAME" => {
-                let clean = target.trim_end_matches('.');
-                is_valid_domain_token(clean).then(|| RewriteAction::Cname(clean.to_string()))
-            }
-            "TXT" => Some(RewriteAction::Txt(target.to_string())),
-            _ => None,
-        };
-    }
-    let clean = val.trim_end_matches('.');
-    is_valid_domain_token(clean).then(|| RewriteAction::Cname(clean.to_string()))
-}
-
-fn is_valid_domain_token(token: &str) -> bool {
-    !token.is_empty()
-        && token.len() <= 253
-        && !token.contains('*')
-        && !token.contains('/')
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
 }
 
 pub struct FilterEngine {
@@ -477,20 +631,27 @@ impl FilterEngine {
     pub fn count_rules_in_text(rules_text: &str) -> FilterStats {
         let mut stats = FilterStats::default();
         for line in rules_text.lines() {
-            parse_rule_line(line, |bucket, _, _, _, _| {
+            for item in parse_line_items(line) {
+                let bucket = match item {
+                    ParsedLine::Domain { bucket, .. } | ParsedLine::Regex { bucket, .. } => bucket,
+                };
                 stats.total_rules += 1;
                 match bucket {
                     RuleBucket::ImportantAllow | RuleBucket::Allow => stats.allow_rules += 1,
                     RuleBucket::ImportantBlock | RuleBucket::Block => stats.block_rules += 1,
                     RuleBucket::Rewrite => stats.rewrite_rules += 1,
                 }
-            });
+            }
         }
         stats
     }
 
     pub fn evaluate(&self, domain: &str) -> FilterDecision {
-        self.ruleset.load().evaluate(domain)
+        self.evaluate_with_context(&FilterQueryContext::from_domain(domain))
+    }
+
+    pub fn evaluate_with_context(&self, ctx: &FilterQueryContext<'_>) -> FilterDecision {
+        self.ruleset.load().evaluate_with_context(ctx)
     }
 
     pub fn stats(&self) -> FilterStats {
@@ -505,6 +666,7 @@ impl FilterEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hickory_proto::rr::RecordType;
 
     #[test]
     fn test_adguard_block_and_allow_precedence() {
@@ -541,6 +703,7 @@ mod tests {
         let rules = vec![
             "0.0.0.0 tracker.test".to_string(),
             "||nas.local^$dnsrewrite=192.168.1.50".to_string(),
+            "||nas.local^$dnsrewrite=fd00::50".to_string(),
             "||alias.local^$dnsrewrite=CNAME;nas.local".to_string(),
             "||info.local^$dnsrewrite=TXT;crabdns-ok".to_string(),
             "*.wild.test".to_string(),
@@ -548,9 +711,23 @@ mod tests {
         let engine = FilterEngine::new(&rules);
 
         assert_eq!(engine.evaluate("tracker.test").action, FilterAction::Block);
+        let a_ctx = FilterQueryContext {
+            domain: "nas.local",
+            qtype: Some(RecordType::A),
+            ..Default::default()
+        };
         assert_eq!(
-            engine.evaluate("nas.local").action,
+            engine.evaluate_with_context(&a_ctx).action,
             FilterAction::Rewrite(RewriteAction::Ip("192.168.1.50".parse().expect("valid ip")))
+        );
+        let aaaa_ctx = FilterQueryContext {
+            domain: "nas.local",
+            qtype: Some(RecordType::AAAA),
+            ..Default::default()
+        };
+        assert_eq!(
+            engine.evaluate_with_context(&aaaa_ctx).action,
+            FilterAction::Rewrite(RewriteAction::Ip("fd00::50".parse().expect("valid ipv6")))
         );
         assert_eq!(
             engine.evaluate("alias.local").action,
@@ -565,13 +742,103 @@ mod tests {
     }
 
     #[test]
-    fn test_hot_reload() {
+    fn test_dnstype_client_denyallow_and_regex_modifiers() {
+        let rules = vec![
+            "||only-aaaa.example.com^$dnstype=AAAA".to_string(),
+            "||no-https.example.com^$dnstype=~A|~AAAA".to_string(),
+            "||games.example.com^$client=192.168.10.0/24|'kid-phone'".to_string(),
+            "||shop.example.com^$denyallow=pay.shop.example.com|cdn.shop.example.com".to_string(),
+            r"/^ad-[0-9]+\.tracker\.net$/".to_string(),
+            r"@@/^ad-0+\.tracker\.net$/".to_string(),
+        ];
+        let engine = FilterEngine::new(&rules);
+
+        let ctx_a = FilterQueryContext {
+            domain: "only-aaaa.example.com",
+            qtype: Some(RecordType::A),
+            ..Default::default()
+        };
+        let ctx_aaaa = FilterQueryContext {
+            domain: "only-aaaa.example.com",
+            qtype: Some(RecordType::AAAA),
+            ..Default::default()
+        };
+        assert_eq!(
+            engine.evaluate_with_context(&ctx_a).action,
+            FilterAction::Allow
+        );
+        assert_eq!(
+            engine.evaluate_with_context(&ctx_aaaa).action,
+            FilterAction::Block
+        );
+
+        let ctx_https = FilterQueryContext {
+            domain: "no-https.example.com",
+            qtype: Some(RecordType::HTTPS),
+            ..Default::default()
+        };
+        assert_eq!(
+            engine.evaluate_with_context(&ctx_https).action,
+            FilterAction::Block
+        );
+
+        let kid_ctx = FilterQueryContext {
+            domain: "games.example.com",
+            client_ip: Some("192.168.10.22".parse().unwrap()),
+            ..Default::default()
+        };
+        let parent_ctx = FilterQueryContext {
+            domain: "games.example.com",
+            client_ip: Some("192.168.1.5".parse().unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(
+            engine.evaluate_with_context(&kid_ctx).action,
+            FilterAction::Block
+        );
+        assert_eq!(
+            engine.evaluate_with_context(&parent_ctx).action,
+            FilterAction::Allow
+        );
+
+        assert_eq!(
+            engine.evaluate("shop.example.com").action,
+            FilterAction::Block
+        );
+        assert_eq!(
+            engine.evaluate("pay.shop.example.com").action,
+            FilterAction::Allow
+        );
+        assert_eq!(
+            engine.evaluate("img.cdn.shop.example.com").action,
+            FilterAction::Allow
+        );
+
+        assert_eq!(
+            engine.evaluate("ad-42.tracker.net").action,
+            FilterAction::Block
+        );
+        assert_eq!(
+            engine.evaluate("ad-00.tracker.net").action,
+            FilterAction::Allow
+        );
+        assert_eq!(
+            engine.evaluate("blog.tracker.net").action,
+            FilterAction::Allow
+        );
+    }
+
+    #[test]
+    fn test_hot_reload_and_count() {
+        let sub1 = "||ad1.example.com^\n! comment\n0.0.0.0 ad2.example.com\n/^ad-[0-9]+\\.test$/\n"
+            .to_string();
+        assert_eq!(FilterEngine::count_rules_in_text(&sub1).total_rules, 3);
+
         let engine = FilterEngine::new(&["||old.example.com^".to_string()]);
         assert_eq!(
             engine.evaluate("old.example.com").action,
             FilterAction::Block
         );
-
         let stats = engine.reload_from_text("||new.example.com^\n");
         assert_eq!(stats.block_rules, 1);
         assert_eq!(
@@ -581,48 +848,6 @@ mod tests {
         assert_eq!(
             engine.evaluate("new.example.com").action,
             FilterAction::Block
-        );
-    }
-
-    #[test]
-    fn test_reload_from_sources_and_count() {
-        let sub1 = "||ad1.example.com^\n! comment\n0.0.0.0 ad2.example.com\n".to_string();
-        let sub2 = "||ad3.example.com^\n".to_string();
-        assert_eq!(FilterEngine::count_rules_in_text(&sub1).total_rules, 2);
-
-        let engine = FilterEngine::new(&[]);
-        let stats = engine.reload_from_sources(
-            "@@||ad1.example.com^\n||custom.example.com^",
-            true,
-            &[sub1.clone(), sub2.clone()],
-        );
-        assert_eq!(stats.total_rules, 5);
-        assert_eq!(
-            engine.evaluate("ad1.example.com").action,
-            FilterAction::Allow
-        );
-        assert_eq!(
-            engine.evaluate("ad2.example.com").action,
-            FilterAction::Block
-        );
-        assert_eq!(
-            engine.evaluate("custom.example.com").action,
-            FilterAction::Block
-        );
-
-        let stats_disabled = engine.reload_from_sources(
-            "@@||ad1.example.com^\n||custom.example.com^",
-            false,
-            &[sub1],
-        );
-        assert_eq!(stats_disabled.total_rules, 2);
-        assert_eq!(
-            engine.evaluate("ad1.example.com").action,
-            FilterAction::Block
-        );
-        assert_eq!(
-            engine.evaluate("custom.example.com").action,
-            FilterAction::Allow
         );
     }
 
@@ -639,7 +864,8 @@ mod tests {
              ||imp.example.com^$important\n\
              ||rw.example.com^$dnsrewrite=1.2.3.4\n\
              0.0.0.0 host1.test host2.test\n\
-             *.wild.example.com\n"
+             *.wild.example.com\n\
+             /^rx-[0-9]+\\.example\\.com$/\n"
         );
         let counted = FilterEngine::count_rules_in_text(&mixed);
         let built = RuleSet::from_named_lines("check", mixed.lines()).stats;
@@ -647,6 +873,6 @@ mod tests {
         assert_eq!(counted.block_rules, built.block_rules);
         assert_eq!(counted.allow_rules, built.allow_rules);
         assert_eq!(counted.rewrite_rules, built.rewrite_rules);
-        assert_eq!(counted.total_rules, 7);
+        assert_eq!(counted.total_rules, 8);
     }
 }

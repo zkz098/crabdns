@@ -190,6 +190,7 @@ async fn test_any_suppression_ddr_and_hosts() {
         enabled: true,
         hostname: Some("dns.home.arpa".to_string()),
         dot_port: Some(853),
+        doq_port: None,
         doh_enabled: true,
         doh_port: Some(443),
     });

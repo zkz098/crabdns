@@ -34,6 +34,8 @@ fn arb_event() -> impl Strategy<Value = QueryEvent> {
                 timestamp: Utc::now(),
                 client_ip,
                 client_name: None,
+                client_id: None,
+                profile_id: None,
                 protocol: QueryProtocol::Udp,
                 domain,
                 qtype,

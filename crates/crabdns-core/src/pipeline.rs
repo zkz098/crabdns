@@ -6,7 +6,7 @@ use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use hickory_proto::rr::RecordType;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use ts_rs::TS;
 
 use crate::acl::AccessController;
@@ -17,10 +17,12 @@ use crate::clients::{
 };
 use crate::clock::monotonic_now_ms;
 use crate::config::{BlockMode, SplitDnsRule, UpstreamStrategy};
+use crate::device_names::{DhcpLeaseTable, MdnsNameResolver};
 use crate::dnssec::DnssecValidator;
 use crate::edns::EcsConfig;
 use crate::error::Result;
 use crate::filter::{FilterDecision, FilterEngine};
+use crate::filter_rules::FilterQueryContext;
 use crate::lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter, is_private_ptr_domain};
 use crate::security::is_private_or_special_ip;
 use crate::singleflight::Singleflight;
@@ -46,6 +48,7 @@ pub enum QueryProtocol {
     Udp,
     Tcp,
     Dot,
+    Doq,
     Doh,
 }
 
@@ -63,6 +66,10 @@ pub struct QueryEvent {
     pub client_ip: String,
     #[serde(default)]
     pub client_name: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
     #[serde(default)]
     pub protocol: QueryProtocol,
     pub domain: String,
@@ -145,6 +152,8 @@ struct ServerRuntimeCounters {
     tcp_rejected_connections: AtomicU64,
     dot_active_connections: AtomicU64,
     dot_rejected_connections: AtomicU64,
+    doq_active_connections: AtomicU64,
+    doq_rejected_connections: AtomicU64,
     web_active_connections: AtomicU64,
     web_rejected_connections: AtomicU64,
     doh_rejected_inflight: AtomicU64,
@@ -165,6 +174,8 @@ pub struct PipelineRuntimeMetrics {
     pub tcp_rejected_connections: u64,
     pub dot_active_connections: u64,
     pub dot_rejected_connections: u64,
+    pub doq_active_connections: u64,
+    pub doq_rejected_connections: u64,
     pub web_active_connections: u64,
     pub web_rejected_connections: u64,
     pub doh_rejected_inflight: u64,
@@ -194,6 +205,11 @@ pub struct DnsPipeline {
     pub(crate) dnssec_validator: Arc<DnssecValidator>,
     pub(crate) hosts_enabled: AtomicBool,
     pub(crate) hosts_table: ArcSwap<HostsTable>,
+    pub(crate) dhcp_leases_enabled: AtomicBool,
+    pub(crate) dhcp_leases: ArcSwap<DhcpLeaseTable>,
+    pub(crate) mdns_enabled: AtomicBool,
+    pub(crate) mdns_resolver: Arc<MdnsNameResolver>,
+    pub(crate) mdns_notify: Arc<Notify>,
     pub(crate) private_ptr_router: ArcSwap<PrivatePtrRouter>,
     pub(crate) ddr_config: ArcSwap<DdrConfig>,
     pub(crate) dns_rebinding_protection: AtomicBool,
@@ -247,6 +263,11 @@ impl DnsPipeline {
             dnssec_validator: Arc::new(DnssecValidator::default()),
             hosts_enabled: AtomicBool::new(false),
             hosts_table: ArcSwap::from_pointee(HostsTable::default()),
+            dhcp_leases_enabled: AtomicBool::new(false),
+            dhcp_leases: ArcSwap::from_pointee(DhcpLeaseTable::default()),
+            mdns_enabled: AtomicBool::new(false),
+            mdns_resolver: Arc::new(MdnsNameResolver::new()),
+            mdns_notify: Arc::new(Notify::new()),
             private_ptr_router: ArcSwap::from_pointee(PrivatePtrRouter::default()),
             ddr_config: ArcSwap::from_pointee(DdrConfig::default()),
             dns_rebinding_protection: AtomicBool::new(false),
@@ -347,6 +368,24 @@ impl DnsPipeline {
             return (Some(name), "hosts");
         }
 
+        if self.dhcp_leases_enabled.load(Ordering::Relaxed)
+            && let Some(name) = self.dhcp_leases.load().lookup(ip)
+        {
+            return (Some(name.to_string()), "dhcp");
+        }
+
+        if self.mdns_enabled.load(Ordering::Relaxed) {
+            match self.mdns_resolver.lookup_cached(ip) {
+                Some(Some(name)) => return (Some(name), "mdns"),
+                Some(None) => {}
+                None => {
+                    if is_private_or_special_ip(ip) {
+                        self.mdns_resolver.spawn_lookup_if_needed(ip);
+                    }
+                }
+            }
+        }
+
         match self.name_resolver.lookup_cached(ip) {
             Some(Some(name)) => return (Some(name), "rdns"),
             Some(None) => return (None, "unknown"),
@@ -386,13 +425,49 @@ impl DnsPipeline {
         ip: Option<IpAddr>,
         client_id: Option<&str>,
     ) -> FilterDecision {
+        self.evaluate_filter_for_client_with_qtype(domain, None, ip, client_id)
+    }
+
+    pub fn evaluate_filter_for_client_with_qtype(
+        &self,
+        domain: &str,
+        qtype: Option<RecordType>,
+        ip: Option<IpAddr>,
+        client_id: Option<&str>,
+    ) -> FilterDecision {
         let registry = self.clients.load();
         let policy = match (ip, client_id) {
             (Some(addr), cid) => registry.match_client(addr, cid),
             (None, Some(cid)) => registry.match_client_id(cid),
             (None, None) => None,
         };
-        ClientRegistry::evaluate_domain(policy.as_deref(), &self.filter, domain)
+        let empty_tags: &[String] = &[];
+        let ctx = FilterQueryContext {
+            domain,
+            qtype,
+            client_ip: ip,
+            client_id,
+            client_name: policy.as_deref().map(|p| p.client_name.as_str()),
+            client_tags: policy.as_deref().map_or(empty_tags, |p| p.tags.as_slice()),
+        };
+        ClientRegistry::evaluate_domain_with_context(policy.as_deref(), &self.filter, &ctx)
+    }
+
+    pub fn evaluate_filter_for_client_with_qtype_str(
+        &self,
+        domain: &str,
+        qtype_str: Option<&str>,
+        ip: Option<IpAddr>,
+        client_id: Option<&str>,
+    ) -> Result<FilterDecision> {
+        let parsed_qtype =
+            match qtype_str.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(raw) => Some(raw.to_ascii_uppercase().parse::<RecordType>().map_err(
+                    |_| crate::error::CoreError::Config(format!("invalid qtype '{raw}'")),
+                )?),
+                None => None,
+            };
+        Ok(self.evaluate_filter_for_client_with_qtype(domain, parsed_qtype, ip, client_id))
     }
 
     pub fn reload_upstream(&self, specs: &[String], timeout_ms: u64) -> Result<()> {
@@ -530,6 +605,34 @@ impl DnsPipeline {
         Ok(count)
     }
 
+    pub fn set_dhcp_leases_enabled(&self, enabled: bool) {
+        self.dhcp_leases_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn reload_dhcp_leases_table(&self, table: DhcpLeaseTable) {
+        self.dhcp_leases.store(Arc::new(table));
+    }
+
+    pub fn reload_dhcp_leases_from_path(&self, path: &std::path::Path) -> Result<usize> {
+        let table = DhcpLeaseTable::from_file(path)?;
+        let count = table.len();
+        self.dhcp_leases.store(Arc::new(table));
+        Ok(count)
+    }
+
+    pub fn set_mdns_enabled(&self, enabled: bool) {
+        self.mdns_enabled.store(enabled, Ordering::Relaxed);
+        self.mdns_notify.notify_waiters();
+    }
+
+    pub fn mdns_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.mdns_notify)
+    }
+
+    pub fn mdns_resolver(&self) -> Arc<MdnsNameResolver> {
+        Arc::clone(&self.mdns_resolver)
+    }
+
     pub fn reload_private_ptr(
         &self,
         enabled: bool,
@@ -603,6 +706,24 @@ impl DnsPipeline {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn inc_doq_active(&self) {
+        self.counters
+            .doq_active_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_doq_active(&self) {
+        self.counters
+            .doq_active_connections
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn record_doq_rejected(&self) {
+        self.counters
+            .doq_rejected_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn inc_web_active(&self) {
         self.counters
             .web_active_connections
@@ -660,6 +781,11 @@ impl DnsPipeline {
             dot_rejected_connections: self
                 .counters
                 .dot_rejected_connections
+                .load(Ordering::Relaxed),
+            doq_active_connections: self.counters.doq_active_connections.load(Ordering::Relaxed),
+            doq_rejected_connections: self
+                .counters
+                .doq_rejected_connections
                 .load(Ordering::Relaxed),
             web_active_connections: self.counters.web_active_connections.load(Ordering::Relaxed),
             web_rejected_connections: self

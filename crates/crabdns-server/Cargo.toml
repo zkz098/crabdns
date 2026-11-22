@@ -26,6 +26,7 @@ crabdns-core.workspace = true
 crabdns-storage.workspace = true
 crabdns-web.workspace = true
 mimalloc.workspace = true
+quinn.workspace = true
 ring.workspace = true
 rustls.workspace = true
 socket2.workspace = true

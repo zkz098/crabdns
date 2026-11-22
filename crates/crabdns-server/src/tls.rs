@@ -23,6 +23,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
+use crate::doq::build_doq_server_config;
 use crate::{IpConnGuard, IpConnLimiter};
 
 const HTTPS_MAX_HANDSHAKES: usize = 256;
@@ -67,6 +68,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 pub struct TlsManager {
     dot_acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
     https_acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
+    doq_endpoint: Mutex<Option<quinn::Endpoint>>,
+    doq_idle_timeout: Duration,
     cert_path: ArcSwap<Option<PathBuf>>,
     key_path: ArcSwap<Option<PathBuf>>,
     status: ArcSwap<TlsStatusResponse>,
@@ -77,16 +80,20 @@ impl TlsManager {
     pub fn new(
         https_listen: Option<SocketAddr>,
         dot_listen: Option<SocketAddr>,
+        quic_listen: Option<SocketAddr>,
+        doq_idle_timeout: Duration,
         cert_path: Option<&Path>,
         key_path: Option<&Path>,
     ) -> anyhow::Result<Self> {
-        let active = https_listen.is_some() || dot_listen.is_some();
+        let active = https_listen.is_some() || dot_listen.is_some() || quic_listen.is_some();
         if !active {
             let status = TlsStatusResponse {
                 https_enabled: false,
                 https_listen: None,
                 dot_enabled: false,
                 dot_listen: None,
+                doq_enabled: false,
+                doq_listen: None,
                 cert_path: cert_path.map(|p| p.display().to_string()),
                 key_path: key_path.map(|p| p.display().to_string()),
                 last_loaded_at: None,
@@ -97,6 +104,8 @@ impl TlsManager {
             return Ok(Self {
                 dot_acceptor: None,
                 https_acceptor: None,
+                doq_endpoint: Mutex::new(None),
+                doq_idle_timeout,
                 cert_path: ArcSwap::from_pointee(cert_path.map(Path::to_path_buf)),
                 key_path: ArcSwap::from_pointee(key_path.map(Path::to_path_buf)),
                 status: ArcSwap::from_pointee(status),
@@ -136,11 +145,19 @@ impl TlsManager {
             None
         };
 
+        if quic_listen.is_some() && fingerprint.is_none() {
+            let (_, fp, count) = build_tls_acceptor_with_meta(cert, key, vec![b"doq".to_vec()])?;
+            fingerprint = Some(fp);
+            cert_count = count;
+        }
+
         let status = TlsStatusResponse {
             https_enabled: https_listen.is_some(),
             https_listen: https_listen.map(|a| a.to_string()),
             dot_enabled: dot_listen.is_some(),
             dot_listen: dot_listen.map(|a| a.to_string()),
+            doq_enabled: quic_listen.is_some(),
+            doq_listen: quic_listen.map(|a| a.to_string()),
             cert_path: Some(cert.display().to_string()),
             key_path: Some(key.display().to_string()),
             last_loaded_at: Some(Utc::now()),
@@ -152,6 +169,8 @@ impl TlsManager {
         Ok(Self {
             dot_acceptor,
             https_acceptor,
+            doq_endpoint: Mutex::new(None),
+            doq_idle_timeout,
             cert_path: ArcSwap::from_pointee(Some(cert.to_path_buf())),
             key_path: ArcSwap::from_pointee(Some(key.to_path_buf())),
             status: ArcSwap::from_pointee(status),
@@ -167,13 +186,29 @@ impl TlsManager {
         self.https_acceptor.clone()
     }
 
-    pub fn update_bound_addrs(&self, https_addr: Option<SocketAddr>, dot_addr: Option<SocketAddr>) {
+    pub fn set_doq_endpoint(&self, endpoint: Option<quinn::Endpoint>) {
+        let mut guard = self
+            .doq_endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = endpoint;
+    }
+
+    pub fn update_bound_addrs(
+        &self,
+        https_addr: Option<SocketAddr>,
+        dot_addr: Option<SocketAddr>,
+        quic_addr: Option<SocketAddr>,
+    ) {
         let mut next = self.status.load().as_ref().clone();
         if let Some(addr) = https_addr {
             next.https_listen = Some(addr.to_string());
         }
         if let Some(addr) = dot_addr {
             next.dot_listen = Some(addr.to_string());
+        }
+        if let Some(addr) = quic_addr {
+            next.doq_listen = Some(addr.to_string());
         }
         self.status.store(Arc::new(next));
     }
@@ -247,7 +282,10 @@ impl TlsReloader for TlsManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if self.dot_acceptor.is_none() && self.https_acceptor.is_none() {
+        if self.dot_acceptor.is_none()
+            && self.https_acceptor.is_none()
+            && !self.status.load().doq_enabled
+        {
             return Err("TLS listeners are not active".to_string());
         }
 
@@ -275,6 +313,16 @@ impl TlsReloader for TlsManager {
         }
         if let (Some(slot), Some(acc)) = (&self.https_acceptor, built.https) {
             slot.store(Arc::new(acc));
+        }
+        if let Some(ep) = self
+            .doq_endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            let doq_cfg = build_doq_server_config(&eff_cert, &eff_key, self.doq_idle_timeout)
+                .map_err(|e| e.to_string())?;
+            ep.set_server_config(Some(doq_cfg));
         }
         self.cert_path.store(Arc::new(Some(eff_cert.clone())));
         self.key_path.store(Arc::new(Some(eff_key.clone())));

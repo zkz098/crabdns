@@ -14,20 +14,35 @@ use crate::{
     handle_dns_stream_with_context,
 };
 
-fn extract_dot_client_id(sni: Option<&str>, base_hostname: Option<&str>) -> Option<String> {
+pub(crate) fn extract_sni_client_id(
+    sni: Option<&str>,
+    extra_hostnames: &[String],
+    ddr_hostname: Option<&str>,
+) -> Option<String> {
     let sni = sni?.trim().trim_end_matches('.');
-    let base = base_hostname?.trim().trim_end_matches('.');
-    if sni.is_empty() || base.is_empty() {
+    if sni.is_empty() {
         return None;
     }
     let lower_sni = sni.to_ascii_lowercase();
-    let lower_base = base.to_ascii_lowercase();
-    let suffix = format!(".{lower_base}");
-    let label = lower_sni.strip_suffix(&suffix)?;
-    if label.contains('.') {
-        return None;
+    for candidate in extra_hostnames
+        .iter()
+        .map(String::as_str)
+        .chain(ddr_hostname)
+    {
+        let base = candidate.trim().trim_end_matches('.');
+        if base.is_empty() {
+            continue;
+        }
+        let lower_base = base.to_ascii_lowercase();
+        let suffix = format!(".{lower_base}");
+        if let Some(label) = lower_sni.strip_suffix(&suffix)
+            && !label.contains('.')
+            && let Ok(cid) = validate_client_id(label)
+        {
+            return Some(cid);
+        }
     }
-    validate_client_id(label).ok()
+    None
 }
 
 pub async fn run_dot_server(
@@ -76,8 +91,12 @@ pub async fn run_dot_server(
                     match tokio::time::timeout(idle_timeout, tls.accept(stream)).await {
                         Ok(Ok(tls_stream)) => {
                             let sni = tls_stream.get_ref().1.server_name().map(str::to_string);
-                            let ddr_host = cfg.load().ddr_hostname.clone();
-                            let client_id = extract_dot_client_id(sni.as_deref(), ddr_host.as_deref());
+                            let loaded_cfg = cfg.load();
+                            let client_id = extract_sni_client_id(
+                                sni.as_deref(),
+                                &loaded_cfg.sni_client_id_hostnames,
+                                loaded_cfg.ddr_hostname.as_deref(),
+                            );
                             if let Err(err) = handle_dns_stream_with_context(
                                 tls_stream,
                                 peer,
@@ -115,21 +134,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_dot_client_id() {
+    fn test_extract_sni_client_id() {
         assert_eq!(
-            extract_dot_client_id(Some("kid-phone.dns.home.arpa"), Some("dns.home.arpa")),
+            extract_sni_client_id(Some("kid-phone.dns.home.arpa"), &[], Some("dns.home.arpa")),
             Some("kid-phone".to_string())
         );
         assert_eq!(
-            extract_dot_client_id(Some("dns.home.arpa"), Some("dns.home.arpa")),
+            extract_sni_client_id(
+                Some("Work-Laptop.dot.example.com"),
+                &["dot.example.com".to_string()],
+                None,
+            ),
+            Some("work-laptop".to_string())
+        );
+        assert_eq!(
+            extract_sni_client_id(Some("dns.home.arpa"), &[], Some("dns.home.arpa")),
             None
         );
         assert_eq!(
-            extract_dot_client_id(Some("a.b.dns.home.arpa"), Some("dns.home.arpa")),
+            extract_sni_client_id(Some("a.b.dns.home.arpa"), &[], Some("dns.home.arpa")),
             None
         );
         assert_eq!(
-            extract_dot_client_id(Some("bad!id.dns.home.arpa"), Some("dns.home.arpa")),
+            extract_sni_client_id(Some("bad!id.dns.home.arpa"), &[], Some("dns.home.arpa")),
             None
         );
     }
