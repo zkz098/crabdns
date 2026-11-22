@@ -127,7 +127,7 @@ impl From<&Config> for ConfigResponse {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ConfigUpdatePayload {

@@ -38,6 +38,33 @@ pub struct TopItem {
     pub count: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TimeSeriesPoint {
+    /// Hour bucket start timestamp in Unix milliseconds (UTC).
+    #[ts(type = "number")]
+    pub timestamp_ms: u64,
+    #[ts(type = "number")]
+    pub total: u64,
+    #[ts(type = "number")]
+    pub blocked: u64,
+    #[ts(type = "number")]
+    pub cached: u64,
+    #[ts(type = "number")]
+    pub rewritten: u64,
+    #[ts(type = "number")]
+    pub error: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LogsFilter<'a> {
+    pub search: Option<&'a str>,
+    pub outcome: Option<&'a str>,
+    pub protocol: Option<&'a str>,
+    pub qtype: Option<&'a str>,
+    pub client: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct StatsSnapshot {
@@ -54,6 +81,8 @@ pub struct StatsSnapshot {
     pub top_domains: Vec<TopItem>,
     pub top_blocked: Vec<TopItem>,
     pub top_clients: Vec<TopItem>,
+    #[serde(default)]
+    pub timeseries_24h: Vec<TimeSeriesPoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -72,10 +101,15 @@ const KEY_CUSTOM_RULES: &[u8] = b"custom_rules";
 const KEY_CUSTOM_RULES_ENABLED: &[u8] = b"custom_rules_enabled";
 const KEY_SUBSCRIPTIONS: &[u8] = b"subscriptions";
 const KEY_COUNTERS: &[u8] = b"counters";
+const KEY_TIMESERIES: &[u8] = b"timeseries";
 const KEY_RUNTIME_CONFIG: &[u8] = b"runtime_config";
 const KEY_CLIENTS: &[u8] = b"clients";
 const KEY_CLIENT_GROUPS: &[u8] = b"client_groups";
 const KEY_DNS_REWRITES: &[u8] = b"dns_rewrites";
+
+const HOUR_MS: u64 = 3_600_000;
+const TIMESERIES_BUCKETS: usize = 24;
+const TIMESERIES_RETENTION_MS: u64 = 48 * HOUR_MS;
 
 const FJALL_CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const FJALL_MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -103,6 +137,11 @@ impl BoundedCountMap {
 
     fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    fn clear(&self) {
+        self.inner.clear();
+        self.inner.shrink_to_fit();
     }
 
     fn increment(&self, key: &str) {
@@ -188,6 +227,7 @@ pub struct StorageEngine {
     blocked_counts: BoundedCountMap,
     client_counts: BoundedCountMap,
     client_stats: ClientStatsTracker,
+    hourly_buckets: std::sync::Mutex<HashMap<u64, TimeSeriesPoint>>,
     sub_lock: Mutex<()>,
     client_lock: Mutex<()>,
     config_lock: Mutex<()>,
@@ -224,6 +264,15 @@ impl StorageEngine {
             None => PersistedCounters::default(),
         };
 
+        let restored_buckets = match meta.get(KEY_TIMESERIES)? {
+            Some(bytes) => serde_json::from_slice::<Vec<TimeSeriesPoint>>(&bytes)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| (p.timestamp_ms, p))
+                .collect(),
+            None => HashMap::new(),
+        };
+
         Ok(Self {
             db,
             logs,
@@ -240,6 +289,7 @@ impl StorageEngine {
             blocked_counts: BoundedCountMap::new(),
             client_counts: BoundedCountMap::new(),
             client_stats: ClientStatsTracker::new(),
+            hourly_buckets: std::sync::Mutex::new(restored_buckets),
             sub_lock: Mutex::new(()),
             client_lock: Mutex::new(()),
             config_lock: Mutex::new(()),
@@ -304,6 +354,35 @@ impl StorageEngine {
             batch.insert(&self.logs, key, value);
         }
 
+        let ts_bytes = {
+            let mut buckets = self
+                .hourly_buckets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut max_bucket_ms = 0_u64;
+            for event in events {
+                let ts_ms = event.timestamp.timestamp_millis().max(0).cast_unsigned();
+                let bucket_ms = (ts_ms / HOUR_MS) * HOUR_MS;
+                max_bucket_ms = max_bucket_ms.max(bucket_ms);
+                let point = buckets.entry(bucket_ms).or_insert_with(|| TimeSeriesPoint {
+                    timestamp_ms: bucket_ms,
+                    ..TimeSeriesPoint::default()
+                });
+                point.total = point.total.saturating_add(1);
+                match event.outcome {
+                    QueryOutcome::Blocked => point.blocked = point.blocked.saturating_add(1),
+                    QueryOutcome::Cached => point.cached = point.cached.saturating_add(1),
+                    QueryOutcome::Rewritten => point.rewritten = point.rewritten.saturating_add(1),
+                    QueryOutcome::Error => point.error = point.error.saturating_add(1),
+                    QueryOutcome::Forwarded => {}
+                }
+            }
+            let cutoff_ms = max_bucket_ms.saturating_sub(TIMESERIES_RETENTION_MS);
+            buckets.retain(|&k, _| k >= cutoff_ms);
+            let list: Vec<&TimeSeriesPoint> = buckets.values().collect();
+            serde_json::to_vec(&list)?
+        };
+
         let counters = PersistedCounters {
             total: self
                 .total_queries
@@ -327,6 +406,7 @@ impl StorageEngine {
                 .saturating_add(delta_error),
         };
         batch.insert(&self.meta, KEY_COUNTERS, serde_json::to_vec(&counters)?);
+        batch.insert(&self.meta, KEY_TIMESERIES, ts_bytes);
         batch.commit()?;
 
         self.total_queries.fetch_add(delta_total, Ordering::Relaxed);
@@ -355,8 +435,43 @@ impl StorageEngine {
         search: Option<&str>,
         outcome_filter: Option<&str>,
     ) -> Result<Vec<QueryEvent>> {
+        self.query_logs_filtered(
+            limit,
+            &LogsFilter {
+                search,
+                outcome: outcome_filter,
+                ..LogsFilter::default()
+            },
+        )
+    }
+
+    pub fn query_logs_filtered(
+        &self,
+        limit: usize,
+        filter: &LogsFilter<'_>,
+    ) -> Result<Vec<QueryEvent>> {
         let mut results = Vec::with_capacity(limit.min(500));
-        let needle = search.map(str::to_ascii_lowercase);
+        let needle = filter
+            .search
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
+        let outcome_expected = filter.outcome.map(str::trim).filter(|s| !s.is_empty());
+        let proto_expected = filter
+            .protocol
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
+        let qtype_expected = filter
+            .qtype
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_uppercase);
+        let client_expected = filter
+            .client
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
 
         for (scanned, guard) in self.logs.iter().rev().enumerate() {
             if scanned >= MAX_LOG_SCAN {
@@ -371,9 +486,23 @@ impl StorageEngine {
             {
                 continue;
             }
-            if let Some(expected) = outcome_filter
-                && !expected.is_empty()
+            if let Some(expected) = outcome_expected
                 && outcome_label(&event.outcome) != expected
+            {
+                continue;
+            }
+            if let Some(ref proto) = proto_expected
+                && protocol_label(event.protocol) != proto
+            {
+                continue;
+            }
+            if let Some(ref qt) = qtype_expected
+                && !event.qtype.eq_ignore_ascii_case(qt)
+            {
+                continue;
+            }
+            if let Some(ref cli) = client_expected
+                && !event_matches_client(&event, cli)
             {
                 continue;
             }
@@ -385,7 +514,91 @@ impl StorageEngine {
         Ok(results)
     }
 
+    pub fn clear_logs(&self) -> Result<usize> {
+        const CHUNK_SIZE: usize = 4096;
+        let mut removed = 0_usize;
+        loop {
+            let mut keys = Vec::new();
+            for guard in self.logs.iter() {
+                keys.push(guard.key()?);
+                if keys.len() >= CHUNK_SIZE {
+                    break;
+                }
+            }
+            if keys.is_empty() {
+                break;
+            }
+            let chunk_len = keys.len();
+            let mut batch = self.db.batch();
+            for k in keys {
+                batch.remove(&self.logs, k);
+            }
+            batch.commit()?;
+            removed += chunk_len;
+            if chunk_len < CHUNK_SIZE {
+                break;
+            }
+        }
+        if removed > 0 {
+            self.log_pruned_total.fetch_add(
+                u64::try_from(removed).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
+        Ok(removed)
+    }
+
+    pub fn reset_stats(&self) -> Result<()> {
+        let mut batch = self.db.batch();
+        let zero_counters = PersistedCounters::default();
+        batch.insert(
+            &self.meta,
+            KEY_COUNTERS,
+            serde_json::to_vec(&zero_counters)?,
+        );
+        batch.remove(&self.meta, KEY_TIMESERIES);
+        batch.commit()?;
+
+        self.total_queries.store(0, Ordering::Relaxed);
+        self.blocked_queries.store(0, Ordering::Relaxed);
+        self.cached_queries.store(0, Ordering::Relaxed);
+        self.rewritten_queries.store(0, Ordering::Relaxed);
+        self.error_queries.store(0, Ordering::Relaxed);
+        self.domain_counts.clear();
+        self.blocked_counts.clear();
+        self.client_counts.clear();
+        self.client_stats.clear();
+        self.hourly_buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        Ok(())
+    }
+
+    pub fn timeseries_24h_snapshot(&self, now_ms: u64) -> Vec<TimeSeriesPoint> {
+        let current_hour_ms = (now_ms / HOUR_MS) * HOUR_MS;
+        let buckets = self
+            .hourly_buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut points = Vec::with_capacity(TIMESERIES_BUCKETS);
+        for offset in (0..TIMESERIES_BUCKETS).rev() {
+            let bucket_ms =
+                current_hour_ms.saturating_sub(u64::try_from(offset).unwrap_or(0) * HOUR_MS);
+            if let Some(existing) = buckets.get(&bucket_ms) {
+                points.push(existing.clone());
+            } else {
+                points.push(TimeSeriesPoint {
+                    timestamp_ms: bucket_ms,
+                    ..TimeSeriesPoint::default()
+                });
+            }
+        }
+        points
+    }
+
     pub fn stats_snapshot(&self) -> StatsSnapshot {
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0).cast_unsigned();
         StatsSnapshot {
             total_queries: self.total_queries.load(Ordering::Relaxed),
             blocked_queries: self.blocked_queries.load(Ordering::Relaxed),
@@ -395,6 +608,7 @@ impl StorageEngine {
             top_domains: self.domain_counts.top_n(10),
             top_blocked: self.blocked_counts.top_n(10),
             top_clients: self.client_counts.top_n(10),
+            timeseries_24h: self.timeseries_24h_snapshot(now_ms),
         }
     }
 
@@ -623,6 +837,31 @@ impl StorageEngine {
         Ok(removed)
     }
 
+    pub fn clear_subscription_contents(&self) -> Result<()> {
+        loop {
+            let mut keys = Vec::new();
+            for guard in self.sub_contents.iter() {
+                keys.push(guard.key()?);
+                if keys.len() >= BATCH_CHUNK_SIZE {
+                    break;
+                }
+            }
+            if keys.is_empty() {
+                break;
+            }
+            let chunk_len = keys.len();
+            let mut batch = self.db.batch();
+            for key in keys {
+                batch.remove(&self.sub_contents, key);
+            }
+            batch.commit()?;
+            if chunk_len < BATCH_CHUNK_SIZE {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub fn clear_dns_cache(&self) -> Result<()> {
         loop {
             let mut keys = Vec::new();
@@ -715,6 +954,18 @@ fn event_matches_search(event: &QueryEvent, needle: &str) -> bool {
             .iter()
             .any(|a| a.to_ascii_lowercase().contains(needle))
         || protocol_label(event.protocol).contains(needle)
+}
+
+fn event_matches_client(event: &QueryEvent, client_needle: &str) -> bool {
+    event.client_ip.to_ascii_lowercase().contains(client_needle)
+        || event
+            .client_name
+            .as_deref()
+            .is_some_and(|n| n.to_ascii_lowercase().contains(client_needle))
+        || event
+            .client_id
+            .as_deref()
+            .is_some_and(|id| id.to_ascii_lowercase().contains(client_needle))
 }
 
 fn outcome_label(outcome: &QueryOutcome) -> &'static str {

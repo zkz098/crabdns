@@ -12,7 +12,7 @@ use crabdns_core::{
     CacheStats, Config, DnsPipeline, FilterStats, QueryEvent, UpstreamCapabilities, UpstreamStatus,
     probe_upstreams as probe_upstream_caps,
 };
-use crabdns_storage::{StatsSnapshot, StorageEngine};
+use crabdns_storage::{LogsFilter, StatsSnapshot, StorageEngine};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
@@ -20,6 +20,7 @@ use tower_http::cors::{Any, CorsLayer};
 use ts_rs::TS;
 
 pub mod auth;
+pub mod backup_api;
 pub mod clients_api;
 pub mod config_api;
 pub mod controls;
@@ -90,6 +91,9 @@ struct LogsQuery {
     limit: Option<usize>,
     search: Option<String>,
     outcome: Option<String>,
+    protocol: Option<String>,
+    qtype: Option<String>,
+    client: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -131,8 +135,13 @@ pub fn build_router(state: AppState) -> Router {
 
     let protected_api = Router::new()
         .route("/api/stats", get(get_stats))
-        .route("/api/logs", get(get_logs))
+        .route("/api/stats/reset", post(reset_stats))
+        .route("/api/logs", get(get_logs).delete(clear_logs))
         .route("/api/logs/ws", get(controls::ws_logs))
+        .route(
+            "/api/backup",
+            get(backup_api::export_backup).post(backup_api::import_backup),
+        )
         .route("/api/rules", get(get_rules).put(update_rules))
         .route("/api/rules/quick", post(controls::quick_rule))
         .route("/api/rules/test", post(controls::test_rule))
@@ -323,13 +332,53 @@ async fn get_logs(
     let storage = Arc::clone(&state.app.storage);
     let search = params.search;
     let outcome = params.outcome;
+    let protocol = params.protocol;
+    let qtype = params.qtype;
+    let client = params.client;
     let logs = tokio::task::spawn_blocking(move || {
-        storage.query_logs(limit, search.as_deref(), outcome.as_deref())
+        storage.query_logs_filtered(
+            limit,
+            &LogsFilter {
+                search: search.as_deref(),
+                outcome: outcome.as_deref(),
+                protocol: protocol.as_deref(),
+                qtype: qtype.as_deref(),
+                client: client.as_deref(),
+            },
+        )
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(logs))
+}
+
+async fn clear_logs(
+    State(state): State<RouterState>,
+) -> std::result::Result<Json<serde_json::Value>, StatusCode> {
+    let storage = Arc::clone(&state.app.storage);
+    let removed = tokio::task::spawn_blocking(move || storage.clear_logs())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
+async fn reset_stats(
+    State(state): State<RouterState>,
+) -> std::result::Result<Json<StatsResponse>, StatusCode> {
+    let storage = Arc::clone(&state.app.storage);
+    tokio::task::spawn_blocking(move || storage.reset_stats())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let cache_stats = state.app.pipeline.cache().stats();
+    Ok(Json(StatsResponse {
+        stats: state.app.storage.stats_snapshot(),
+        filter: state.app.pipeline.filter().stats(),
+        cache_entries: cache_stats.entries,
+        cache_stats,
+    }))
 }
 
 async fn get_rules(
@@ -953,5 +1002,237 @@ mod tests {
                 "missing metric '{expected}' in /metrics output"
             );
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn test_backup_export_import_advanced_logs_and_stats_reset() {
+        use chrono::Utc;
+        use crabdns_core::{
+            ClientGroup, ClientProfile, DnsRewriteEntry, DnsRewriteKind, FilterAction,
+            QueryOutcome, QueryProtocol,
+        };
+        use crabdns_storage::FilterSubscription;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+        let config = Arc::new(ArcSwap::from_pointee(Config {
+            data_dir: dir.path().to_path_buf(),
+            allow_private_subscriptions: true,
+            ..Config::default()
+        }));
+        let filter = Arc::new(FilterEngine::new(&["||initial-block.test^".to_string()]));
+        storage
+            .save_custom_rules("||initial-block.test^\n")
+            .expect("save rules");
+        storage
+            .save_dns_rewrites(&[DnsRewriteEntry {
+                id: "rw-1".to_string(),
+                domain: "nas.local".to_string(),
+                kind: DnsRewriteKind::A,
+                answer: "192.168.1.10".to_string(),
+                enabled: true,
+                comment: "NAS".to_string(),
+            }])
+            .expect("save rewrites");
+        storage
+            .save_client_groups(&[ClientGroup {
+                id: "grp-kids".to_string(),
+                name: "Kids".to_string(),
+                description: "Kids devices".to_string(),
+                blocking_enabled: true,
+                use_global_rules: true,
+                custom_rules: "||games.test^".to_string(),
+                upstreams: Vec::new(),
+                block_mode: None,
+                cname_cloaking_blocking: None,
+            }])
+            .expect("save groups");
+        storage
+            .save_clients(&[ClientProfile {
+                id: "cli-pad".to_string(),
+                name: "Kid Pad".to_string(),
+                identifiers: vec!["192.168.1.99".to_string()],
+                group_id: Some("grp-kids".to_string()),
+                blocking_enabled: None,
+                use_global_rules: None,
+                custom_rules: String::new(),
+                upstreams: Vec::new(),
+                block_mode: None,
+                tags: vec!["tablet".to_string()],
+            }])
+            .expect("save clients");
+        storage
+            .save_subscriptions(&[FilterSubscription {
+                id: "sub-1".to_string(),
+                name: "Local List".to_string(),
+                url: "https://example.com/list.txt".to_string(),
+                enabled: true,
+                rule_count: 1,
+                last_updated: Some(Utc::now()),
+                last_error: None,
+            }])
+            .expect("save subs");
+        storage
+            .save_subscription_content("sub-1", "||sub-blocked.test^\n")
+            .expect("save sub content");
+
+        storage
+            .record_batch(&[
+                QueryEvent {
+                    timestamp: Utc::now(),
+                    client_ip: "192.168.1.99".to_string(),
+                    client_name: Some("Kid Pad".to_string()),
+                    client_id: Some("kid-pad".to_string()),
+                    profile_id: Some("cli-pad".to_string()),
+                    protocol: QueryProtocol::Doq,
+                    domain: "sub-blocked.test".to_string(),
+                    qtype: "HTTPS".to_string(),
+                    outcome: QueryOutcome::Blocked,
+                    matched_rule: Some("||sub-blocked.test^".to_string()),
+                    matched_list: Some("Local List".to_string()),
+                    upstream: None,
+                    elapsed_us: 55,
+                    rcode: "NOERROR".to_string(),
+                    answers: Vec::new(),
+                },
+                QueryEvent {
+                    timestamp: Utc::now(),
+                    client_ip: "192.168.1.10".to_string(),
+                    client_name: Some("NAS".to_string()),
+                    client_id: None,
+                    profile_id: None,
+                    protocol: QueryProtocol::Udp,
+                    domain: "rust-lang.org".to_string(),
+                    qtype: "A".to_string(),
+                    outcome: QueryOutcome::Forwarded,
+                    matched_rule: None,
+                    matched_list: None,
+                    upstream: Some("udp://1.1.1.1:53".to_string()),
+                    elapsed_us: 800,
+                    rcode: "NOERROR".to_string(),
+                    answers: vec!["1.2.3.4".to_string()],
+                },
+            ])
+            .expect("record batch");
+
+        let cache = Arc::new(DnsCache::new(64, false));
+        let upstream =
+            Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
+        let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+        let (live_tx, _) = broadcast::channel(16);
+
+        let app = build_router(AppState {
+            config: Arc::clone(&config),
+            pipeline: Arc::clone(&pipeline),
+            storage: Arc::clone(&storage),
+            live_tx,
+            tls_reloader: None,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // 1. Verify 24h timeseries in /api/stats
+        let stats_res = client
+            .get(format!("{base}/api/stats"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stats_res.status(), StatusCode::OK);
+        let stats_json: serde_json::Value =
+            serde_json::from_slice(&stats_res.bytes().await.unwrap()).unwrap();
+        let ts = stats_json["stats"]["timeseries_24h"]
+            .as_array()
+            .expect("timeseries_24h array");
+        assert_eq!(ts.len(), 24);
+        assert_eq!(ts.last().unwrap()["total"].as_u64(), Some(2));
+        assert_eq!(ts.last().unwrap()["blocked"].as_u64(), Some(1));
+
+        // 2. Verify advanced log filters (protocol, qtype, client)
+        let doq_bytes = client
+            .get(format!(
+                "{base}/api/logs?protocol=doq&qtype=HTTPS&client=Kid"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let doq_logs: Vec<QueryEvent> = serde_json::from_slice(&doq_bytes).unwrap();
+        assert_eq!(doq_logs.len(), 1);
+        assert_eq!(doq_logs[0].domain, "sub-blocked.test");
+
+        // 3. Export backup
+        let export_res = client
+            .get(format!("{base}/api/backup"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(export_res.status(), StatusCode::OK);
+        let mut backup: backup_api::SystemBackupPayload =
+            serde_json::from_slice(&export_res.bytes().await.unwrap()).unwrap();
+        assert_eq!(backup.version, 1);
+        assert_eq!(backup.rewrites.len(), 1);
+        assert_eq!(backup.clients.len(), 1);
+        assert_eq!(backup.client_groups.len(), 1);
+        assert_eq!(backup.subscriptions.len(), 1);
+
+        // Mutate backup and import it into live server
+        backup.custom_rules = "||restored-ad.test^\n".to_string();
+        backup.config.cache_size = 2048;
+        let import_res = client
+            .post(format!("{base}/api/backup"))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&backup).unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(import_res.status(), StatusCode::OK);
+
+        // Live filter engine & config reflect imported backup
+        assert_eq!(config.load().cache_size, 2048);
+        assert_eq!(
+            pipeline.filter().evaluate("restored-ad.test").action,
+            FilterAction::Block
+        );
+        assert_eq!(
+            pipeline.filter().evaluate("sub-blocked.test").action,
+            FilterAction::Block
+        );
+
+        // 4. Clear logs & reset stats
+        let clear_res = client
+            .delete(format!("{base}/api/logs"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(clear_res.status(), StatusCode::OK);
+        let after_clear_bytes = client
+            .get(format!("{base}/api/logs"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let after_clear: Vec<QueryEvent> = serde_json::from_slice(&after_clear_bytes).unwrap();
+        assert!(after_clear.is_empty());
+
+        let reset_res = client
+            .post(format!("{base}/api/stats/reset"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reset_res.status(), StatusCode::OK);
+        let reset_json: serde_json::Value =
+            serde_json::from_slice(&reset_res.bytes().await.unwrap()).unwrap();
+        assert_eq!(reset_json["stats"]["total_queries"].as_u64(), Some(0));
     }
 }

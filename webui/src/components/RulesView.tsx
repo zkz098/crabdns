@@ -1,5 +1,5 @@
-import { createSignal, For, Show } from "solid-js";
-import { t } from "../i18n";
+import { createMemo, createSignal, For, Show } from "solid-js";
+import { t, type TranslationKey } from "../i18n";
 import type { CreateSubscriptionPayload } from "../types/CreateSubscriptionPayload";
 import type { FilterSubscription } from "../types/FilterSubscription";
 import type { TestRuleResponse } from "../types/TestRuleResponse";
@@ -43,19 +43,99 @@ const QTYPE_TEST_OPTIONS: SelectOption[] = [
   { value: "PTR", label: () => "PTR" },
 ];
 
-const PRESETS = [
+type PresetCategory = "general" | "regional" | "tracking" | "security";
+
+interface PresetCatalogItem {
+  name: string;
+  url: string;
+  category: PresetCategory;
+  syntax: "AdGuard" | "Hosts";
+  descEn: string;
+  descZh: string;
+}
+
+const PRESET_CATALOG: PresetCatalogItem[] = [
   {
     name: "AdGuard DNS Filter",
     url: "https://adguardteam.github.io/AdGuardDNSFilter/Filters/filter.txt",
+    category: "general",
+    syntax: "AdGuard",
+    descEn:
+      "Comprehensive blocklist merging AdGuard Base, Social, Tracking, and Mobile Ads filters.",
+    descZh: "AdGuard 官方综合 DNS 过滤规则，整合基础广告、移动广告与防追踪列表。",
   },
   {
-    name: "StevenBlack Hosts",
+    name: "OISD Blocklist Small",
+    url: "https://small.oisd.nl",
+    category: "general",
+    syntax: "AdGuard",
+    descEn:
+      "Low false-positive curated blocklist optimized for home networks without breaking sites.",
+    descZh: "极低误杀率的精选拦截列表，适合家庭全局开启且几乎不影响正常网页功能。",
+  },
+  {
+    name: "StevenBlack Unified Hosts",
     url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+    category: "general",
+    syntax: "Hosts",
+    descEn: "Classic consolidated hosts file blocking adware and malware domains.",
+    descZh: "经典聚合 Hosts 规则源，覆盖主流广告与恶意软件域名。",
   },
   {
     name: "Anti-AD (CN)",
     url: "https://anti-ad.net/easylist.txt",
+    category: "regional",
+    syntax: "AdGuard",
+    descEn: "High-hit-rate Chinese region ad-blocking & TV box telemetry filter list.",
+    descZh: "针对中文区网站、移动 App 与智能电视盒优化的高命中率去广告规则集。",
   },
+  {
+    name: "AdRules DNS List (CN)",
+    url: "https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt",
+    category: "regional",
+    syntax: "AdGuard",
+    descEn: "Actively maintained Chinese and global DNS filter rules for AdGuardHome / CrabDNS.",
+    descZh: "Cats-Team 维护的中文区与全球混合 DNS 广告过滤列表。",
+  },
+  {
+    name: "HaGeZi Multi Light",
+    url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt",
+    category: "tracking",
+    syntax: "AdGuard",
+    descEn: "Balanced multi-source blocklist against ads, telemetry, and tracking.",
+    descZh: "HaGeZi 轻量级多源聚合列表，平衡拦截广告、遥测与追踪器。",
+  },
+  {
+    name: "AdGuard Tracking Protection",
+    url: "https://raw.githubusercontent.com/AdguardTeam/HostlistsRegistry/main/assets/filter_3.txt",
+    category: "tracking",
+    syntax: "AdGuard",
+    descEn: "Blocks analytics, web beacons, and user behavior telemetry collectors.",
+    descZh: "专注拦截各类统计分析、埋点信标与用户行为遥测收集域名。",
+  },
+  {
+    name: "URLHaus Malicious Domains",
+    url: "https://urlhaus.abuse.ch/downloads/hostfile/",
+    category: "security",
+    syntax: "Hosts",
+    descEn: "abuse.ch URLHaus feed blocking active malware distribution sites.",
+    descZh: "由 abuse.ch 维护的活跃恶意软件分发与木马C2域名拦截列表。",
+  },
+  {
+    name: "Phishing Army Extended",
+    url: "https://phishing.army/download/phishing_army_blocklist_extended.txt",
+    category: "security",
+    syntax: "Hosts",
+    descEn: "Continuously updated blocklist protecting against phishing and credential harvesting.",
+    descZh: "持续更新的防网络钓鱼与欺诈域名安全列表。",
+  },
+];
+
+const CATEGORY_TABS: Array<{ key: PresetCategory; labelKey: TranslationKey }> = [
+  { key: "general", labelKey: "subsCatGeneral" },
+  { key: "regional", labelKey: "subsCatRegional" },
+  { key: "tracking", labelKey: "subsCatTracking" },
+  { key: "security", labelKey: "subsCatSecurity" },
 ];
 
 function formatTimestamp(iso: string | null): string {
@@ -73,6 +153,8 @@ function formatTimestamp(iso: string | null): string {
 
 export function RulesView(props: RulesViewProps) {
   const [showAddForm, setShowAddForm] = createSignal(false);
+  const [showCatalog, setShowCatalog] = createSignal(false);
+  const [catalogCategory, setCatalogCategory] = createSignal<PresetCategory>("general");
   const [newName, setNewName] = createSignal("");
   const [newUrl, setNewUrl] = createSignal("");
   const [newEnabled, setNewEnabled] = createSignal(true);
@@ -82,6 +164,14 @@ export function RulesView(props: RulesViewProps) {
   const [testClient, setTestClient] = createSignal("");
   const [testResult, setTestResult] = createSignal<TestRuleResponse | null>(null);
   const [testing, setTesting] = createSignal(false);
+
+  const subscribedUrls = createMemo(
+    () => new Set(props.subscriptions.map((s) => s.url.trim().toLowerCase())),
+  );
+
+  const filteredCatalog = createMemo(() =>
+    PRESET_CATALOG.filter((item) => item.category === catalogCategory()),
+  );
 
   async function handleTestRule(e: Event) {
     e.preventDefault();
@@ -136,6 +226,14 @@ export function RulesView(props: RulesViewProps) {
       setNewEnabled(true);
       setShowAddForm(false);
     }
+  }
+
+  async function handleSubscribePreset(preset: PresetCatalogItem) {
+    await props.onAddSubscription({
+      name: preset.name,
+      url: preset.url,
+      enabled: true,
+    });
   }
 
   return (
@@ -239,6 +337,19 @@ export function RulesView(props: RulesViewProps) {
               </span>
             </Show>
 
+            <button
+              type="button"
+              onClick={() => setShowCatalog((prev) => !prev)}
+              class={`h-9 px-3 rounded-lg text-xs font-medium border flex items-center gap-1.5 cursor-pointer transition-all duration-150 ${
+                showCatalog()
+                  ? "bg-sky-500/10 text-sky-700 dark:text-sky-400 border-sky-500/30"
+                  : "bg-[#fafafa] hover:bg-[#f4f4f5] dark:bg-[#111111] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border-[#eaeaea] dark:border-[#262626]"
+              }`}
+            >
+              <span class="i-ri-compass-3-line text-sm" />
+              <span>{t("subsCatalogBtn")}</span>
+            </button>
+
             <Show when={props.subscriptions.length > 0}>
               <button
                 type="button"
@@ -264,6 +375,89 @@ export function RulesView(props: RulesViewProps) {
           </div>
         </div>
 
+        {/* Curated Preset Catalog Drawer */}
+        <Show when={showCatalog()}>
+          <div class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-4 space-y-3.5">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div>
+                <h3 class="text-xs font-semibold text-[#171717] dark:text-[#ededed]">
+                  {t("subsCatalogTitle")}
+                </h3>
+                <p class="text-[11px] text-[#666666] dark:text-[#a1a1aa] mt-0.5">
+                  {t("subsCatalogSubtitle")}
+                </p>
+              </div>
+              <div class="flex flex-wrap items-center gap-1">
+                <For each={CATEGORY_TABS}>
+                  {(cat) => (
+                    <button
+                      type="button"
+                      onClick={() => setCatalogCategory(cat.key)}
+                      class={`h-7 px-2.5 rounded-lg text-xs font-medium cursor-pointer border transition-colors ${
+                        catalogCategory() === cat.key
+                          ? "bg-[#171717] text-white dark:bg-[#ededed] dark:text-[#0a0a0a] border-transparent"
+                          : "bg-white dark:bg-[#111111] text-[#666666] dark:text-[#a1a1aa] border-[#eaeaea] dark:border-[#262626] hover:text-[#171717] dark:hover:text-[#ededed]"
+                      }`}
+                    >
+                      {t(cat.labelKey)}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+              <For each={filteredCatalog()}>
+                {(preset) => {
+                  const isSubscribed = () => subscribedUrls().has(preset.url.trim().toLowerCase());
+                  const desc = () => (t("langToggle") === "EN" ? preset.descZh : preset.descEn);
+                  return (
+                    <div class="rounded-lg border border-[#eaeaea] dark:border-[#222222] bg-white dark:bg-[#0a0a0a] p-3 flex flex-col justify-between gap-2.5">
+                      <div class="space-y-1">
+                        <div class="flex items-center justify-between gap-2">
+                          <span class="text-xs font-semibold text-[#171717] dark:text-[#ededed] truncate">
+                            {preset.name}
+                          </span>
+                          <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#f4f4f5] dark:bg-[#171717] text-[#666666] dark:text-[#a1a1aa] shrink-0">
+                            {preset.syntax}
+                          </span>
+                        </div>
+                        <p class="text-[11px] text-[#666666] dark:text-[#a1a1aa] leading-relaxed">
+                          {desc()}
+                        </p>
+                      </div>
+
+                      <div class="flex items-center justify-between gap-2 pt-1 border-t border-[#f4f4f5] dark:border-[#171717]">
+                        <span class="font-mono text-[10px] text-[#8f8f8f] dark:text-[#71717a] truncate">
+                          {preset.url}
+                        </span>
+                        <Show
+                          when={!isSubscribed()}
+                          fallback={
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 shrink-0">
+                              <span class="i-ri-check-line text-xs" />
+                              {t("subsPresetSubscribed")}
+                            </span>
+                          }
+                        >
+                          <button
+                            type="button"
+                            disabled={props.addingSub}
+                            onClick={() => void handleSubscribePreset(preset)}
+                            class="h-6 px-2.5 rounded text-[11px] font-medium bg-[#171717] hover:bg-[#383838] dark:bg-[#ededed] dark:hover:bg-[#d4d4d8] text-white dark:text-[#0a0a0a] border-0 cursor-pointer shrink-0 disabled:opacity-50"
+                          >
+                            {t("subsPresetAddBtn")}
+                          </button>
+                        </Show>
+                      </div>
+                    </div>
+                  );
+                }}
+              </For>
+            </div>
+          </div>
+        </Show>
+
         {/* Inline Add Subscription Form */}
         <Show when={showAddForm()}>
           <form
@@ -274,7 +468,7 @@ export function RulesView(props: RulesViewProps) {
               <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa] mr-1">
                 {t("subsPresetsLabel")}
               </span>
-              <For each={PRESETS}>
+              <For each={PRESET_CATALOG.slice(0, 5)}>
                 {(preset) => (
                   <button
                     type="button"

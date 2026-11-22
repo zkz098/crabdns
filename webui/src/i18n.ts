@@ -306,6 +306,40 @@ const en = {
   clientsSourceMdns: "mDNS",
   clientsSourceRdns: "rDNS",
   clientsSourceUnknown: "Unresolved",
+
+  statsResetBtn: "Reset Stats",
+  statsResetMsg: "Statistics reset",
+  chart24hTitle: "24-Hour Query Trend",
+  chart24hSubtitle: "Hourly query volume and blocked traffic over the past 24 hours",
+  chartTotalLabel: "Total",
+  chartBlockedLabel: "Blocked",
+  chartCachedLabel: "Cached",
+
+  logsAllProtocols: "All Protocols",
+  logsAllTypes: "All Types",
+  logsClientFilterPlaceholder: "Client IP / Name...",
+  logsClearBtn: "Clear Logs",
+  logsClearedMsg: "Query logs cleared",
+  logsExportBtn: "Export JSON",
+
+  subsCatalogBtn: "Preset Catalog",
+  subsCatalogTitle: "Recommended Filter Lists Catalog",
+  subsCatalogSubtitle: "One-click subscribe to curated ad-blocking, privacy, and security lists.",
+  subsCatGeneral: "General & Ads",
+  subsCatRegional: "Regional (CN)",
+  subsCatSecurity: "Security & Phishing",
+  subsCatTracking: "Privacy & Tracking",
+  subsPresetSubscribed: "Subscribed",
+  subsPresetAddBtn: "Subscribe",
+
+  backupTitle: "System Backup & Restore",
+  backupSubtitle:
+    "Export or restore runtime configuration, custom rules, subscriptions, DNS rewrites, and client profiles as a single JSON snapshot.",
+  backupExportBtn: "Export Backup",
+  backupImportBtn: "Restore from File",
+  backupExportedMsg: "Backup exported",
+  backupRestoredMsg: "Backup restored & applied",
+  backupInvalidFileMsg: "Invalid backup JSON file",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -596,6 +630,40 @@ const zhCN: Record<TranslationKey, string> = {
   clientsSourceMdns: "mDNS",
   clientsSourceRdns: "rDNS",
   clientsSourceUnknown: "未解析",
+
+  statsResetBtn: "重置统计",
+  statsResetMsg: "统计数据已重置",
+  chart24hTitle: "24 小时查询趋势",
+  chart24hSubtitle: "过去 24 小时按小时统计的查询总量与拦截趋势",
+  chartTotalLabel: "总查询",
+  chartBlockedLabel: "已拦截",
+  chartCachedLabel: "缓存命中",
+
+  logsAllProtocols: "全部协议",
+  logsAllTypes: "全部类型",
+  logsClientFilterPlaceholder: "客户端 IP / 名称...",
+  logsClearBtn: "清空日志",
+  logsClearedMsg: "查询日志已清空",
+  logsExportBtn: "导出 JSON",
+
+  subsCatalogBtn: "预设规则库",
+  subsCatalogTitle: "精选过滤规则源目录",
+  subsCatalogSubtitle: "一键订阅主流去广告、防追踪、区域特化与恶意域名拦截规则集。",
+  subsCatGeneral: "综合去广告",
+  subsCatRegional: "中文 / 区域规则",
+  subsCatSecurity: "安全与防钓鱼",
+  subsCatTracking: "隐私与防追踪",
+  subsPresetSubscribed: "已订阅",
+  subsPresetAddBtn: "一键订阅",
+
+  backupTitle: "整机配置备份与恢复",
+  backupSubtitle:
+    "将运行时配置、自定义规则、订阅列表（含规则缓存）、DNS 重写与客户端分组策略打包为单个 JSON 文件一键导出或恢复。",
+  backupExportBtn: "导出备份 JSON",
+  backupImportBtn: "从文件恢复备份",
+  backupExportedMsg: "备份文件已导出",
+  backupRestoredMsg: "备份已成功恢复并热生效",
+  backupInvalidFileMsg: "无效的备份 JSON 文件",
 };
 
 const dictionaries: Record<Locale, Record<TranslationKey, string>> = {

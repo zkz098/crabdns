@@ -40,6 +40,9 @@ export default function App() {
   const [logs, setLogs] = createSignal<QueryEvent[]>([]);
   const [search, setSearch] = createSignal("");
   const [outcomeFilter, setOutcomeFilter] = createSignal("");
+  const [protocolFilter, setProtocolFilter] = createSignal("");
+  const [qtypeFilter, setQtypeFilter] = createSignal("");
+  const [clientFilter, setClientFilter] = createSignal("");
   const [rulesText, setRulesText] = createSignal("");
   const [rulesEnabled, setRulesEnabled] = createSignal(true);
   const [saveMessage, setSaveMessage] = createSignal("");
@@ -113,7 +116,11 @@ export default function App() {
   const [rewritesSaving, setRewritesSaving] = createSignal(false);
   const [blockingStatus, setBlockingStatus] = createSignal<BlockingStatusResponse | null>(null);
   const [cacheFlushedMsg, setCacheFlushedMsg] = createSignal("");
+  const [statsResetMsg, setStatsResetMsg] = createSignal("");
   const [quickRuleMsg, setQuickRuleMsg] = createSignal("");
+  const [backupMessage, setBackupMessage] = createSignal("");
+  const [backupIsError, setBackupIsError] = createSignal(false);
+  const [backupBusy, setBackupBusy] = createSignal(false);
 
   const [authChecked, setAuthChecked] = createSignal(false);
   const [authEnabled, setAuthEnabled] = createSignal(false);
@@ -133,14 +140,132 @@ export default function App() {
   }
 
   async function fetchLogs() {
-    const params = new URLSearchParams({ limit: "150" });
+    const params = new URLSearchParams({ limit: "200" });
     if (search()) params.set("search", search());
     if (outcomeFilter()) params.set("outcome", outcomeFilter());
+    if (protocolFilter()) params.set("protocol", protocolFilter());
+    if (qtypeFilter()) params.set("qtype", qtypeFilter());
+    if (clientFilter()) params.set("client", clientFilter());
     try {
       const res = await fetch(`/api/logs?${params.toString()}`);
       if (res.ok) setLogs(await res.json());
     } catch {
       // ignore
+    }
+  }
+
+  async function clearLogs() {
+    try {
+      const res = await fetch("/api/logs", { method: "DELETE" });
+      if (res.ok) {
+        setLogs([]);
+        setQuickRuleMsg(t("logsClearedMsg"));
+        setTimeout(() => setQuickRuleMsg(""), 2500);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function exportLogsJson() {
+    const blob = new Blob([JSON.stringify(logs(), null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `crabdns-query-logs-${stamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function resetStats() {
+    try {
+      const res = await fetch("/api/stats/reset", { method: "POST" });
+      if (res.ok) {
+        setStats(await res.json());
+        setStatsResetMsg(t("statsResetMsg"));
+        setTimeout(() => setStatsResetMsg(""), 2500);
+        await fetchClients();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function exportBackup() {
+    setBackupBusy(true);
+    setBackupIsError(false);
+    setBackupMessage("");
+    try {
+      const res = await fetch("/api/backup");
+      if (res.ok) {
+        const data = await res.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const stamp = new Date().toISOString().slice(0, 10);
+        a.href = url;
+        a.download = `crabdns-backup-${stamp}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setBackupMessage(t("backupExportedMsg"));
+        setTimeout(() => setBackupMessage(""), 3000);
+      } else {
+        setBackupIsError(true);
+        const errBody = await res.json().catch(() => null);
+        setBackupMessage(errBody?.error ?? t("rulesFailed"));
+      }
+    } catch {
+      setBackupIsError(true);
+      setBackupMessage(t("rulesNetworkError"));
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function importBackup(file: File) {
+    setBackupBusy(true);
+    setBackupIsError(false);
+    setBackupMessage("");
+    try {
+      const text = await file.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        setBackupIsError(true);
+        setBackupMessage(t("backupInvalidFileMsg"));
+        return;
+      }
+      const res = await fetch("/api/backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      if (res.ok) {
+        const updated: ConfigResponse = await res.json();
+        applyConfigToForm(updated);
+        await Promise.all([
+          fetchStats(),
+          fetchRules(),
+          fetchSubscriptions(),
+          fetchRewrites(),
+          fetchClients(),
+          fetchUpstreamHealth(),
+          fetchTlsStatus(),
+        ]);
+        setBackupMessage(t("backupRestoredMsg"));
+        setTimeout(() => setBackupMessage(""), 3500);
+      } else {
+        setBackupIsError(true);
+        const errBody = await res.json().catch(() => null);
+        setBackupMessage(errBody?.error ?? t("rulesFailed"));
+      }
+    } catch {
+      setBackupIsError(true);
+      setBackupMessage(t("rulesNetworkError"));
+    } finally {
+      setBackupBusy(false);
     }
   }
 
@@ -979,6 +1104,8 @@ export default function App() {
               clientNameMap={clientNameMap()}
               onFlushCache={flushCache}
               cacheFlushedMsg={cacheFlushedMsg()}
+              onResetStats={resetStats}
+              statsResetMsg={statsResetMsg()}
             />
           </Show>
 
@@ -1005,7 +1132,15 @@ export default function App() {
               onSearchChange={setSearch}
               outcomeFilter={outcomeFilter()}
               onOutcomeChange={setOutcomeFilter}
+              protocolFilter={protocolFilter()}
+              onProtocolChange={setProtocolFilter}
+              qtypeFilter={qtypeFilter()}
+              onQtypeChange={setQtypeFilter}
+              clientFilter={clientFilter()}
+              onClientChange={setClientFilter}
               onRefresh={fetchLogs}
+              onClearLogs={clearLogs}
+              onExportLogs={exportLogsJson}
               onQuickRule={quickRule}
               quickRuleMsg={quickRuleMsg()}
             />
@@ -1158,6 +1293,11 @@ export default function App() {
               authMessage={authMessage()}
               authIsError={authIsError()}
               onSaveAuth={saveAuth}
+              onExportBackup={exportBackup}
+              onImportBackup={importBackup}
+              backupMessage={backupMessage()}
+              backupIsError={backupIsError()}
+              backupBusy={backupBusy()}
             />
           </Show>
         </main>

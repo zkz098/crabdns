@@ -10,7 +10,15 @@ interface LogsViewProps {
   onSearchChange: (val: string) => void;
   outcomeFilter: string;
   onOutcomeChange: (val: string) => void;
+  protocolFilter: string;
+  onProtocolChange: (val: string) => void;
+  qtypeFilter: string;
+  onQtypeChange: (val: string) => void;
+  clientFilter: string;
+  onClientChange: (val: string) => void;
   onRefresh: () => Promise<void> | void;
+  onClearLogs?: () => Promise<void> | void;
+  onExportLogs?: () => void;
   onQuickRule?: (domain: string, action: "allow" | "block") => Promise<void> | void;
   quickRuleMsg?: string;
 }
@@ -24,8 +32,30 @@ const OUTCOME_OPTIONS: SelectOption[] = [
   { value: "error", label: () => t("logsOutcomeError"), dotClass: "bg-red-500" },
 ];
 
+const PROTOCOL_OPTIONS: SelectOption[] = [
+  { value: "", label: () => t("logsAllProtocols") },
+  { value: "udp", label: () => "UDP" },
+  { value: "tcp", label: () => "TCP" },
+  { value: "dot", label: () => "DoT" },
+  { value: "doq", label: () => "DoQ" },
+  { value: "doh", label: () => "DoH" },
+];
+
+const QTYPE_OPTIONS: SelectOption[] = [
+  { value: "", label: () => t("logsAllTypes") },
+  { value: "A", label: () => "A" },
+  { value: "AAAA", label: () => "AAAA" },
+  { value: "HTTPS", label: () => "HTTPS" },
+  { value: "SVCB", label: () => "SVCB" },
+  { value: "CNAME", label: () => "CNAME" },
+  { value: "TXT", label: () => "TXT" },
+  { value: "PTR", label: () => "PTR" },
+  { value: "MX", label: () => "MX" },
+];
+
 export function LogsView(props: LogsViewProps) {
   const [refreshing, setRefreshing] = createSignal(false);
+  const [clearing, setClearing] = createSignal(false);
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -36,54 +66,141 @@ export function LogsView(props: LogsViewProps) {
     }
   }
 
+  async function handleClear() {
+    if (!props.onClearLogs) return;
+    setClearing(true);
+    try {
+      await props.onClearLogs();
+    } finally {
+      setClearing(false);
+    }
+  }
+
   return (
     <div class="space-y-4 animate-view-enter">
       {/* Filter Toolbar */}
-      <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 sm:gap-3">
-        <div class="relative flex-1 min-w-0">
-          <span class="i-ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-[#8f8f8f] dark:text-[#71717a] text-sm pointer-events-none" />
-          <input
-            type="text"
-            placeholder={t("logsSearchPlaceholder")}
-            value={props.search}
-            onInput={(e) => props.onSearchChange(e.currentTarget.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleRefresh()}
-            class="w-full h-9 bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded-lg pl-9 pr-8 text-sm text-[#171717] dark:text-[#ededed] placeholder:text-[#8f8f8f] dark:placeholder:text-[#71717a] outline-none shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:shadow-none transition-all duration-150 hover:border-[#d4d4d8] dark:hover:border-[#404040] focus:border-[#171717] dark:focus:border-[#ededed] focus:ring-2 focus:ring-black/5 dark:focus:ring-white/10"
-          />
-          <Show when={props.search.length > 0}>
-            <button
-              type="button"
-              onClick={() => {
-                props.onSearchChange("");
-                handleRefresh();
-              }}
-              aria-label="Clear search"
-              class="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 rounded-md flex items-center justify-center bg-transparent hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#8f8f8f] hover:text-[#171717] dark:hover:text-[#ededed] border-0 cursor-pointer transition-colors"
-            >
-              <span class="i-ri-close-line text-sm" />
-            </button>
-          </Show>
+      <div class="flex flex-col gap-2.5">
+        <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+          {/* Domain / General Search */}
+          <div class="relative flex-1 min-w-0">
+            <span class="i-ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-[#8f8f8f] dark:text-[#71717a] text-sm pointer-events-none" />
+            <input
+              type="text"
+              placeholder={t("logsSearchPlaceholder")}
+              value={props.search}
+              onInput={(e) => props.onSearchChange(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleRefresh()}
+              class="w-full h-9 bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded-lg pl-9 pr-8 text-sm text-[#171717] dark:text-[#ededed] placeholder:text-[#8f8f8f] dark:placeholder:text-[#71717a] outline-none shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:shadow-none transition-all duration-150 hover:border-[#d4d4d8] dark:hover:border-[#404040] focus:border-[#171717] dark:focus:border-[#ededed] focus:ring-2 focus:ring-black/5 dark:focus:ring-white/10"
+            />
+            <Show when={props.search.length > 0}>
+              <button
+                type="button"
+                onClick={() => {
+                  props.onSearchChange("");
+                  handleRefresh();
+                }}
+                aria-label="Clear search"
+                class="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 rounded-md flex items-center justify-center bg-transparent hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#8f8f8f] hover:text-[#171717] dark:hover:text-[#ededed] border-0 cursor-pointer transition-colors"
+              >
+                <span class="i-ri-close-line text-sm" />
+              </button>
+            </Show>
+          </div>
+
+          {/* Client IP / Name Filter */}
+          <div class="relative sm:w-48 shrink-0">
+            <span class="i-ri-computer-line absolute left-3 top-1/2 -translate-y-1/2 text-[#8f8f8f] dark:text-[#71717a] text-sm pointer-events-none" />
+            <input
+              type="text"
+              placeholder={t("logsClientFilterPlaceholder")}
+              value={props.clientFilter}
+              onInput={(e) => props.onClientChange(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleRefresh()}
+              class="w-full h-9 bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded-lg pl-9 pr-7 text-xs font-mono text-[#171717] dark:text-[#ededed] placeholder:font-sans placeholder:text-[#8f8f8f] dark:placeholder:text-[#71717a] outline-none transition-all duration-150 hover:border-[#d4d4d8] dark:hover:border-[#404040] focus:border-[#171717] dark:focus:border-[#ededed]"
+            />
+            <Show when={props.clientFilter.length > 0}>
+              <button
+                type="button"
+                onClick={() => {
+                  props.onClientChange("");
+                  handleRefresh();
+                }}
+                aria-label="Clear client filter"
+                class="absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 rounded-md flex items-center justify-center bg-transparent hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#8f8f8f] hover:text-[#171717] dark:hover:text-[#ededed] border-0 cursor-pointer transition-colors"
+              >
+                <span class="i-ri-close-line text-xs" />
+              </button>
+            </Show>
+          </div>
         </div>
 
-        <div class="flex items-center gap-2.5 shrink-0">
-          <SelectMenu
-            value={props.outcomeFilter}
-            options={OUTCOME_OPTIONS}
-            onChange={(val) => {
-              props.onOutcomeChange(val);
-              handleRefresh();
-            }}
-            class="flex-1 sm:flex-none sm:w-36"
-          />
+        {/* Select Filters & Action Buttons */}
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="flex flex-wrap items-center gap-2 flex-1 sm:flex-none">
+            <SelectMenu
+              value={props.outcomeFilter}
+              options={OUTCOME_OPTIONS}
+              onChange={(val) => {
+                props.onOutcomeChange(val);
+                handleRefresh();
+              }}
+              class="w-32 sm:w-36"
+            />
+            <SelectMenu
+              value={props.protocolFilter}
+              options={PROTOCOL_OPTIONS}
+              onChange={(val) => {
+                props.onProtocolChange(val);
+                handleRefresh();
+              }}
+              class="w-28 sm:w-32"
+            />
+            <SelectMenu
+              value={props.qtypeFilter}
+              options={QTYPE_OPTIONS}
+              onChange={(val) => {
+                props.onQtypeChange(val);
+                handleRefresh();
+              }}
+              class="w-28 sm:w-32"
+            />
+          </div>
 
-          <button
-            type="button"
-            onClick={handleRefresh}
-            class="h-9 px-3.5 rounded-lg text-sm font-medium bg-[#171717] hover:bg-[#383838] dark:bg-[#ededed] dark:hover:bg-[#d4d4d8] text-white dark:text-[#0a0a0a] flex items-center justify-center gap-1.5 cursor-pointer border-0 shadow-sm transition-all duration-200 active:scale-[0.97] shrink-0"
-          >
-            <span class={`i-ri-refresh-line text-sm ${refreshing() ? "animate-spin-once" : ""}`} />
-            <span>{t("logsRefresh")}</span>
-          </button>
+          <div class="flex items-center gap-2 shrink-0">
+            <Show when={props.onExportLogs && props.logs.length > 0}>
+              <button
+                type="button"
+                onClick={() => props.onExportLogs?.()}
+                class="h-9 px-3 rounded-lg text-xs font-medium bg-white dark:bg-[#0a0a0a] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <span class="i-ri-download-2-line text-sm" />
+                <span class="hidden sm:inline">{t("logsExportBtn")}</span>
+              </button>
+            </Show>
+
+            <Show when={props.onClearLogs}>
+              <button
+                type="button"
+                disabled={clearing()}
+                onClick={handleClear}
+                class="h-9 px-3 rounded-lg text-xs font-medium bg-white dark:bg-[#0a0a0a] hover:bg-rose-50 dark:hover:bg-rose-950/30 text-[#666666] hover:text-rose-600 dark:text-[#a1a1aa] dark:hover:text-rose-400 border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+              >
+                <span class="i-ri-delete-bin-line text-sm" />
+                <span class="hidden sm:inline">{t("logsClearBtn")}</span>
+              </button>
+            </Show>
+
+            <button
+              type="button"
+              onClick={handleRefresh}
+              class="h-9 px-3.5 rounded-lg text-xs sm:text-sm font-medium bg-[#171717] hover:bg-[#383838] dark:bg-[#ededed] dark:hover:bg-[#d4d4d8] text-white dark:text-[#0a0a0a] flex items-center justify-center gap-1.5 cursor-pointer border-0 shadow-sm transition-all duration-200 active:scale-[0.97] shrink-0"
+            >
+              <span
+                class={`i-ri-refresh-line text-sm ${refreshing() ? "animate-spin-once" : ""}`}
+              />
+              <span>{t("logsRefresh")}</span>
+            </button>
+          </div>
         </div>
       </div>
 

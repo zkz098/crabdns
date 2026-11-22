@@ -114,6 +114,11 @@ interface SettingsViewProps {
   authMessage: string;
   authIsError: boolean;
   onSaveAuth: () => void;
+  onExportBackup?: () => Promise<void> | void;
+  onImportBackup?: (file: File) => Promise<void> | void;
+  backupMessage?: string;
+  backupIsError?: boolean;
+  backupBusy?: boolean;
 }
 
 export function SettingsView(props: SettingsViewProps) {
@@ -1108,6 +1113,72 @@ export function SettingsView(props: SettingsViewProps) {
             </div>
           </div>
         </div>
+
+        {/* System Backup & Restore */}
+        <Show when={props.onExportBackup || props.onImportBackup}>
+          <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div class="space-y-1">
+                <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                  {t("backupTitle")}
+                </p>
+                <p class="text-[11px] text-[#666666] dark:text-[#a1a1aa] leading-relaxed">
+                  {t("backupSubtitle")}
+                </p>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2 shrink-0">
+                <Show when={props.backupMessage}>
+                  <span
+                    class={`text-xs font-medium ${
+                      props.backupIsError
+                        ? "text-rose-600 dark:text-rose-400"
+                        : "text-emerald-600 dark:text-emerald-400"
+                    }`}
+                  >
+                    {props.backupMessage}
+                  </span>
+                </Show>
+
+                <Show when={props.onExportBackup}>
+                  <button
+                    type="button"
+                    disabled={props.backupBusy}
+                    onClick={() => props.onExportBackup?.()}
+                    class="h-8 px-3 rounded-lg text-xs font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                  >
+                    <span class="i-ri-download-cloud-2-line text-sm" />
+                    <span>{t("backupExportBtn")}</span>
+                  </button>
+                </Show>
+
+                <Show when={props.onImportBackup}>
+                  <label
+                    class={`h-8 px-3 rounded-lg text-xs font-medium bg-[#171717] hover:bg-[#383838] dark:bg-[#ededed] dark:hover:bg-[#d4d4d8] text-white dark:text-[#0a0a0a] flex items-center gap-1.5 border-0 transition-colors ${
+                      props.backupBusy ? "opacity-50 pointer-events-none" : "cursor-pointer"
+                    }`}
+                  >
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      disabled={props.backupBusy}
+                      class="hidden"
+                      onChange={(e) => {
+                        const file = e.currentTarget.files?.[0];
+                        if (file) {
+                          void props.onImportBackup?.(file);
+                          e.currentTarget.value = "";
+                        }
+                      }}
+                    />
+                    <span class="i-ri-upload-cloud-2-line text-sm" />
+                    <span>{t("backupImportBtn")}</span>
+                  </label>
+                </Show>
+              </div>
+            </div>
+          </div>
+        </Show>
       </div>
 
       {/* Readonly Startup Bindings */}

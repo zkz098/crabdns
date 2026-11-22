@@ -221,6 +221,13 @@ impl ClientStatsTracker {
             .map(|e| (e.key().clone(), e.value().to_snapshot()))
             .collect()
     }
+
+    pub fn clear(&self) {
+        self.by_ip.clear();
+        self.by_ip.shrink_to_fit();
+        self.by_profile.clear();
+        self.by_profile.shrink_to_fit();
+    }
 }
 
 fn record_into_map(
