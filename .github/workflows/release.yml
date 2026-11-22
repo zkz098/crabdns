@@ -168,7 +168,7 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           VER="${{ steps.meta.outputs.ver }}"
           BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
-          MIRROR_PREFIX="https://gh-proxy.com/"
+          MIRROR_PREFIX="https://v6.gh-proxy.org/"
 
           ARCHIVE_FILES=()
           for p in linux-x86_64 linux-aarch64 darwin-aarch64 windows-x86_64; do

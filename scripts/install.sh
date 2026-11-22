@@ -25,7 +25,7 @@ Deploy or upgrade CrabDNS on Linux (systemd) or OpenWrt (procd).
 Options:
   --version <tag>            Release tag to install (default: latest)
   --repo <owner/repo>        GitHub repository (default: zkz098/crabdns)
-  --mirror <prefix>          Download mirror prefix (e.g. https://gh-proxy.com/)
+  --mirror <prefix>          Download mirror prefix (e.g. https://v6.gh-proxy.org/)
   --bin <path>               Install from a local binary instead of downloading
   --install-path <path>      Target binary path (default: /usr/bin/crabdns)
   --config <path>            Config file path (default: /etc/crabdns/config.toml)

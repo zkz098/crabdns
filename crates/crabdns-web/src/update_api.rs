@@ -24,18 +24,18 @@ const EMBEDDED_PINS_JSON: &str = include_str!("sigilup-pins.json");
 pub const RELEASE_REPO: &str = "zkz098/crabdns";
 
 /// Mirror prefix used as a fallback when `github.com` is slow or unreachable.
-pub const GH_PROXY_PREFIX: &str = "https://gh-proxy.com/";
+pub const GH_PROXY_PREFIX: &str = "https://v6.gh-proxy.org/";
 
 /// Allowed download URL prefixes for release artifacts.
 pub const ALLOWED_DOWNLOAD_PREFIXES: &[&str] = &[
     "https://github.com/zkz098/crabdns/releases/download/",
-    "https://gh-proxy.com/https://github.com/zkz098/crabdns/releases/download/",
+    "https://v6.gh-proxy.org/https://github.com/zkz098/crabdns/releases/download/",
 ];
 
 /// Default signed manifest URLs (`latest.hsig.json`), tried in order.
 pub const MANIFEST_URLS: &[&str] = &[
     "https://github.com/zkz098/crabdns/releases/latest/download/latest.hsig.json",
-    "https://gh-proxy.com/https://github.com/zkz098/crabdns/releases/latest/download/latest.hsig.json",
+    "https://v6.gh-proxy.org/https://github.com/zkz098/crabdns/releases/latest/download/latest.hsig.json",
 ];
 
 /// Expected asset kind in `SignedManifest`.
@@ -677,7 +677,7 @@ mod tests {
         );
         assert!(
             validate_asset_url(
-                "https://gh-proxy.com/https://github.com/zkz098/crabdns/releases/download/v0.2.0/crabdns-linux-x86_64.tar.gz",
+                "https://v6.gh-proxy.org/https://github.com/zkz098/crabdns/releases/download/v0.2.0/crabdns-linux-x86_64.tar.gz",
                 "0.2.0"
             )
             .is_ok()
