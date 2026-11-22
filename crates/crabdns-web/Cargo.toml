@@ -25,6 +25,7 @@ ring.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sigilup.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
@@ -36,4 +37,5 @@ tikv-jemalloc-ctl = { workspace = true, features = ["profiling", "stats", "use_s
 
 [dev-dependencies]
 dhat.workspace = true
+sigilup = { workspace = true, features = ["sign"] }
 tempfile.workspace = true

@@ -30,6 +30,7 @@ pub mod proxy;
 pub mod rewrites_api;
 pub mod subscriptions;
 pub mod tls_api;
+pub mod update_api;
 
 #[derive(Embed)]
 #[folder = "../../webui/dist"]
@@ -46,6 +47,7 @@ pub struct AppState {
 
 const DOH_MAX_INFLIGHT: usize = 512;
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const UPDATE_APPLY_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct RouterState {
@@ -55,6 +57,7 @@ pub struct RouterState {
     pub sessions: Arc<auth::SessionStore>,
     pub login_limiter: Arc<auth::LoginRateLimiter>,
     pub doh_limiter: Arc<Semaphore>,
+    pub updater: Arc<update_api::UpdateManager>,
 }
 
 impl RouterState {
@@ -124,6 +127,14 @@ pub struct UpstreamProbePayload {
 pub use config_api::{ConfigResponse, ConfigUpdatePayload};
 
 pub fn build_router(state: AppState) -> Router {
+    build_router_with_updater(state, Arc::new(update_api::UpdateManager::new()))
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn build_router_with_updater(
+    state: AppState,
+    updater: Arc<update_api::UpdateManager>,
+) -> Router {
     let router_state = RouterState {
         app: state,
         http_client: subscriptions::build_subscription_http_client(false),
@@ -131,6 +142,7 @@ pub fn build_router(state: AppState) -> Router {
         sessions: Arc::new(auth::SessionStore::default()),
         login_limiter: Arc::new(auth::LoginRateLimiter::default()),
         doh_limiter: Arc::new(Semaphore::new(DOH_MAX_INFLIGHT)),
+        updater,
     };
 
     let protected_api = Router::new()
@@ -197,7 +209,10 @@ pub fn build_router(state: AppState) -> Router {
             get(get_upstream_health).post(probe_upstreams),
         )
         .route("/api/upstreams/probe", post(probe_upstream_capabilities))
-        .route("/api/auth/settings", put(auth::update_auth));
+        .route("/api/auth/settings", put(auth::update_auth))
+        .route("/api/update/status", get(update_api::get_update_status))
+        .route("/api/update/check", post(update_api::check_update))
+        .route("/api/update/apply", post(update_api::apply_update));
 
     #[cfg(all(feature = "prof-jemalloc", unix))]
     let protected_api = protected_api.route("/debug/pprof/heap", get(metrics::pprof_heap));
@@ -238,7 +253,12 @@ async fn request_timeout_middleware(req: Request, next: Next) -> Response {
     if req.uri().path() == "/api/logs/ws" {
         return next.run(req).await;
     }
-    match tokio::time::timeout(API_REQUEST_TIMEOUT, next.run(req)).await {
+    let timeout = if req.uri().path() == "/api/update/apply" {
+        UPDATE_APPLY_TIMEOUT
+    } else {
+        API_REQUEST_TIMEOUT
+    };
+    match tokio::time::timeout(timeout, next.run(req)).await {
         Ok(resp) => resp,
         Err(_) => (StatusCode::REQUEST_TIMEOUT, "request timed out").into_response(),
     }
@@ -1234,5 +1254,167 @@ mod tests {
         let reset_json: serde_json::Value =
             serde_json::from_slice(&reset_res.bytes().await.unwrap()).unwrap();
         assert_eq!(reset_json["stats"]["total_queries"].as_u64(), Some(0));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn test_web_update_api_status_check_and_apply() {
+        use sigilup::UrlPolicy;
+        use sigilup::core::{ArtifactHasher, SecretKeyBundle};
+        use sigilup::manifest::{
+            KeyPinFile, PlatformAsset, SignedManifest, UpdateManifest, current_platform_base,
+            semver,
+        };
+        use std::collections::BTreeMap;
+        use update_api::{
+            EXPECTED_EXE_NAME, InstallTarget, UpdateConfig, UpdateManager, UpdateStatusResponse,
+        };
+
+        let sk = SecretKeyBundle::generate().expect("keygen");
+        let pins = KeyPinFile::new(vec![sk.public_key().clone()]);
+        let binary_payload = b"#!/bin/sh\necho crabdns-updated-via-web\n".to_vec();
+
+        // Serve a signed manifest and raw binary artifact over a local mock server
+        let mock_bin_for_route = binary_payload.clone();
+        let asset_router = Router::new().route(
+            &format!("/{EXPECTED_EXE_NAME}"),
+            get(move || {
+                let bytes = mock_bin_for_route.clone();
+                async move { bytes }
+            }),
+        );
+        let asset_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind asset");
+        let asset_addr = asset_listener.local_addr().expect("asset addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(asset_listener, asset_router).await;
+        });
+
+        let asset_url = format!("http://{asset_addr}/{EXPECTED_EXE_NAME}");
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            format!("{}-portable", current_platform_base()),
+            PlatformAsset {
+                kind: "portable".to_string(),
+                url: asset_url.clone(),
+                fallback_urls: Vec::new(),
+                digest: ArtifactHasher::hash_bytes(&binary_payload),
+                metadata: None::<serde_json::Value>,
+            },
+        );
+        let manifest = UpdateManifest {
+            schema_version: 2,
+            version: semver::Version::new(9, 8, 7),
+            security_epoch: 1,
+            min_supported_version: None,
+            published_at: 1_760_000_000,
+            expires_at: None,
+            notes: "Web API E2E update release notes".to_string(),
+            assets,
+            key_rotations: Vec::new(),
+        };
+        let signed = SignedManifest::sign(&manifest, &sk, 1_760_000_000).expect("sign");
+        let manifest_json = serde_json::to_vec(&signed).expect("json");
+
+        let manifest_router = Router::new().route(
+            "/latest.hsig.json",
+            get(move || {
+                let bytes = manifest_json.clone();
+                async move { bytes }
+            }),
+        );
+        let manifest_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind manifest");
+        let manifest_addr = manifest_listener.local_addr().expect("manifest addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(manifest_listener, manifest_router).await;
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target_exe = dir.path().join("installed").join(EXPECTED_EXE_NAME);
+        let mut url_policy = UrlPolicy::with_prefixes([format!("http://{asset_addr}/")]);
+        url_policy.require_https = false;
+
+        let updater = Arc::new(UpdateManager::new());
+        updater.set_config_override(UpdateConfig {
+            manifest_urls: vec![format!("http://{manifest_addr}/latest.hsig.json")],
+            pins,
+            url_policy,
+            enforce_version_url_prefix: false,
+            verify_timestamp_unix: Some(1_760_000_000),
+            install_target: InstallTarget::CustomPath(target_exe.clone()),
+        });
+
+        let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+        let config = Arc::new(ArcSwap::from_pointee(Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        }));
+        let filter = Arc::new(FilterEngine::new(&[]));
+        let cache = Arc::new(DnsCache::new(64, false));
+        let upstream =
+            Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 200).unwrap());
+        let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+        let (live_tx, _) = broadcast::channel(16);
+
+        let app = build_router_with_updater(
+            AppState {
+                config,
+                pipeline,
+                storage,
+                live_tx,
+                tls_reloader: None,
+            },
+            updater,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind web");
+        let addr = listener.local_addr().expect("web addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // 1. Initial GET /api/update/status
+        let status_res = client
+            .get(format!("{base}/api/update/status"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(status_res.status(), StatusCode::OK);
+        let initial_status: UpdateStatusResponse =
+            serde_json::from_slice(&status_res.bytes().await.unwrap()).unwrap();
+        assert!(!initial_status.update_available);
+        assert!(!initial_status.restart_pending);
+
+        // 2. POST /api/update/check discovers v9.8.7
+        let check_res = client
+            .post(format!("{base}/api/update/check"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(check_res.status(), StatusCode::OK);
+        let checked_status: UpdateStatusResponse =
+            serde_json::from_slice(&check_res.bytes().await.unwrap()).unwrap();
+        assert!(checked_status.update_available);
+        assert_eq!(checked_status.latest_version.as_deref(), Some("9.8.7"));
+        assert_eq!(
+            checked_status.notes.as_deref(),
+            Some("Web API E2E update release notes")
+        );
+
+        // 3. POST /api/update/apply downloads, verifies, and installs the binary
+        let apply_res = client
+            .post(format!("{base}/api/update/apply"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(apply_res.status(), StatusCode::OK);
+        let applied_status: UpdateStatusResponse =
+            serde_json::from_slice(&apply_res.bytes().await.unwrap()).unwrap();
+        assert!(!applied_status.update_available);
+        assert!(applied_status.restart_pending);
+        assert_eq!(std::fs::read(&target_exe).unwrap(), binary_payload);
     }
 }

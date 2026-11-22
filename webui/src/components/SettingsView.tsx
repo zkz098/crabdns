@@ -3,6 +3,7 @@ import { t } from "../i18n";
 import type { BlockMode } from "../types/BlockMode";
 import type { ConfigResponse } from "../types/ConfigResponse";
 import type { TlsStatusResponse } from "../types/TlsStatusResponse";
+import type { UpdateStatusResponse } from "../types/UpdateStatusResponse";
 import type { UpstreamCapabilities } from "../types/UpstreamCapabilities";
 import type { UpstreamStatus } from "../types/UpstreamStatus";
 import type { UpstreamStrategy } from "../types/UpstreamStrategy";
@@ -119,6 +120,12 @@ interface SettingsViewProps {
   backupMessage?: string;
   backupIsError?: boolean;
   backupBusy?: boolean;
+  updateStatus?: UpdateStatusResponse | null;
+  updateBusy?: boolean;
+  updateMessage?: string;
+  updateIsError?: boolean;
+  onCheckUpdate?: () => Promise<void> | void;
+  onApplyUpdate?: () => Promise<void> | void;
 }
 
 export function SettingsView(props: SettingsViewProps) {
@@ -1177,6 +1184,103 @@ export function SettingsView(props: SettingsViewProps) {
                 </Show>
               </div>
             </div>
+          </div>
+        </Show>
+
+        {/* System Self-Update (SigilUp) */}
+        <Show when={props.onCheckUpdate || props.onApplyUpdate}>
+          <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div class="space-y-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <p class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                    {t("updateTitle")}
+                  </p>
+                  <Show when={props.updateStatus}>
+                    {(st) => (
+                      <span class="px-2 py-0.5 rounded-full text-[11px] font-mono bg-zinc-500/10 text-zinc-700 dark:text-zinc-300 border border-zinc-500/20">
+                        {t("updateCurrentVersion")}: v{st().current_version}
+                      </span>
+                    )}
+                  </Show>
+                  <Show
+                    when={
+                      props.updateStatus?.update_available && props.updateStatus?.latest_version
+                    }
+                  >
+                    <span class="px-2 py-0.5 rounded-full text-[11px] font-mono bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                      {t("updateLatestVersion")}: v{props.updateStatus?.latest_version}
+                    </span>
+                  </Show>
+                  <Show when={props.updateStatus?.restart_pending}>
+                    <span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20">
+                      {t("updateRestartPendingBadge")}
+                    </span>
+                  </Show>
+                </div>
+                <p class="text-[11px] text-[#666666] dark:text-[#a1a1aa] leading-relaxed">
+                  {t("updateSubtitle")}
+                </p>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2 shrink-0">
+                <Show when={props.updateMessage}>
+                  <span
+                    class={`text-xs font-medium ${
+                      props.updateIsError
+                        ? "text-rose-600 dark:text-rose-400"
+                        : "text-emerald-600 dark:text-emerald-400"
+                    }`}
+                  >
+                    {props.updateMessage}
+                  </span>
+                </Show>
+
+                <Show when={props.onCheckUpdate}>
+                  <button
+                    type="button"
+                    disabled={props.updateBusy || props.updateStatus?.busy}
+                    onClick={() => props.onCheckUpdate?.()}
+                    class="h-8 px-3 rounded-lg text-xs font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                  >
+                    <span
+                      class={
+                        props.updateBusy
+                          ? "i-ri-loader-4-line animate-spin text-sm"
+                          : "i-ri-refresh-line text-sm"
+                      }
+                    />
+                    <span>{props.updateBusy ? t("updateCheckingBtn") : t("updateCheckBtn")}</span>
+                  </button>
+                </Show>
+
+                <Show
+                  when={
+                    props.onApplyUpdate &&
+                    props.updateStatus?.update_available &&
+                    !props.updateStatus?.restart_pending
+                  }
+                >
+                  <button
+                    type="button"
+                    disabled={props.updateBusy || props.updateStatus?.busy}
+                    onClick={() => props.onApplyUpdate?.()}
+                    class="h-8 px-3 rounded-lg text-xs font-medium bg-[#171717] hover:bg-[#383838] dark:bg-[#ededed] dark:hover:bg-[#d4d4d8] text-white dark:text-[#0a0a0a] flex items-center gap-1.5 cursor-pointer border-0 transition-colors disabled:opacity-50"
+                  >
+                    <span class="i-ri-sparkling-2-line text-sm" />
+                    <span>{props.updateBusy ? t("updateApplyingBtn") : t("updateApplyBtn")}</span>
+                  </button>
+                </Show>
+              </div>
+            </div>
+
+            <Show when={props.updateStatus?.notes}>
+              {(notes) => (
+                <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3 font-mono text-xs text-[#171717] dark:text-[#ededed] whitespace-pre-wrap">
+                  {notes()}
+                </div>
+              )}
+            </Show>
           </div>
         </Show>
       </div>

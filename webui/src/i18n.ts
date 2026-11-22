@@ -340,6 +340,21 @@ const en = {
   backupExportedMsg: "Backup exported",
   backupRestoredMsg: "Backup restored & applied",
   backupInvalidFileMsg: "Invalid backup JSON file",
+
+  updateTitle: "System Self-Update (SigilUp)",
+  updateSubtitle:
+    "Check for, verify (Ed25519 + ML-DSA-65 hybrid signature & BLAKE3 + SHA-512 stream digest), and apply signed CrabDNS binary updates.",
+  updateCurrentVersion: "Current Version",
+  updateLatestVersion: "Available Update",
+  updateUpToDate: "Up to date",
+  updateCheckBtn: "Check for Updates",
+  updateCheckingBtn: "Checking...",
+  updateApplyBtn: "Download & Install",
+  updateApplyingBtn: "Installing...",
+  updateRestartPendingBadge: "Updated — Restart service to apply",
+  updateUpToDateMsg: "CrabDNS is already on the latest version",
+  updateAvailableMsg: "New signed update available",
+  updateAppliedMsg: "Binary replaced in place — restart service to take effect",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -664,6 +679,21 @@ const zhCN: Record<TranslationKey, string> = {
   backupExportedMsg: "备份文件已导出",
   backupRestoredMsg: "备份已成功恢复并热生效",
   backupInvalidFileMsg: "无效的备份 JSON 文件",
+
+  updateTitle: "系统自更新 (SigilUp 后量子混合签名)",
+  updateSubtitle:
+    "检查、流式校验（Ed25519 + ML-DSA-65 混合签名与 BLAKE3 + SHA-512 摘要）并原地替换 CrabDNS 二进制文件。",
+  updateCurrentVersion: "当前版本",
+  updateLatestVersion: "可用新版本",
+  updateUpToDate: "已是最新",
+  updateCheckBtn: "检查更新",
+  updateCheckingBtn: "检查中...",
+  updateApplyBtn: "下载并更新",
+  updateApplyingBtn: "更新中...",
+  updateRestartPendingBadge: "已替换二进制 — 请重启服务生效",
+  updateUpToDateMsg: "当前已是最新版本",
+  updateAvailableMsg: "发现签名新版本",
+  updateAppliedMsg: "二进制已原地替换，重启服务后生效",
 };
 
 const dictionaries: Record<Locale, Record<TranslationKey, string>> = {

@@ -29,6 +29,7 @@ import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { StatsResponse } from "./types/StatsResponse";
 import type { TestRuleResponse } from "./types/TestRuleResponse";
 import type { TlsStatusResponse } from "./types/TlsStatusResponse";
+import type { UpdateStatusResponse } from "./types/UpdateStatusResponse";
 import type { UpstreamCapabilities } from "./types/UpstreamCapabilities";
 import type { UpstreamStatus } from "./types/UpstreamStatus";
 import type { UpstreamStrategy } from "./types/UpstreamStrategy";
@@ -121,6 +122,10 @@ export default function App() {
   const [backupMessage, setBackupMessage] = createSignal("");
   const [backupIsError, setBackupIsError] = createSignal(false);
   const [backupBusy, setBackupBusy] = createSignal(false);
+  const [updateStatus, setUpdateStatus] = createSignal<UpdateStatusResponse | null>(null);
+  const [updateBusy, setUpdateBusy] = createSignal(false);
+  const [updateMessage, setUpdateMessage] = createSignal("");
+  const [updateIsError, setUpdateIsError] = createSignal(false);
 
   const [authChecked, setAuthChecked] = createSignal(false);
   const [authEnabled, setAuthEnabled] = createSignal(false);
@@ -266,6 +271,70 @@ export default function App() {
       setBackupMessage(t("rulesNetworkError"));
     } finally {
       setBackupBusy(false);
+    }
+  }
+
+  async function fetchUpdateStatus() {
+    try {
+      const res = await fetch("/api/update/status");
+      if (res.ok) {
+        setUpdateStatus(await res.json());
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function checkUpdate() {
+    setUpdateBusy(true);
+    setUpdateIsError(false);
+    setUpdateMessage("");
+    try {
+      const res = await fetch("/api/update/check", { method: "POST" });
+      if (res.ok) {
+        const data: UpdateStatusResponse = await res.json();
+        setUpdateStatus(data);
+        setUpdateMessage(
+          data.update_available
+            ? `${t("updateAvailableMsg")} (v${data.latest_version ?? ""})`
+            : t("updateUpToDateMsg"),
+        );
+        setTimeout(() => setUpdateMessage(""), 3500);
+      } else {
+        setUpdateIsError(true);
+        const errBody = await res.json().catch(() => null);
+        setUpdateMessage(errBody?.error ?? t("rulesFailed"));
+        await fetchUpdateStatus();
+      }
+    } catch {
+      setUpdateIsError(true);
+      setUpdateMessage(t("rulesNetworkError"));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function applyUpdate() {
+    setUpdateBusy(true);
+    setUpdateIsError(false);
+    setUpdateMessage("");
+    try {
+      const res = await fetch("/api/update/apply", { method: "POST" });
+      if (res.ok) {
+        const data: UpdateStatusResponse = await res.json();
+        setUpdateStatus(data);
+        setUpdateMessage(t("updateAppliedMsg"));
+      } else {
+        setUpdateIsError(true);
+        const errBody = await res.json().catch(() => null);
+        setUpdateMessage(errBody?.error ?? t("rulesFailed"));
+        await fetchUpdateStatus();
+      }
+    } catch {
+      setUpdateIsError(true);
+      setUpdateMessage(t("rulesNetworkError"));
+    } finally {
+      setUpdateBusy(false);
     }
   }
 
@@ -1017,6 +1086,7 @@ export default function App() {
       fetchConfig();
       fetchUpstreamHealth();
       fetchTlsStatus();
+      fetchUpdateStatus();
     }
   }
 
@@ -1033,6 +1103,7 @@ export default function App() {
         fetchBlockingStatus();
         fetchClients();
         fetchTlsStatus();
+        fetchUpdateStatus();
       }
     });
 
@@ -1298,6 +1369,12 @@ export default function App() {
               backupMessage={backupMessage()}
               backupIsError={backupIsError()}
               backupBusy={backupBusy()}
+              updateStatus={updateStatus()}
+              updateBusy={updateBusy()}
+              updateMessage={updateMessage()}
+              updateIsError={updateIsError()}
+              onCheckUpdate={checkUpdate}
+              onApplyUpdate={applyUpdate}
             />
           </Show>
         </main>

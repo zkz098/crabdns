@@ -72,7 +72,8 @@ mimalloc = "0.1"
 tikv-jemallocator = "0.7"
 tikv-jemalloc-ctl = "0.7"
 jemalloc_pprof = "0.9"
-hdrhistogram = { version = "7.6", default-features = false }
+ hdrhistogram = { version = "7.6", default-features = false }
+sigilup = { version = "0.1.3", features = ["reqwest", "self-replace"] }
 
 [profile.profiling]
 inherits = "release"

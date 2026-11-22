@@ -27,8 +27,10 @@ crabdns-storage.workspace = true
 crabdns-web.workspace = true
 mimalloc.workspace = true
 quinn.workspace = true
+reqwest.workspace = true
 ring.workspace = true
 rustls.workspace = true
+sigilup.workspace = true
 socket2.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
@@ -46,6 +48,7 @@ proptest.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sigilup = { workspace = true, features = ["sign"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
