@@ -1123,6 +1123,14 @@ export default function App() {
       dns64_prefixes: parseLines(dns64PrefixesText()),
       svcb_strip_ech: svcbStripEch(),
       svcb_strip_hints: svcbStripHints(),
+      ede_enabled: null,
+      dns_cookies_enabled: null,
+      dns_cookies_require_valid: null,
+      max_udp_payload_size: null,
+      rrl_enabled: null,
+      rrl_responses_per_second: null,
+      rrl_slip: null,
+      rrl_window_secs: null,
     };
 
     try {
