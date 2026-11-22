@@ -55,7 +55,10 @@ impl UpstreamCapabilities {
     fn failed(input: String, endpoint: String, protocol: UpstreamProtocol, error: String) -> Self {
         let encrypted = matches!(
             protocol,
-            UpstreamProtocol::Dot | UpstreamProtocol::Doh | UpstreamProtocol::Doq
+            UpstreamProtocol::Dot
+                | UpstreamProtocol::Doh
+                | UpstreamProtocol::Doq
+                | UpstreamProtocol::Doh3
         );
         Self {
             input,

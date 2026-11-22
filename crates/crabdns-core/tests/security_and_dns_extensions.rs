@@ -107,6 +107,20 @@ fn test_doq_upstream_parsing() {
     ));
 
     assert!(UpstreamPool::new(&["quic://dns.adguard-dns.com".to_string()], 1000).is_ok());
+
+    let h3_ep = UpstreamEndpoint::parse("h3://dns.google/dns-query").expect("parse doh3");
+    assert!(matches!(
+        h3_ep,
+        UpstreamEndpoint::Doh3 { ref url, ref host, port }
+        if url == "https://dns.google/dns-query" && host == "dns.google" && port == 443
+    ));
+    let h3_default_path = UpstreamEndpoint::parse("h3://1.1.1.1:8443").expect("parse doh3 default");
+    assert!(matches!(
+        h3_default_path,
+        UpstreamEndpoint::Doh3 { ref url, ref host, port }
+        if url == "https://1.1.1.1:8443/dns-query" && host == "1.1.1.1" && port == 8443
+    ));
+    assert!(UpstreamPool::new(&["h3://dns.google/dns-query".to_string()], 1000).is_ok());
 }
 
 #[tokio::test]

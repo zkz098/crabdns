@@ -1,16 +1,131 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use bytes::{Buf, Bytes};
 use quinn::crypto::rustls::QuicClientConfig;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+use ts_rs::TS;
 
 use crate::error::{CoreError, Result};
+
+pub(crate) const UNHEALTHY_FAILURE_THRESHOLD: u32 = 3;
+pub(crate) const UNHEALTHY_COOLDOWN_MS: u64 = 15_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpstreamStatus {
+    pub endpoint: String,
+    pub healthy: bool,
+    pub consecutive_failures: u32,
+    #[ts(type = "number")]
+    pub ewma_latency_ms: u64,
+    #[ts(type = "number")]
+    pub total_requests: u64,
+    #[ts(type = "number")]
+    pub total_failures: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EndpointHealth {
+    pub(crate) consecutive_failures: AtomicU32,
+    pub(crate) unhealthy_until_ms: AtomicU64,
+    pub(crate) probe_inflight: AtomicBool,
+    pub(crate) ewma_latency_us: AtomicU64,
+    pub(crate) total_requests: AtomicU64,
+    pub(crate) total_failures: AtomicU64,
+}
+
+pub(crate) struct ProbeGuard<'a> {
+    pub(crate) health: &'a EndpointHealth,
+    pub(crate) defused: bool,
+}
+
+impl Drop for ProbeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.defused {
+            self.health.probe_inflight.store(false, Ordering::Release);
+        }
+    }
+}
+
+impl EndpointHealth {
+    pub(crate) fn is_healthy(&self, now_ms: u64) -> bool {
+        let until = self.unhealthy_until_ms.load(Ordering::Relaxed);
+        until == 0 || now_ms >= until
+    }
+
+    pub(crate) fn try_select(&self, now_ms: u64) -> (bool, Option<ProbeGuard<'_>>) {
+        let until = self.unhealthy_until_ms.load(Ordering::Relaxed);
+        if until == 0 {
+            return (true, None);
+        }
+        if now_ms < until {
+            return (false, None);
+        }
+        if self
+            .probe_inflight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return (
+                true,
+                Some(ProbeGuard {
+                    health: self,
+                    defused: false,
+                }),
+            );
+        }
+        (false, None)
+    }
+
+    pub(crate) fn record_success(&self, elapsed_us: u64) {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        self.unhealthy_until_ms.store(0, Ordering::Relaxed);
+        self.probe_inflight.store(false, Ordering::Release);
+
+        let prev = self.ewma_latency_us.load(Ordering::Relaxed);
+        let next = if prev == 0 {
+            elapsed_us.max(1)
+        } else {
+            (prev * 7 + elapsed_us.max(1)) / 8
+        };
+        self.ewma_latency_us.store(next, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_failure(&self, now_ms: u64) {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.total_failures.fetch_add(1, Ordering::Relaxed);
+        let fails = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        let was_open = self.unhealthy_until_ms.load(Ordering::Relaxed) != 0;
+        if was_open || fails >= UNHEALTHY_FAILURE_THRESHOLD {
+            self.unhealthy_until_ms.store(
+                now_ms.saturating_add(UNHEALTHY_COOLDOWN_MS),
+                Ordering::Relaxed,
+            );
+        }
+        self.probe_inflight.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn snapshot(&self, label: String, now_ms: u64) -> UpstreamStatus {
+        UpstreamStatus {
+            endpoint: label,
+            healthy: self.is_healthy(now_ms),
+            consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
+            ewma_latency_ms: self.ewma_latency_us.load(Ordering::Relaxed) / 1000,
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            total_failures: self.total_failures.load(Ordering::Relaxed),
+        }
+    }
+}
 
 pub(crate) fn parse_socket_addr(input: &str, default_port: u16) -> Result<SocketAddr> {
     if let Ok(addr) = input.parse::<SocketAddr>() {
@@ -26,11 +141,45 @@ pub(crate) fn parse_socket_addr(input: &str, default_port: u16) -> Result<Socket
 
 pub(crate) fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
     if let Some((host, port_str)) = input.rsplit_once(':')
+        && !host.contains(']')
         && let Ok(port) = port_str.parse::<u16>()
     {
         return (host.to_string(), port);
     }
+    if let Some(rest) = input.strip_prefix('[')
+        && let Some((ipv6, suffix)) = rest.split_once(']')
+    {
+        if let Some(port_str) = suffix.strip_prefix(':')
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            return (ipv6.to_string(), port);
+        }
+        return (ipv6.to_string(), default_port);
+    }
     (input.to_string(), default_port)
+}
+
+pub(crate) fn parse_h3_url(rest: &str) -> Result<(String, String, u16)> {
+    let (authority, path) = match rest.find(['/', '?']) {
+        Some(idx) => {
+            let (auth, tail) = rest.split_at(idx);
+            let p = if tail.starts_with('?') {
+                format!("/dns-query{tail}")
+            } else {
+                tail.to_string()
+            };
+            (auth, p)
+        }
+        None => (rest, "/dns-query".to_string()),
+    };
+    if authority.is_empty() {
+        return Err(CoreError::Config(
+            "empty host in h3:// upstream".to_string(),
+        ));
+    }
+    let (host, port) = split_host_port(authority, 443);
+    let uri = format!("https://{authority}{path}");
+    Ok((uri, host, port))
 }
 
 const UDP_SOCKET_POOL_MAX_IDLE: usize = 128;
@@ -288,14 +437,22 @@ pub(crate) async fn exchange_doh(
 }
 
 pub(crate) fn build_doq_client_config() -> Result<quinn::ClientConfig> {
+    build_quic_client_config(b"doq", "DoQ")
+}
+
+pub(crate) fn build_h3_client_config() -> Result<quinn::ClientConfig> {
+    build_quic_client_config(b"h3", "DoH3")
+}
+
+fn build_quic_client_config(alpn: &[u8], proto_name: &str) -> Result<quinn::ClientConfig> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut tls_config = RustlsClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    tls_config.alpn_protocols = vec![b"doq".to_vec()];
+    tls_config.alpn_protocols = vec![alpn.to_vec()];
     let quic_crypto = QuicClientConfig::try_from(tls_config)
-        .map_err(|e| CoreError::Upstream(format!("DoQ TLS config error: {e}")))?;
+        .map_err(|e| CoreError::Upstream(format!("{proto_name} TLS config error: {e}")))?;
     let mut client_cfg = quinn::ClientConfig::new(Arc::new(quic_crypto));
     let mut transport = quinn::TransportConfig::default();
     if let Ok(idle) = quinn::IdleTimeout::try_from(CONN_POOL_IDLE_TTL) {
@@ -402,6 +559,142 @@ async fn exchange_doq_one(
 
     let resp = doq_roundtrip(&conn, query_wire).await?;
     pool.put(conn);
+    Ok(resp)
+}
+
+pub(crate) struct H3Session {
+    conn: quinn::Connection,
+    send_request: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+}
+
+async fn h3_roundtrip(
+    send_request: &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    uri: &str,
+    query_wire: &[u8],
+) -> Result<Vec<u8>> {
+    let req = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(uri)
+        .header("content-type", "application/dns-message")
+        .header("accept", "application/dns-message")
+        .body(())
+        .map_err(|e| CoreError::Upstream(format!("DoH3 request build failed: {e}")))?;
+
+    let mut stream = send_request
+        .send_request(req)
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoH3 send_request failed: {e}")))?;
+    stream
+        .send_data(Bytes::copy_from_slice(query_wire))
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoH3 send_data failed: {e}")))?;
+    stream
+        .finish()
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoH3 finish failed: {e}")))?;
+
+    let resp = stream
+        .recv_response()
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoH3 recv_response failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(CoreError::Upstream(format!(
+            "DoH3 HTTP status {}",
+            resp.status()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(512);
+    while let Some(mut chunk) = stream
+        .recv_data()
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoH3 recv_data failed: {e}")))?
+    {
+        let remaining = chunk.remaining();
+        if out.len().saturating_add(remaining) > MAX_DOH_RESPONSE_BYTES {
+            return Err(CoreError::Upstream(format!(
+                "DoH3 response exceeds {MAX_DOH_RESPONSE_BYTES} bytes limit"
+            )));
+        }
+        while chunk.has_remaining() {
+            let bytes = chunk.chunk();
+            out.extend_from_slice(bytes);
+            let len = bytes.len();
+            chunk.advance(len);
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) async fn try_exchange_h3_pooled(
+    pool: &ConnPool<H3Session>,
+    uri: &str,
+    query_wire: &[u8],
+) -> Option<Vec<u8>> {
+    for _ in 0..MAX_POOLED_RETRIES {
+        let mut session = pool.pop_fresh()?;
+        if session.conn.close_reason().is_some() {
+            continue;
+        }
+        if let Ok(resp) = h3_roundtrip(&mut session.send_request, uri, query_wire).await {
+            pool.put(session);
+            return Some(resp);
+        }
+    }
+    None
+}
+
+pub(crate) async fn exchange_h3_addrs(
+    client_config: &quinn::ClientConfig,
+    addrs: &[SocketAddr],
+    pool: &ConnPool<H3Session>,
+    server_name: &str,
+    uri: &str,
+    query_wire: &[u8],
+) -> Result<Vec<u8>> {
+    let mut last_err = CoreError::Upstream("no resolved socket addresses for DoH3".to_string());
+    for &addr in addrs {
+        match exchange_h3_one(client_config, addr, pool, server_name, uri, query_wire).await {
+            Ok(resp) => return Ok(resp),
+            Err(err) => last_err = err,
+        }
+    }
+    Err(last_err)
+}
+
+async fn exchange_h3_one(
+    client_config: &quinn::ClientConfig,
+    addr: SocketAddr,
+    pool: &ConnPool<H3Session>,
+    server_name: &str,
+    uri: &str,
+    query_wire: &[u8],
+) -> Result<Vec<u8>> {
+    let bind_addr: SocketAddr = if addr.is_ipv4() {
+        "0.0.0.0:0".parse().expect("valid v4 bind")
+    } else {
+        "[::]:0".parse().expect("valid v6 bind")
+    };
+    let mut endpoint = quinn::Endpoint::client(bind_addr)
+        .map_err(|e| CoreError::Upstream(format!("DoH3 endpoint bind failed: {e}")))?;
+    endpoint.set_default_client_config(client_config.clone());
+
+    let conn = endpoint
+        .connect(addr, server_name)
+        .map_err(|e| CoreError::Upstream(format!("DoH3 connect setup failed: {e}")))?
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoH3 handshake failed: {e}")))?;
+
+    let h3_conn = h3_quinn::Connection::new(conn.clone());
+    let (mut driver, mut send_request) = h3::client::new(h3_conn)
+        .await
+        .map_err(|e| CoreError::Upstream(format!("DoH3 client init failed: {e}")))?;
+    tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let resp = h3_roundtrip(&mut send_request, uri, query_wire).await?;
+    pool.put(H3Session { conn, send_request });
     Ok(resp)
 }
 

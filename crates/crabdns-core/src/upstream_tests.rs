@@ -1,4 +1,6 @@
 use super::*;
+use crate::upstream_transport::{UNHEALTHY_COOLDOWN_MS, UNHEALTHY_FAILURE_THRESHOLD};
+use std::sync::atomic::AtomicU32;
 
 #[test]
 fn test_parse_upstream_specs() {

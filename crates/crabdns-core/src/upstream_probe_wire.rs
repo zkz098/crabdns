@@ -27,6 +27,7 @@ pub enum UpstreamProtocol {
     Dot,
     Doh,
     Doq,
+    Doh3,
 }
 
 const MAX_DOH_RESPONSE_BYTES: usize = 65_535;
@@ -253,6 +254,7 @@ pub(crate) const fn endpoint_protocol(endpoint: &UpstreamEndpoint) -> UpstreamPr
         UpstreamEndpoint::Dot { .. } => UpstreamProtocol::Dot,
         UpstreamEndpoint::Doh { .. } => UpstreamProtocol::Doh,
         UpstreamEndpoint::Doq { .. } => UpstreamProtocol::Doq,
+        UpstreamEndpoint::Doh3 { .. } => UpstreamProtocol::Doh3,
     }
 }
 
@@ -297,6 +299,16 @@ pub(crate) async fn exchange_once(
                 )
                 .await?;
                 Ok((wire, Some("QUIC (ALPN doq)".to_string())))
+            }
+            UpstreamEndpoint::Doh3 { url, host, port } => {
+                let addrs = ctx.bootstrap.resolve_socket_addrs(host, *port).await?;
+                let h3_cfg = crate::upstream_transport::build_h3_client_config()?;
+                let pool = crate::upstream_transport::ConnPool::default();
+                let wire = Box::pin(crate::upstream_transport::exchange_h3_addrs(
+                    &h3_cfg, &addrs, &pool, host, url, query_wire,
+                ))
+                .await?;
+                Ok((wire, Some("HTTP/3 (ALPN h3)".to_string())))
             }
         }
     })

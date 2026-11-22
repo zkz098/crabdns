@@ -1,6 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foldhash::fast::RandomState;
@@ -8,26 +8,25 @@ use futures_util::future::select_ok;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use moka::sync::Cache;
-use serde::{Deserialize, Serialize};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-use ts_rs::TS;
 
 use crate::clock::monotonic_now_ms;
 use crate::config::UpstreamStrategy;
 use crate::error::{CoreError, Result};
 use crate::singleflight::{FlightRole, Singleflight, wait_follower};
+pub use crate::upstream_transport::UpstreamStatus;
 use crate::upstream_transport::{
-    ConnPool, UdpSocketPool, build_doq_client_config, exchange_doh, exchange_doq_addrs,
-    exchange_dot_addrs, exchange_tcp, exchange_tcp_pooled, exchange_udp, is_udp_truncated,
-    parse_socket_addr, try_exchange_doq_pooled, try_exchange_dot_pooled,
+    ConnPool, EndpointHealth, H3Session, ProbeGuard, UdpSocketPool, build_doq_client_config,
+    build_h3_client_config, exchange_doh, exchange_doq_addrs, exchange_dot_addrs,
+    exchange_h3_addrs, exchange_tcp, exchange_tcp_pooled, exchange_udp, is_udp_truncated,
+    parse_h3_url, parse_socket_addr, try_exchange_doq_pooled, try_exchange_dot_pooled,
+    try_exchange_h3_pooled,
 };
 pub(crate) use crate::upstream_transport::{read_tcp_framed, send_tcp_framed, split_host_port};
 
-const UNHEALTHY_FAILURE_THRESHOLD: u32 = 3;
-const UNHEALTHY_COOLDOWN_MS: u64 = 15_000;
 const BOOTSTRAP_CACHE_CAPACITY: u64 = 256;
 
 static TX_ID_SEQ: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
@@ -44,122 +43,26 @@ pub(crate) fn next_tx_id() -> u16 {
     ((mixed >> 32) ^ mixed) as u16
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct UpstreamStatus {
-    pub endpoint: String,
-    pub healthy: bool,
-    pub consecutive_failures: u32,
-    #[ts(type = "number")]
-    pub ewma_latency_ms: u64,
-    #[ts(type = "number")]
-    pub total_requests: u64,
-    #[ts(type = "number")]
-    pub total_failures: u64,
-}
-
-#[derive(Debug, Default)]
-struct EndpointHealth {
-    consecutive_failures: AtomicU32,
-    unhealthy_until_ms: AtomicU64,
-    probe_inflight: AtomicBool,
-    ewma_latency_us: AtomicU64,
-    total_requests: AtomicU64,
-    total_failures: AtomicU64,
-}
-
-struct ProbeGuard<'a> {
-    health: &'a EndpointHealth,
-    defused: bool,
-}
-
-impl Drop for ProbeGuard<'_> {
-    fn drop(&mut self) {
-        if !self.defused {
-            self.health.probe_inflight.store(false, Ordering::Release);
-        }
-    }
-}
-
-impl EndpointHealth {
-    fn is_healthy(&self, now_ms: u64) -> bool {
-        let until = self.unhealthy_until_ms.load(Ordering::Relaxed);
-        until == 0 || now_ms >= until
-    }
-
-    fn try_select(&self, now_ms: u64) -> (bool, Option<ProbeGuard<'_>>) {
-        let until = self.unhealthy_until_ms.load(Ordering::Relaxed);
-        if until == 0 {
-            return (true, None);
-        }
-        if now_ms < until {
-            return (false, None);
-        }
-        // Half-open cooldown expired: allow only one concurrent probe to avoid thundering herd.
-        if self
-            .probe_inflight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            return (
-                true,
-                Some(ProbeGuard {
-                    health: self,
-                    defused: false,
-                }),
-            );
-        }
-        (false, None)
-    }
-
-    fn record_success(&self, elapsed_us: u64) {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        self.unhealthy_until_ms.store(0, Ordering::Relaxed);
-        self.probe_inflight.store(false, Ordering::Release);
-
-        let prev = self.ewma_latency_us.load(Ordering::Relaxed);
-        let next = if prev == 0 {
-            elapsed_us.max(1)
-        } else {
-            (prev * 7 + elapsed_us.max(1)) / 8
-        };
-        self.ewma_latency_us.store(next, Ordering::Relaxed);
-    }
-
-    fn record_failure(&self, now_ms: u64) {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.total_failures.fetch_add(1, Ordering::Relaxed);
-        let fails = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        let was_open = self.unhealthy_until_ms.load(Ordering::Relaxed) != 0;
-        if was_open || fails >= UNHEALTHY_FAILURE_THRESHOLD {
-            self.unhealthy_until_ms.store(
-                now_ms.saturating_add(UNHEALTHY_COOLDOWN_MS),
-                Ordering::Relaxed,
-            );
-        }
-        self.probe_inflight.store(false, Ordering::Release);
-    }
-
-    fn snapshot(&self, label: String, now_ms: u64) -> UpstreamStatus {
-        UpstreamStatus {
-            endpoint: label,
-            healthy: self.is_healthy(now_ms),
-            consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
-            ewma_latency_ms: self.ewma_latency_us.load(Ordering::Relaxed) / 1000,
-            total_requests: self.total_requests.load(Ordering::Relaxed),
-            total_failures: self.total_failures.load(Ordering::Relaxed),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum UpstreamEndpoint {
     Udp(SocketAddr),
     Tcp(SocketAddr),
-    Dot { addr: String, server_name: String },
-    Doh { url: String },
-    Doq { addr: String, server_name: String },
+    Dot {
+        addr: String,
+        server_name: String,
+    },
+    Doh {
+        url: String,
+    },
+    Doq {
+        addr: String,
+        server_name: String,
+    },
+    Doh3 {
+        url: String,
+        host: String,
+        port: u16,
+    },
 }
 
 impl UpstreamEndpoint {
@@ -186,6 +89,10 @@ impl UpstreamEndpoint {
                 addr: format!("{host}:{port}"),
                 server_name: host,
             });
+        }
+        if let Some(rest) = trimmed.strip_prefix("h3://") {
+            let (url, host, port) = parse_h3_url(rest)?;
+            return Ok(Self::Doh3 { url, host, port });
         }
         if trimmed.starts_with("https://") {
             return Ok(Self::Doh {
@@ -215,6 +122,7 @@ fn parse_bootstrap_endpoint(raw: &str) -> Result<BootstrapEndpoint> {
     if trimmed.starts_with("tls://")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("quic://")
+        || trimmed.starts_with("h3://")
     {
         return Err(CoreError::Config(format!(
             "bootstrap_dns must be IP addresses (udp:// or tcp://): {trimmed}"
@@ -468,12 +376,14 @@ pub struct UpstreamPool {
     tcp_pools: Vec<ConnPool<TcpStream>>,
     dot_pools: Vec<ConnPool<TlsStream<TcpStream>>>,
     doq_pools: Vec<ConnPool<quinn::Connection>>,
+    h3_pools: Vec<ConnPool<H3Session>>,
     strategy: UpstreamStrategy,
     timeout: Duration,
     bootstrap: BootstrapResolver,
     http_client: reqwest::Client,
     tls_connector: TlsConnector,
     doq_client_config: quinn::ClientConfig,
+    h3_client_config: quinn::ClientConfig,
 }
 
 impl UpstreamPool {
@@ -515,6 +425,7 @@ impl UpstreamPool {
         let tcp_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
         let dot_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
         let quic_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
+        let h3_pools = (0..endpoints.len()).map(|_| ConnPool::default()).collect();
         let timeout = Duration::from_millis(timeout_ms);
         let bootstrap = BootstrapResolver::new(bootstrap_dns, timeout)?;
 
@@ -533,6 +444,7 @@ impl UpstreamPool {
             .with_no_client_auth();
         let tls_connector = TlsConnector::from(Arc::new(tls_config));
         let doq_client_config = build_doq_client_config()?;
+        let h3_client_config = build_h3_client_config()?;
 
         Ok(Self {
             endpoints,
@@ -541,12 +453,14 @@ impl UpstreamPool {
             tcp_pools,
             dot_pools,
             doq_pools: quic_pools,
+            h3_pools,
             strategy,
             timeout,
             bootstrap,
             http_client,
             tls_connector,
             doq_client_config,
+            h3_client_config,
         })
     }
 
@@ -572,7 +486,8 @@ impl UpstreamPool {
             }
             UpstreamEndpoint::Dot { .. }
             | UpstreamEndpoint::Doh { .. }
-            | UpstreamEndpoint::Doq { .. } => false,
+            | UpstreamEndpoint::Doq { .. }
+            | UpstreamEndpoint::Doh3 { .. } => false,
         })
     }
 
@@ -756,6 +671,23 @@ impl UpstreamPool {
                 )
                 .await
             }
+            UpstreamEndpoint::Doh3 { url, host, port } => {
+                if let Some(resp) =
+                    try_exchange_h3_pooled(&self.h3_pools[idx], url, query_wire).await
+                {
+                    return Ok(resp);
+                }
+                let addrs = self.bootstrap.resolve_socket_addrs(host, *port).await?;
+                exchange_h3_addrs(
+                    &self.h3_client_config,
+                    &addrs,
+                    &self.h3_pools[idx],
+                    host,
+                    url,
+                    query_wire,
+                )
+                .await
+            }
         }
     }
 }
@@ -767,6 +699,7 @@ pub(crate) fn endpoint_label(endpoint: &UpstreamEndpoint) -> String {
         UpstreamEndpoint::Dot { addr, .. } => format!("tls://{addr}"),
         UpstreamEndpoint::Doh { url } => url.clone(),
         UpstreamEndpoint::Doq { addr, .. } => format!("quic://{addr}"),
+        UpstreamEndpoint::Doh3 { url, .. } => url.replacen("https://", "h3://", 1),
     }
 }
 
