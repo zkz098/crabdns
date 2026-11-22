@@ -1,0 +1,225 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  webui:
+    name: Build Web UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: webui
+        run: pnpm install --frozen-lockfile
+      - name: Build Web UI
+        working-directory: webui
+        run: pnpm build
+      - name: Upload Web UI dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: webui-dist
+          path: webui/dist
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: webui
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+            bin: crabdns
+          - platform: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            ext: tar.gz
+            bin: crabdns
+          - platform: darwin-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+            bin: crabdns
+          - platform: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            bin: crabdns.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download Web UI dist
+        uses: actions/download-artifact@v8
+        with:
+          name: webui-dist
+          path: webui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.platform }}
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v${TAG}" ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }} -p crabdns-server --bin crabdns
+      - name: Package archive & checksum
+        shell: bash
+        run: |
+          mkdir -p dist
+          ARCHIVE="crabdns-${{ steps.meta.outputs.tag }}-${{ matrix.platform }}.${{ matrix.ext }}"
+          BIN_PATH="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          if [ "${{ matrix.ext }}" = "tar.gz" ]; then
+            tar -C "target/${{ matrix.target }}/release" -czf "dist/${ARCHIVE}" "${{ matrix.bin }}"
+          else
+            7z a -tzip "dist/${ARCHIVE}" "${BIN_PATH}"
+          fi
+          (cd dist && sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256")
+      - name: Upload release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/*
+
+  sign-and-publish:
+    name: Sign Manifest & Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download all release archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install sigilup CLI
+        run: cargo install sigilup-cli --version 0.1.3 --locked
+      - name: Resolve version
+        id: meta
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v${TAG}" ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Sign artifacts, generate latest.hsig.json, and verify pins
+        env:
+          SIGILUP_SIGNING_KEY: ${{ secrets.SIGILUP_SIGNING_KEY }}
+          SIGILUP_SIGNING_KEY_PASSWORD: ${{ secrets.SIGILUP_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGILUP_SIGNING_KEY}" ]; then
+            echo "SIGILUP_SIGNING_KEY secret is not configured." >&2
+            exit 1
+          fi
+
+          TAG="${{ steps.meta.outputs.tag }}"
+          VER="${{ steps.meta.outputs.ver }}"
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          MIRROR_PREFIX="https://gh-proxy.com/"
+
+          ARCHIVE_FILES=()
+          for p in linux-x86_64 linux-aarch64 darwin-aarch64 windows-x86_64; do
+            for ext in tar.gz zip; do
+              f="dist/crabdns-${TAG}-${p}.${ext}"
+              if [ -f "$f" ]; then
+                ARCHIVE_FILES+=("$f")
+              fi
+            done
+          done
+
+          sigilup sign "${ARCHIVE_FILES[@]}"
+
+          python3 - "$TAG" "$BASE_URL" "$MIRROR_PREFIX" <<'PY'
+          import json, os, sys
+
+          tag, base_url, mirror_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+          assets = {}
+          for p in ("linux-x86_64", "linux-aarch64", "darwin-aarch64", "windows-x86_64"):
+              for ext in ("tar.gz", "zip"):
+                  fname = f"crabdns-{tag}-{p}.{ext}"
+                  fpath = os.path.join("dist", fname)
+                  if os.path.isfile(fpath):
+                      primary = f"{base_url}/{fname}"
+                      assets[f"{p}-portable"] = {
+                          "kind": "portable",
+                          "path": fpath,
+                          "url": primary,
+                          "fallbackUrls": [f"{mirror_prefix}{primary}"],
+                      }
+          with open("dist/assets.json", "w", encoding="utf-8") as fh:
+              json.dump(assets, fh, indent=2)
+          PY
+
+          EPOCH=$(date -u +%s)
+          sigilup manifest \
+            --version "${VER}" \
+            --epoch "${EPOCH}" \
+            --expires-in-days 180 \
+            --assets-json dist/assets.json \
+            --out-file dist/latest.hsig.json
+
+          sigilup guard \
+            --pins crates/crabdns-web/src/sigilup-pins.json \
+            --manifest dist/latest.hsig.json \
+            "${ARCHIVE_FILES[@]}"
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "CrabDNS ${{ steps.meta.outputs.tag }}"
+          draft: false
+          prerelease: ${{ contains(steps.meta.outputs.tag, 'alpha') || contains(steps.meta.outputs.tag, 'beta') || contains(steps.meta.outputs.tag, 'rc') }}
+          generate_release_notes: true
+          files: |
+            dist/crabdns-*.tar.gz
+            dist/crabdns-*.zip
+            dist/*.sha256
+            dist/*.hsig
+            dist/latest.hsig.json
