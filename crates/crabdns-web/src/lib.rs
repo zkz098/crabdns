@@ -19,6 +19,7 @@ use tokio::sync::{Semaphore, broadcast};
 use tower_http::cors::{Any, CorsLayer};
 use ts_rs::TS;
 
+pub mod acme_api;
 pub mod auth;
 pub mod backup_api;
 pub mod clients_api;
@@ -59,6 +60,7 @@ pub struct RouterState {
     pub login_limiter: Arc<auth::LoginRateLimiter>,
     pub doh_limiter: Arc<Semaphore>,
     pub updater: Arc<update_api::UpdateManager>,
+    pub acme: Arc<acme_api::AcmeManager>,
 }
 
 impl RouterState {
@@ -128,13 +130,25 @@ pub struct UpstreamProbePayload {
 pub use config_api::{ConfigResponse, ConfigUpdatePayload};
 
 pub fn build_router(state: AppState) -> Router {
-    build_router_with_updater(state, Arc::new(update_api::UpdateManager::new()))
+    build_router_with_managers(
+        state,
+        Arc::new(update_api::UpdateManager::new()),
+        Arc::new(acme_api::AcmeManager::new()),
+    )
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn build_router_with_updater(
     state: AppState,
     updater: Arc<update_api::UpdateManager>,
+) -> Router {
+    build_router_with_managers(state, updater, Arc::new(acme_api::AcmeManager::new()))
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn build_router_with_managers(
+    state: AppState,
+    updater: Arc<update_api::UpdateManager>,
+    acme: Arc<acme_api::AcmeManager>,
 ) -> Router {
     let router_state = RouterState {
         app: state,
@@ -144,6 +158,7 @@ pub fn build_router_with_updater(
         login_limiter: Arc::new(auth::LoginRateLimiter::default()),
         doh_limiter: Arc::new(Semaphore::new(DOH_MAX_INFLIGHT)),
         updater,
+        acme,
     };
 
     let protected_api = Router::new()
@@ -201,6 +216,8 @@ pub fn build_router_with_updater(
         )
         .route("/api/tls/status", get(tls_api::get_tls_status))
         .route("/api/tls/reload", post(tls_api::reload_tls))
+        .route("/api/acme/status", get(acme_api::get_acme_status))
+        .route("/api/acme/issue", post(acme_api::issue_acme_certificate))
         .route(
             "/api/setup/mobileconfig",
             get(setup_api::download_mobileconfig),
@@ -245,6 +262,10 @@ pub fn build_router_with_updater(
     Router::new()
         .route("/api/health", get(health))
         .route("/metrics", get(metrics::prometheus_metrics))
+        .route(
+            "/.well-known/acme-challenge/{token}",
+            get(acme_api::serve_http01_challenge),
+        )
         .merge(doh_routes)
         .route("/api/setup/status", get(setup_api::get_setup_status))
         .route("/api/setup/complete", post(setup_api::complete_setup))

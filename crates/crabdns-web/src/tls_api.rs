@@ -11,6 +11,7 @@ use crate::RouterState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TlsStatusResponse {
     pub https_enabled: bool,
     pub https_listen: Option<String>,
@@ -20,6 +21,10 @@ pub struct TlsStatusResponse {
     pub doq_enabled: bool,
     #[serde(default)]
     pub doq_listen: Option<String>,
+    #[serde(default)]
+    pub doh3_enabled: bool,
+    #[serde(default)]
+    pub doh3_listen: Option<String>,
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
     pub last_loaded_at: Option<DateTime<Utc>>,
@@ -49,6 +54,8 @@ pub async fn get_tls_status(State(state): State<RouterState>) -> Json<TlsStatusR
         dot_listen: cfg.listen_dot.map(|a| a.to_string()),
         doq_enabled: false,
         doq_listen: cfg.listen_doq.map(|a| a.to_string()),
+        doh3_enabled: false,
+        doh3_listen: cfg.listen_doh3.map(|a| a.to_string()),
         cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
         key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
         last_loaded_at: None,

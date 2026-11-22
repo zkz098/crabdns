@@ -28,6 +28,9 @@ pub struct ClientProtocolCounts {
     pub doq: u64,
     #[ts(type = "number")]
     pub doh: u64,
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub doh3: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -107,6 +110,7 @@ impl ClientEntry {
             QueryProtocol::Dot => self.protocols.dot = self.protocols.dot.saturating_add(1),
             QueryProtocol::Doq => self.protocols.doq = self.protocols.doq.saturating_add(1),
             QueryProtocol::Doh => self.protocols.doh = self.protocols.doh.saturating_add(1),
+            QueryProtocol::Doh3 => self.protocols.doh3 = self.protocols.doh3.saturating_add(1),
         }
         increment_bounded(&mut self.domains, &event.domain);
     }

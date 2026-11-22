@@ -19,10 +19,13 @@ chrono.workspace = true
 crabdns-core.workspace = true
 crabdns-storage.workspace = true
 dashmap.workspace = true
+instant-acme.workspace = true
 mime_guess.workspace = true
+rcgen.workspace = true
 reqwest.workspace = true
 aws-lc-rs.workspace = true
 rust-embed.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sigilup.workspace = true
@@ -30,6 +33,7 @@ tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
+x509-parser.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 jemalloc_pprof = { workspace = true, optional = true }

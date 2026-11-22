@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 use crate::clients::ip_to_ptr_domain;
 use crate::error::Result;
+use crate::neighbor::normalize_mac;
 use crate::upstream::next_tx_id;
 
 const MDNS_CACHE_CAPACITY: u64 = 4096;
@@ -67,6 +68,7 @@ pub fn resolve_dhcp_leases_path(configured: Option<&str>) -> &str {
 #[derive(Debug, Clone, Default)]
 pub struct DhcpLeaseTable {
     entries: HashMap<IpAddr, String, RandomState>,
+    mac_entries: HashMap<IpAddr, String, RandomState>,
 }
 
 impl DhcpLeaseTable {
@@ -91,6 +93,7 @@ impl DhcpLeaseTable {
 
     fn parse_dnsmasq_or_odhcpd(content: &str) -> Self {
         let mut entries = HashMap::with_hasher(RandomState::default());
+        let mut mac_entries = HashMap::with_hasher(RandomState::default());
         for raw_line in content.lines() {
             let line = raw_line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -101,9 +104,13 @@ impl DhcpLeaseTable {
             if parts.len() >= 4
                 && parts[0].parse::<u64>().is_ok()
                 && let Ok(ip) = parts[2].parse::<IpAddr>()
-                && let Some(host) = clean_hostname(parts[3])
             {
-                entries.insert(ip, host);
+                if let Some(mac) = normalize_mac(parts[1]) {
+                    mac_entries.insert(ip, mac);
+                }
+                if let Some(host) = clean_hostname(parts[3]) {
+                    entries.insert(ip, host);
+                }
                 continue;
             }
             // odhcpd / simple lease line: <ip> <hostname>
@@ -114,11 +121,15 @@ impl DhcpLeaseTable {
                 entries.insert(ip, host);
             }
         }
-        Self { entries }
+        Self {
+            entries,
+            mac_entries,
+        }
     }
 
     fn parse_isc_dhcpd(content: &str) -> Self {
         let mut entries = HashMap::with_hasher(RandomState::default());
+        let mut mac_entries = HashMap::with_hasher(RandomState::default());
         let mut block = IscLeaseBlock::default();
 
         for raw_line in content.lines() {
@@ -126,13 +137,17 @@ impl DhcpLeaseTable {
             if line.is_empty() {
                 continue;
             }
-            block.process_line(line, &mut entries);
+            block.process_line(line, &mut entries, &mut mac_entries);
         }
-        Self { entries }
+        Self {
+            entries,
+            mac_entries,
+        }
     }
 
     fn parse_kea_csv(content: &str) -> Self {
         let mut entries = HashMap::with_hasher(RandomState::default());
+        let mut mac_entries = HashMap::with_hasher(RandomState::default());
         let mut lines = content.lines().filter(|l| !l.trim().is_empty());
         let Some(header) = lines.next() else {
             return Self::default();
@@ -147,6 +162,7 @@ impl DhcpLeaseTable {
         let Some(host_idx) = cols.iter().position(|c| c == "hostname") else {
             return Self::default();
         };
+        let hwaddr_idx = cols.iter().position(|c| c == "hwaddr");
         let state_idx = cols.iter().position(|c| c == "state");
 
         for line in lines {
@@ -160,20 +176,33 @@ impl DhcpLeaseTable {
             let Some(ip_str) = fields.get(addr_idx) else {
                 continue;
             };
-            let Some(host_str) = fields.get(host_idx) else {
+            let Ok(ip) = ip_str.trim().parse::<IpAddr>() else {
                 continue;
             };
-            if let Ok(ip) = ip_str.trim().parse::<IpAddr>()
+            if let Some(hw_idx) = hwaddr_idx
+                && let Some(hw_str) = fields.get(hw_idx)
+                && let Some(mac) = normalize_mac(hw_str)
+            {
+                mac_entries.insert(ip, mac);
+            }
+            if let Some(host_str) = fields.get(host_idx)
                 && let Some(host) = clean_hostname(host_str)
             {
                 entries.insert(ip, host);
             }
         }
-        Self { entries }
+        Self {
+            entries,
+            mac_entries,
+        }
     }
 
     pub fn lookup(&self, ip: IpAddr) -> Option<&str> {
         self.entries.get(&ip).map(String::as_str)
+    }
+
+    pub fn lookup_mac(&self, ip: IpAddr) -> Option<&str> {
+        self.mac_entries.get(&ip).map(String::as_str)
     }
 
     pub fn len(&self) -> usize {
@@ -188,6 +217,7 @@ impl DhcpLeaseTable {
 struct IscLeaseBlock {
     ip: Option<IpAddr>,
     host: Option<String>,
+    mac: Option<String>,
     active: bool,
 }
 
@@ -196,6 +226,7 @@ impl Default for IscLeaseBlock {
         Self {
             ip: None,
             host: None,
+            mac: None,
             active: true,
         }
     }
@@ -205,30 +236,44 @@ impl IscLeaseBlock {
     fn reset(&mut self, ip: Option<IpAddr>) {
         self.ip = ip;
         self.host = None;
+        self.mac = None;
         self.active = true;
     }
 
-    fn commit(&mut self, entries: &mut HashMap<IpAddr, String, RandomState>) {
+    fn commit(
+        &mut self,
+        entries: &mut HashMap<IpAddr, String, RandomState>,
+        mac_entries: &mut HashMap<IpAddr, String, RandomState>,
+    ) {
         if let Some(ip) = self.ip.take() {
             if self.active {
                 if let Some(host) = self.host.take() {
                     entries.insert(ip, host);
                 }
+                if let Some(mac) = self.mac.take() {
+                    mac_entries.insert(ip, mac);
+                }
             } else {
                 entries.remove(&ip);
+                mac_entries.remove(&ip);
             }
         }
         self.reset(None);
     }
 
-    fn process_line(&mut self, line: &str, entries: &mut HashMap<IpAddr, String, RandomState>) {
+    fn process_line(
+        &mut self,
+        line: &str,
+        entries: &mut HashMap<IpAddr, String, RandomState>,
+        mac_entries: &mut HashMap<IpAddr, String, RandomState>,
+    ) {
         if let Some(rest) = line.strip_prefix("lease ") {
             let ip_token = rest.split([' ', '{']).next().unwrap_or("").trim();
             self.reset(ip_token.parse::<IpAddr>().ok());
             return;
         }
         if line.starts_with('}') {
-            self.commit(entries);
+            self.commit(entries, mac_entries);
             return;
         }
         if self.ip.is_none() {
@@ -240,6 +285,16 @@ impl IscLeaseBlock {
         {
             let state = state_rest.trim_end_matches(';').trim();
             self.active = state.eq_ignore_ascii_case("active");
+            return;
+        }
+        if let Some(hw_rest) = line
+            .strip_prefix("hardware ethernet ")
+            .or_else(|| line.strip_prefix("HARDWARE ETHERNET "))
+        {
+            let mac_token = hw_rest.trim_end_matches(';').trim();
+            if let Some(mac) = normalize_mac(mac_token) {
+                self.mac = Some(mac);
+            }
             return;
         }
         if let Some(val) = line

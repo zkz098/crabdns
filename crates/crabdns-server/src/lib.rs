@@ -8,12 +8,15 @@ use crabdns_core::{
     Config, DdrConfig, DnsCache, DnsPipeline, FilterEngine, QueryEvent, UpstreamPool,
 };
 use crabdns_storage::{StorageEngine, spawn_log_sink};
+use crabdns_web::acme_api::AcmeManager;
 use crabdns_web::tls_api::TlsReloader;
-use crabdns_web::{AppState, build_router};
+use crabdns_web::update_api::UpdateManager;
+use crabdns_web::{AppState, build_router_with_managers};
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+mod doh3;
 mod doq;
 mod dot;
 mod listeners;
@@ -37,6 +40,7 @@ pub struct RunningServer {
     pub web_tls_addr: Option<SocketAddr>,
     pub dot_addr: Option<SocketAddr>,
     pub doq_addr: Option<SocketAddr>,
+    pub doh3_addr: Option<SocketAddr>,
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
     config: Arc<ArcSwap<Config>>,
@@ -45,16 +49,20 @@ pub struct RunningServer {
     tcp_task: JoinHandle<()>,
     dot_task: Option<JoinHandle<()>>,
     doq_task: Option<JoinHandle<()>>,
+    doh3_task: Option<JoinHandle<()>>,
     web_task: JoinHandle<()>,
     web_tls_accept_task: Option<JoinHandle<()>>,
     web_tls_task: Option<JoinHandle<()>>,
     sub_refresh_task: JoinHandle<()>,
     hosts_watch_task: JoinHandle<()>,
     dhcp_watch_task: JoinHandle<()>,
+    neighbor_watch_task: JoinHandle<()>,
     mdns_watch_task: JoinHandle<()>,
     cache_persist_task: JoinHandle<()>,
     log_prune_task: JoinHandle<()>,
     tls_watch_task: Option<JoinHandle<()>>,
+    acme_renew_task: JoinHandle<()>,
+    acme_http_task: Option<JoinHandle<()>>,
     sighup_task: Option<JoinHandle<()>>,
     sink_handle: JoinHandle<()>,
 }
@@ -69,16 +77,20 @@ impl RunningServer {
         join_with_timeout(self.tcp_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_opt_with_timeout(self.dot_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_opt_with_timeout(self.doq_task, SHUTDOWN_JOIN_TIMEOUT).await;
+        join_opt_with_timeout(self.doh3_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_with_timeout(self.web_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_opt_with_timeout(self.web_tls_accept_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_opt_with_timeout(self.web_tls_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_with_timeout(self.sub_refresh_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.hosts_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.dhcp_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.neighbor_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.mdns_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.cache_persist_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.log_prune_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_opt_with_timeout(self.tls_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.acme_renew_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_opt_with_timeout(self.acme_http_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_opt_with_timeout(self.sighup_task, GRACEFUL_DRAIN_TIMEOUT).await;
 
         if self.config.load().cache_persist_enabled {
@@ -194,6 +206,13 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.rrl_responses_per_second = saved_cfg.rrl_responses_per_second;
     config.rrl_slip = saved_cfg.rrl_slip;
     config.rrl_window_secs = saved_cfg.rrl_window_secs;
+    config.acme_enabled = saved_cfg.acme_enabled;
+    config.acme_domains = saved_cfg.acme_domains;
+    config.acme_email = saved_cfg.acme_email;
+    config.acme_directory_url = saved_cfg.acme_directory_url;
+    config.acme_challenge_type = saved_cfg.acme_challenge_type;
+    config.acme_http_listen = saved_cfg.acme_http_listen;
+    config.acme_renew_before_days = saved_cfg.acme_renew_before_days;
     if saved_cfg.tls_cert_path.is_some() {
         config.tls_cert_path = saved_cfg.tls_cert_path;
     }
@@ -335,6 +354,8 @@ struct WebAndTlsHandles {
     dot_task: Option<JoinHandle<()>>,
     doq_addr: Option<SocketAddr>,
     doq_task: Option<JoinHandle<()>>,
+    doh3_addr: Option<SocketAddr>,
+    doh3_task: Option<JoinHandle<()>>,
     web_addr: SocketAddr,
     web_task: JoinHandle<()>,
     web_tls_addr: Option<SocketAddr>,
@@ -399,12 +420,13 @@ fn start_doq_listener(
     Ok((Some(bound), Some(task)))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn start_web_and_tls(
     config: &Arc<ArcSwap<Config>>,
     pipeline: &Arc<DnsPipeline>,
     storage: &Arc<StorageEngine>,
     tls_manager: &Arc<tls::TlsManager>,
+    acme_manager: &Arc<AcmeManager>,
     live_tx: broadcast::Sender<QueryEvent>,
     tcp_max_connections: usize,
     tcp_idle_timeout: Duration,
@@ -431,6 +453,17 @@ async fn start_web_and_tls(
         shutdown_rx,
     )?;
 
+    let (doh3_addr, doh3_ep, doh3_task) = doh3::start_doh3_listener(
+        config,
+        pipeline,
+        tcp_max_connections,
+        tcp_idle_timeout,
+        shutdown_rx,
+    )?;
+    if let Some(ep) = doh3_ep {
+        tls_manager.set_doh3_endpoint(Some(ep));
+    }
+
     let web_listener = TcpListener::bind(current_cfg.listen_web).await?;
     let web_addr = web_listener.local_addr()?;
 
@@ -439,7 +472,7 @@ async fn start_web_and_tls(
         None => None,
     };
     let bound_web_tls = web_tls_listener.as_ref().and_then(|l| l.local_addr().ok());
-    tls_manager.update_bound_addrs(bound_web_tls, dot_addr, quic_addr);
+    tls_manager.update_bound_addrs(bound_web_tls, dot_addr, quic_addr, doh3_addr);
 
     pipeline.reload_ddr(DdrConfig {
         enabled: current_cfg.ddr_enabled,
@@ -451,13 +484,17 @@ async fn start_web_and_tls(
     });
 
     let tls_reloader: Option<Arc<dyn TlsReloader>> = Some(Arc::clone(tls_manager) as _);
-    let app = build_router(AppState {
-        config: Arc::clone(config),
-        pipeline: Arc::clone(pipeline),
-        storage: Arc::clone(storage),
-        live_tx,
-        tls_reloader,
-    });
+    let app = build_router_with_managers(
+        AppState {
+            config: Arc::clone(config),
+            pipeline: Arc::clone(pipeline),
+            storage: Arc::clone(storage),
+            live_tx,
+            tls_reloader,
+        },
+        Arc::new(UpdateManager::new()),
+        Arc::clone(acme_manager),
+    );
 
     let web_max_connections = tcp_max_connections.max(WEB_MAX_CONNECTIONS);
     let (web_tls_addr, web_tls_accept_task, web_tls_task) =
@@ -511,6 +548,8 @@ async fn start_web_and_tls(
         dot_task,
         doq_addr: quic_addr,
         doq_task: quic_task,
+        doh3_addr,
+        doh3_task,
         web_addr,
         web_task,
         web_tls_addr,
@@ -523,6 +562,7 @@ struct BackgroundTasks {
     sub_refresh: JoinHandle<()>,
     hosts_watch: JoinHandle<()>,
     dhcp_watch: JoinHandle<()>,
+    neighbor_watch: JoinHandle<()>,
     mdns_watch: JoinHandle<()>,
     cache_persist: JoinHandle<()>,
     log_prune: JoinHandle<()>,
@@ -563,6 +603,10 @@ fn spawn_background_tasks(
             Arc::clone(&pipeline),
             shutdown_rx.clone(),
         ),
+        neighbor_watch: tasks::spawn_neighbor_watch_task(
+            Arc::clone(&pipeline),
+            shutdown_rx.clone(),
+        ),
         mdns_watch: tasks::spawn_mdns_listener_task(
             Arc::clone(&config),
             Arc::clone(&pipeline),
@@ -586,6 +630,14 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         merge_saved_config(&mut config, saved_cfg);
     }
 
+    if config.acme_enabled && (config.tls_cert_path.is_none() || config.tls_key_path.is_none()) {
+        let (acme_cert, acme_key, _) = AcmeManager::acme_paths(&config.data_dir);
+        if acme_cert.is_file() && acme_key.is_file() {
+            config.tls_cert_path = Some(acme_cert);
+            config.tls_key_path = Some(acme_key);
+        }
+    }
+
     let config = Arc::new(ArcSwap::from_pointee(config));
     let current_cfg = config.load_full();
 
@@ -600,6 +652,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         current_cfg.listen_web_tls,
         current_cfg.listen_dot,
         current_cfg.listen_doq,
+        current_cfg.listen_doh3,
         tcp_idle_timeout,
         current_cfg.tls_cert_path.as_deref(),
         current_cfg.tls_key_path.as_deref(),
@@ -614,17 +667,32 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    let acme_manager = Arc::new(AcmeManager::new());
     let web_tls = start_web_and_tls(
         &config,
         &pipeline,
         &storage,
         &tls_manager,
+        &acme_manager,
         live_tx,
         tcp_max_connections,
         tcp_idle_timeout,
         &shutdown_rx,
     )
     .await?;
+    let acme_http_task = tasks::start_acme_http_listener(
+        current_cfg.acme_http_listen,
+        acme_manager.http_challenges.clone(),
+        shutdown_rx.clone(),
+    )
+    .await?;
+    let acme_renew_task = tasks::spawn_acme_renew_task(
+        Arc::clone(&config),
+        Arc::clone(&pipeline),
+        Arc::clone(&tls_manager),
+        Arc::clone(&acme_manager),
+        shutdown_rx.clone(),
+    );
 
     tracing::info!(
         dns = %dns_addr,
@@ -654,8 +722,10 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         shutdown_rx.clone(),
     ));
 
-    let tls_active =
-        web_tls.dot_addr.is_some() || web_tls.doq_addr.is_some() || web_tls.web_tls_addr.is_some();
+    let tls_active = web_tls.dot_addr.is_some()
+        || web_tls.doq_addr.is_some()
+        || web_tls.doh3_addr.is_some()
+        || web_tls.web_tls_addr.is_some();
     let bg = spawn_background_tasks(
         Arc::clone(&config),
         Arc::clone(&pipeline),
@@ -671,6 +741,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         web_tls_addr: web_tls.web_tls_addr,
         dot_addr: web_tls.dot_addr,
         doq_addr: web_tls.doq_addr,
+        doh3_addr: web_tls.doh3_addr,
         pipeline,
         storage,
         config,
@@ -679,16 +750,20 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         tcp_task,
         dot_task: web_tls.dot_task,
         doq_task: web_tls.doq_task,
+        doh3_task: web_tls.doh3_task,
         web_task: web_tls.web_task,
         web_tls_accept_task: web_tls.web_tls_accept_task,
         web_tls_task: web_tls.web_tls_task,
         sub_refresh_task: bg.sub_refresh,
         hosts_watch_task: bg.hosts_watch,
         dhcp_watch_task: bg.dhcp_watch,
+        neighbor_watch_task: bg.neighbor_watch,
         mdns_watch_task: bg.mdns_watch,
         cache_persist_task: bg.cache_persist,
         log_prune_task: bg.log_prune,
         tls_watch_task: bg.tls_watch,
+        acme_renew_task,
+        acme_http_task,
         sighup_task: bg.sighup,
         sink_handle,
     })

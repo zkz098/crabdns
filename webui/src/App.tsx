@@ -11,6 +11,8 @@ import { SettingsView } from "./components/SettingsView";
 import { SetupWizardView } from "./components/SetupWizardView";
 import type { TabKey } from "./components/types";
 import { t } from "./i18n";
+import type { AcmeChallengeType } from "./types/AcmeChallengeType";
+import type { AcmeStatusResponse } from "./types/AcmeStatusResponse";
 import type { AuthStatusResponse } from "./types/AuthStatusResponse";
 import type { BlockMode } from "./types/BlockMode";
 import type { BlockingStatusResponse } from "./types/BlockingStatusResponse";
@@ -126,6 +128,19 @@ export default function App() {
   const [reloadingTls, setReloadingTls] = createSignal(false);
   const [tlsMessage, setTlsMessage] = createSignal("");
   const [tlsIsError, setTlsIsError] = createSignal(false);
+  const [acmeEnabled, setAcmeEnabled] = createSignal(false);
+  const [acmeDomainsText, setAcmeDomainsText] = createSignal("");
+  const [acmeEmail, setAcmeEmail] = createSignal("");
+  const [acmeDirectoryUrl, setAcmeDirectoryUrl] = createSignal(
+    "https://acme-v02.api.letsencrypt.org/directory",
+  );
+  const [acmeChallengeType, setAcmeChallengeType] = createSignal<AcmeChallengeType>("http01");
+  const [acmeHttpListen, setAcmeHttpListen] = createSignal("");
+  const [acmeRenewBeforeDays, setAcmeRenewBeforeDays] = createSignal(30);
+  const [acmeStatus, setAcmeStatus] = createSignal<AcmeStatusResponse | null>(null);
+  const [issuingAcme, setIssuingAcme] = createSignal(false);
+  const [acmeMessage, setAcmeMessage] = createSignal("");
+  const [acmeIsError, setAcmeIsError] = createSignal(false);
   const [clientsOverview, setClientsOverview] = createSignal<ClientsOverviewResponse | null>(null);
   const [clientsMessage, setClientsMessage] = createSignal("");
   const [clientsIsError, setClientsIsError] = createSignal(false);
@@ -317,6 +332,7 @@ export default function App() {
           fetchClients(),
           fetchUpstreamHealth(),
           fetchTlsStatus(),
+          fetchAcmeStatus(),
         ]);
         setBackupMessage(t("backupRestoredMsg"));
         setTimeout(() => setBackupMessage(""), 3500);
@@ -580,6 +596,15 @@ export default function App() {
     setTrustedProxiesText((data.trusted_proxies ?? []).join("\n"));
     setTlsCertPath(data.tls_cert_path ?? "");
     setTlsKeyPath(data.tls_key_path ?? "");
+    setAcmeEnabled(data.acme_enabled ?? false);
+    setAcmeDomainsText((data.acme_domains ?? []).join("\n"));
+    setAcmeEmail(data.acme_email ?? "");
+    setAcmeDirectoryUrl(
+      data.acme_directory_url || "https://acme-v02.api.letsencrypt.org/directory",
+    );
+    setAcmeChallengeType(data.acme_challenge_type ?? "http01");
+    setAcmeHttpListen(data.acme_http_listen ?? "");
+    setAcmeRenewBeforeDays(data.acme_renew_before_days ?? 30);
     setRdnsEnabled(data.rdns_enabled);
     setSafesearch(
       data.safesearch ?? {
@@ -754,6 +779,38 @@ export default function App() {
       if (res.ok) setTlsStatus(await res.json());
     } catch {
       // ignore
+    }
+  }
+
+  async function fetchAcmeStatus() {
+    try {
+      const res = await fetch("/api/acme/status");
+      if (res.ok) setAcmeStatus(await res.json());
+    } catch {
+      // ignore
+    }
+  }
+
+  async function issueAcmeCertificate() {
+    setIssuingAcme(true);
+    setAcmeIsError(false);
+    setAcmeMessage("");
+    try {
+      const res = await fetch("/api/acme/issue", { method: "POST" });
+      if (res.ok) {
+        setAcmeStatus(await res.json());
+        setAcmeMessage(t("settingsAcmeIssuedOk"));
+        await Promise.all([fetchTlsStatus(), fetchConfig()]);
+      } else {
+        setAcmeIsError(true);
+        const errBody = await res.json().catch(() => null);
+        setAcmeMessage(errBody?.error ?? t("rulesFailed"));
+      }
+    } catch {
+      setAcmeIsError(true);
+      setAcmeMessage(t("rulesNetworkError"));
+    } finally {
+      setIssuingAcme(false);
     }
   }
 
@@ -976,6 +1033,7 @@ export default function App() {
           fetchUpstreamHealth(),
           fetchClients(),
           fetchTlsStatus(),
+          fetchAcmeStatus(),
         ]);
         return null;
       }
@@ -1131,6 +1189,16 @@ export default function App() {
       rrl_responses_per_second: null,
       rrl_slip: null,
       rrl_window_secs: null,
+      acme_enabled: acmeEnabled(),
+      acme_domains: acmeDomainsText()
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+      acme_email: acmeEmail().trim(),
+      acme_directory_url: acmeDirectoryUrl().trim(),
+      acme_challenge_type: acmeChallengeType(),
+      acme_http_listen: acmeHttpListen().trim(),
+      acme_renew_before_days: acmeRenewBeforeDays(),
     };
 
     try {
@@ -1144,7 +1212,7 @@ export default function App() {
         applyConfigToForm(updated);
         setConfigIsError(false);
         setConfigMessage(t("settingsSaved"));
-        await Promise.all([fetchStats(), fetchTlsStatus()]);
+        await Promise.all([fetchStats(), fetchTlsStatus(), fetchAcmeStatus()]);
       } else {
         setConfigIsError(true);
         const errBody = await res.json().catch(() => null);
@@ -1462,6 +1530,25 @@ export default function App() {
                 tlsMessage={tlsMessage()}
                 tlsIsError={tlsIsError()}
                 onReloadTls={() => void reloadTls()}
+                acmeEnabled={acmeEnabled()}
+                onAcmeEnabledChange={setAcmeEnabled}
+                acmeDomainsText={acmeDomainsText()}
+                onAcmeDomainsChange={setAcmeDomainsText}
+                acmeEmail={acmeEmail()}
+                onAcmeEmailChange={setAcmeEmail}
+                acmeDirectoryUrl={acmeDirectoryUrl()}
+                onAcmeDirectoryUrlChange={setAcmeDirectoryUrl}
+                acmeChallengeType={acmeChallengeType()}
+                onAcmeChallengeTypeChange={setAcmeChallengeType}
+                acmeHttpListen={acmeHttpListen()}
+                onAcmeHttpListenChange={setAcmeHttpListen}
+                acmeRenewBeforeDays={acmeRenewBeforeDays()}
+                onAcmeRenewBeforeDaysChange={setAcmeRenewBeforeDays}
+                acmeStatus={acmeStatus()}
+                issuingAcme={issuingAcme()}
+                acmeMessage={acmeMessage()}
+                acmeIsError={acmeIsError()}
+                onIssueAcme={() => void issueAcmeCertificate()}
                 configMessage={configMessage()}
                 configIsError={configIsError()}
                 onSave={saveConfig}

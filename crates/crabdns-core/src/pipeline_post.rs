@@ -1,7 +1,10 @@
+use std::net::IpAddr;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
-use hickory_proto::rr::RecordType;
+use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::rr::rdata::TXT;
+use hickory_proto::rr::{RData, Record, RecordType};
 
 use crate::clients::ResolvedClientPolicy;
 use crate::cookies::CookieCheck;
@@ -26,6 +29,87 @@ use crate::wire::{
 };
 
 impl DnsPipeline {
+    pub fn resolve_client_mac(&self, ip: IpAddr) -> Option<String> {
+        if let Some(mac) = self.neighbor_table.load().lookup(ip) {
+            return Some(mac.to_string());
+        }
+        if self.dhcp_leases_enabled.load(Ordering::Relaxed)
+            && let Some(mac) = self.dhcp_leases.load().lookup_mac(ip)
+        {
+            return Some(mac.to_string());
+        }
+        None
+    }
+
+    pub(crate) fn match_client_policy(
+        &self,
+        ip: IpAddr,
+        client_id: Option<&str>,
+    ) -> Option<Arc<ResolvedClientPolicy>> {
+        let registry = self.clients.load();
+        let mac = if registry.has_mac_rules() {
+            self.resolve_client_mac(ip)
+        } else {
+            None
+        };
+        registry.match_client_with_mac(ip, client_id, mac.as_deref())
+    }
+
+    pub fn set_acme_dns_challenge(&self, fqdn: &str, value: String) {
+        let key = fqdn.trim().trim_end_matches('.').to_ascii_lowercase();
+        let mut entry = self.acme_dns_challenges.entry(key).or_default();
+        if !entry.contains(&value) {
+            entry.push(value);
+        }
+    }
+
+    pub fn clear_acme_dns_challenges(&self) {
+        self.acme_dns_challenges.clear();
+    }
+
+    pub(crate) fn check_acme_dns_challenge(
+        &self,
+        request: &Message,
+        meta: &LogMeta,
+    ) -> Result<Option<Vec<u8>>> {
+        if meta.qtype != RecordType::TXT || self.acme_dns_challenges.is_empty() {
+            return Ok(None);
+        }
+        let key = meta.domain.trim_end_matches('.').to_ascii_lowercase();
+        let Some(values) = self.acme_dns_challenges.get(&key) else {
+            return Ok(None);
+        };
+        let Some(question) = request.queries.first() else {
+            return Ok(None);
+        };
+        let mut resp = Message::new(request.id, MessageType::Response, OpCode::Query);
+        resp.metadata.recursion_desired = request.recursion_desired;
+        resp.metadata.recursion_available = true;
+        resp.metadata.authoritative = true;
+        resp.metadata.response_code = ResponseCode::NoError;
+        resp.add_query(question.clone());
+        for val in values.iter() {
+            resp.add_answer(Record::from_rdata(
+                question.name().clone(),
+                60,
+                RData::TXT(TXT::new(vec![val.clone()])),
+            ));
+        }
+        let wire = resp
+            .to_vec()
+            .map_err(|e| crate::error::CoreError::Protocol(e.to_string()))?;
+        self.emit_log(
+            meta,
+            QueryOutcome::Rewritten,
+            Some("acme:dns-01".to_string()),
+            Some("acme".to_string()),
+            None,
+            "NOERROR",
+            extract_answer_summaries(&wire),
+        );
+        Ok(Some(wire))
+    }
+
     pub(crate) fn check_safesearch_interceptor(
         &self,
         request: &Message,

@@ -38,6 +38,7 @@ const PROTOCOL_OPTIONS: SelectOption[] = [
   { value: "tcp", label: () => "TCP" },
   { value: "dot", label: () => "DoT" },
   { value: "doq", label: () => "DoQ" },
+  { value: "doh3", label: () => "DoH3" },
   { value: "doh", label: () => "DoH" },
 ];
 

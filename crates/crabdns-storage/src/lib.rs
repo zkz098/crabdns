@@ -751,6 +751,7 @@ fn protocol_label(protocol: QueryProtocol) -> &'static str {
         QueryProtocol::Dot => "dot",
         QueryProtocol::Doq => "doq",
         QueryProtocol::Doh => "doh",
+        QueryProtocol::Doh3 => "doh3",
     }
 }
 

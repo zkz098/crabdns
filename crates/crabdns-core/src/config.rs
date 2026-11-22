@@ -27,6 +27,15 @@ pub enum UpstreamStrategy {
     LeastLatency,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum AcmeChallengeType {
+    #[default]
+    Http01,
+    Dns01Local,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SplitDnsRule {
@@ -95,6 +104,8 @@ pub struct Config {
     pub listen_dot: Option<SocketAddr>,
     #[serde(default)]
     pub listen_doq: Option<SocketAddr>,
+    #[serde(default)]
+    pub listen_doh3: Option<SocketAddr>,
     #[serde(default)]
     pub sni_client_id_hostnames: Vec<String>,
     #[serde(default)]
@@ -169,6 +180,20 @@ pub struct Config {
     pub rrl_slip: u32,
     #[serde(default = "default_rrl_window_secs")]
     pub rrl_window_secs: u64,
+    #[serde(default)]
+    pub acme_enabled: bool,
+    #[serde(default)]
+    pub acme_domains: Vec<String>,
+    #[serde(default)]
+    pub acme_email: Option<String>,
+    #[serde(default = "default_acme_directory_url")]
+    pub acme_directory_url: String,
+    #[serde(default)]
+    pub acme_challenge_type: AcmeChallengeType,
+    #[serde(default)]
+    pub acme_http_listen: Option<SocketAddr>,
+    #[serde(default = "default_acme_renew_before_days")]
+    pub acme_renew_before_days: u32,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -254,6 +279,14 @@ fn default_rrl_window_secs() -> u64 {
     15
 }
 
+fn default_acme_directory_url() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+
+fn default_acme_renew_before_days() -> u32 {
+    30
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -286,6 +319,7 @@ impl Default for Config {
             doh_enabled: true,
             listen_dot: None,
             listen_doq: None,
+            listen_doh3: None,
             sni_client_id_hostnames: Vec::new(),
             tls_cert_path: None,
             tls_key_path: None,
@@ -323,6 +357,13 @@ impl Default for Config {
             rrl_responses_per_second: default_rrl_responses_per_second(),
             rrl_slip: default_rrl_slip(),
             rrl_window_secs: default_rrl_window_secs(),
+            acme_enabled: false,
+            acme_domains: Vec::new(),
+            acme_email: None,
+            acme_directory_url: default_acme_directory_url(),
+            acme_challenge_type: AcmeChallengeType::default(),
+            acme_http_listen: None,
+            acme_renew_before_days: default_acme_renew_before_days(),
         }
     }
 }

@@ -450,3 +450,21 @@ async fn test_safesearch_dns64_and_svcb_sanitization_pipeline() {
     assert_eq!(https.0.svc_params.len(), 1);
     assert_eq!(https.0.svc_params[0].0, SvcParamKey::Alpn);
 }
+
+#[tokio::test]
+async fn test_acme_dns01_local_challenge_response() {
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, false));
+    let pool = Arc::new(UpstreamPool::new(&["udp://127.0.0.1:9".to_string()], 500).unwrap());
+    let pipeline = DnsPipeline::new(filter, cache, pool, None);
+
+    pipeline.set_acme_dns_challenge("_acme-challenge.dns.example.com", "token-123".to_string());
+    let q = build_query(201, "_acme-challenge.dns.example.com.", RecordType::TXT);
+    let client = SocketAddr::new("127.0.0.1".parse().unwrap(), 12345);
+    let resp = Message::from_vec(&pipeline.handle_packet(&q, client).await.unwrap()).unwrap();
+    assert_eq!(resp.response_code, ResponseCode::NoError);
+    assert_eq!(resp.answers.len(), 1);
+    assert!(resp.answers[0].data.to_string().contains("token-123"));
+
+    pipeline.clear_acme_dns_challenges();
+}

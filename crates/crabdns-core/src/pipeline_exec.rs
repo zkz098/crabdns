@@ -223,10 +223,7 @@ impl DnsPipeline {
         qtype: RecordType,
         start: Instant,
     ) -> (Option<Arc<ResolvedClientPolicy>>, LogMeta) {
-        let policy = self
-            .clients
-            .load()
-            .match_client(ctx.client_addr.ip(), ctx.client_id.as_deref());
+        let policy = self.match_client_policy(ctx.client_addr.ip(), ctx.client_id.as_deref());
         let client_name = match &policy {
             Some(p) => Some(p.client_name.clone()),
             None => {
@@ -333,6 +330,10 @@ impl DnsPipeline {
                 "NOERROR",
                 extract_answer_summaries(&resp),
             );
+            return Ok(Some(resp));
+        }
+
+        if let Some(resp) = self.check_acme_dns_challenge(request, meta)? {
             return Ok(Some(resp));
         }
 

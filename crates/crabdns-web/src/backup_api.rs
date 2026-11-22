@@ -143,6 +143,13 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         rrl_responses_per_second: Some(cfg.rrl_responses_per_second),
         rrl_slip: Some(cfg.rrl_slip),
         rrl_window_secs: Some(cfg.rrl_window_secs),
+        acme_enabled: Some(cfg.acme_enabled),
+        acme_domains: Some(cfg.acme_domains.clone()),
+        acme_email: cfg.acme_email.clone(),
+        acme_directory_url: Some(cfg.acme_directory_url.clone()),
+        acme_challenge_type: Some(cfg.acme_challenge_type),
+        acme_http_listen: cfg.acme_http_listen.map(|a| a.to_string()),
+        acme_renew_before_days: Some(cfg.acme_renew_before_days),
     }
 }
 

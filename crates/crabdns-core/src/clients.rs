@@ -20,6 +20,7 @@ use crate::config::{BlockMode, UpstreamStrategy};
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision, FilterEngine};
 use crate::filter_rules::FilterQueryContext;
+use crate::neighbor::normalize_mac;
 use crate::upstream::{UpstreamPool, next_tx_id};
 
 const RDNS_CACHE_CAPACITY: u64 = 4096;
@@ -84,6 +85,7 @@ pub struct ClientProfile {
 pub enum ParsedClientIdentifier {
     Ip(IpAddr),
     Cidr(IpNet, u8),
+    Mac(String),
     ClientId(String),
 }
 
@@ -123,6 +125,9 @@ pub fn validate_client_identifier(raw: &str) -> Result<ParsedClientIdentifier> {
     if let Ok(ip) = trimmed.parse::<IpAddr>() {
         return Ok(ParsedClientIdentifier::Ip(ip));
     }
+    if let Some(mac) = normalize_mac(trimmed) {
+        return Ok(ParsedClientIdentifier::Mac(mac));
+    }
     Ok(ParsedClientIdentifier::ClientId(validate_client_id(
         trimmed,
     )?))
@@ -156,6 +161,7 @@ type FastMap<K, V> = HashMap<K, V, RandomState>;
 pub struct ClientRegistry {
     client_id_map: FastMap<String, Arc<ResolvedClientPolicy>>,
     ip_map: FastMap<IpAddr, Arc<ResolvedClientPolicy>>,
+    mac_map: FastMap<String, Arc<ResolvedClientPolicy>>,
     cidr_rules: Vec<(IpNet, u8, Arc<ResolvedClientPolicy>)>,
 }
 
@@ -225,6 +231,9 @@ impl ClientRegistry {
                     ParsedClientIdentifier::Ip(ip) => {
                         registry.ip_map.insert(ip, Arc::clone(&policy));
                     }
+                    ParsedClientIdentifier::Mac(mac) => {
+                        registry.mac_map.insert(mac, Arc::clone(&policy));
+                    }
                     ParsedClientIdentifier::Cidr(net, prefix) => {
                         registry.cidr_rules.push((net, prefix, Arc::clone(&policy)));
                     }
@@ -243,10 +252,23 @@ impl ClientRegistry {
         self.client_id_map.get(&norm).map(Arc::clone)
     }
 
+    pub fn has_mac_rules(&self) -> bool {
+        !self.mac_map.is_empty()
+    }
+
     pub fn match_client(
         &self,
         ip: IpAddr,
         client_id: Option<&str>,
+    ) -> Option<Arc<ResolvedClientPolicy>> {
+        self.match_client_with_mac(ip, client_id, None)
+    }
+
+    pub fn match_client_with_mac(
+        &self,
+        ip: IpAddr,
+        client_id: Option<&str>,
+        mac: Option<&str>,
     ) -> Option<Arc<ResolvedClientPolicy>> {
         if let Some(cid) = client_id
             && let Some(policy) = self.match_client_id(cid)
@@ -255,6 +277,16 @@ impl ClientRegistry {
         }
         if let Some(policy) = self.ip_map.get(&ip) {
             return Some(Arc::clone(policy));
+        }
+        if let Some(raw_mac) = mac {
+            if let Some(policy) = self.mac_map.get(raw_mac) {
+                return Some(Arc::clone(policy));
+            }
+            if let Some(norm_mac) = normalize_mac(raw_mac)
+                && let Some(policy) = self.mac_map.get(&norm_mac)
+            {
+                return Some(Arc::clone(policy));
+            }
         }
         for (net, _, policy) in &self.cidr_rules {
             if net.contains(ip) {
@@ -604,5 +636,60 @@ mod tests {
         let d3 = ClientRegistry::evaluate_domain(Some(&by_cidr), &global, "ads.example.com");
         assert_eq!(d3.action, FilterAction::Allow);
         assert_eq!(d3.matched_list.as_deref(), Some("group:Kids"));
+    }
+
+    #[test]
+    fn test_mac_client_matching_and_precedence() {
+        let clients = vec![
+            ClientProfile {
+                id: "mac-phone".to_string(),
+                name: "Phone by MAC".to_string(),
+                identifiers: vec!["AA-BB-CC-11-22-33".to_string()],
+                group_id: None,
+                blocking_enabled: Some(false),
+                use_global_rules: None,
+                custom_rules: String::new(),
+                upstreams: Vec::new(),
+                block_mode: None,
+                safesearch_enabled: None,
+                tags: Vec::new(),
+            },
+            ClientProfile {
+                id: "lan-cidr".to_string(),
+                name: "LAN CIDR".to_string(),
+                identifiers: vec!["192.168.50.0/24".to_string()],
+                group_id: None,
+                blocking_enabled: Some(true),
+                use_global_rules: None,
+                custom_rules: String::new(),
+                upstreams: Vec::new(),
+                block_mode: None,
+                safesearch_enabled: None,
+                tags: Vec::new(),
+            },
+        ];
+
+        let registry =
+            ClientRegistry::compile(&clients, &[], 1000, UpstreamStrategy::Failover, &[]).unwrap();
+        assert!(registry.has_mac_rules());
+
+        let by_mac = registry
+            .match_client_with_mac(
+                "192.168.50.99".parse().unwrap(),
+                None,
+                Some("aa:bb:cc:11:22:33"),
+            )
+            .unwrap();
+        assert_eq!(by_mac.profile_id, "mac-phone");
+        assert!(!by_mac.blocking_enabled);
+
+        let fallback_cidr = registry
+            .match_client_with_mac(
+                "192.168.50.99".parse().unwrap(),
+                None,
+                Some("00:11:22:33:44:55"),
+            )
+            .unwrap();
+        assert_eq!(fallback_cidr.profile_id, "lan-cidr");
     }
 }

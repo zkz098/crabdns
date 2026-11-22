@@ -46,6 +46,9 @@ struct Cli {
     #[arg(long)]
     doq_listen: Option<SocketAddr>,
 
+    #[arg(long)]
+    doh3_listen: Option<SocketAddr>,
+
     /// Check for a newer signed `CrabDNS` release via sigilup and exit
     #[arg(long)]
     check_update: bool,
@@ -119,6 +122,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(addr) = cli.doq_listen {
         config.listen_doq = Some(addr);
+    }
+    if let Some(addr) = cli.doh3_listen {
+        config.listen_doh3 = Some(addr);
     }
 
     let server = spawn_server(config).await?;

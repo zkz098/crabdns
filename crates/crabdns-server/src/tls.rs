@@ -23,6 +23,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
+use crate::doh3::build_doh3_server_config;
 use crate::doq::build_doq_server_config;
 use crate::{IpConnGuard, IpConnLimiter};
 
@@ -69,6 +70,7 @@ pub struct TlsManager {
     dot_acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
     https_acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
     doq_endpoint: Mutex<Option<quinn::Endpoint>>,
+    doh3_endpoint: Mutex<Option<quinn::Endpoint>>,
     doq_idle_timeout: Duration,
     cert_path: ArcSwap<Option<PathBuf>>,
     key_path: ArcSwap<Option<PathBuf>>,
@@ -81,11 +83,15 @@ impl TlsManager {
         https_listen: Option<SocketAddr>,
         dot_listen: Option<SocketAddr>,
         quic_listen: Option<SocketAddr>,
+        doh3_listen: Option<SocketAddr>,
         doq_idle_timeout: Duration,
         cert_path: Option<&Path>,
         key_path: Option<&Path>,
     ) -> anyhow::Result<Self> {
-        let active = https_listen.is_some() || dot_listen.is_some() || quic_listen.is_some();
+        let active = https_listen.is_some()
+            || dot_listen.is_some()
+            || quic_listen.is_some()
+            || doh3_listen.is_some();
         if !active {
             let status = TlsStatusResponse {
                 https_enabled: false,
@@ -94,6 +100,8 @@ impl TlsManager {
                 dot_listen: None,
                 doq_enabled: false,
                 doq_listen: None,
+                doh3_enabled: false,
+                doh3_listen: None,
                 cert_path: cert_path.map(|p| p.display().to_string()),
                 key_path: key_path.map(|p| p.display().to_string()),
                 last_loaded_at: None,
@@ -105,6 +113,7 @@ impl TlsManager {
                 dot_acceptor: None,
                 https_acceptor: None,
                 doq_endpoint: Mutex::new(None),
+                doh3_endpoint: Mutex::new(None),
                 doq_idle_timeout,
                 cert_path: ArcSwap::from_pointee(cert_path.map(Path::to_path_buf)),
                 key_path: ArcSwap::from_pointee(key_path.map(Path::to_path_buf)),
@@ -145,7 +154,7 @@ impl TlsManager {
             None
         };
 
-        if quic_listen.is_some() && fingerprint.is_none() {
+        if (quic_listen.is_some() || doh3_listen.is_some()) && fingerprint.is_none() {
             let (_, fp, count) = build_tls_acceptor_with_meta(cert, key, vec![b"doq".to_vec()])?;
             fingerprint = Some(fp);
             cert_count = count;
@@ -158,6 +167,8 @@ impl TlsManager {
             dot_listen: dot_listen.map(|a| a.to_string()),
             doq_enabled: quic_listen.is_some(),
             doq_listen: quic_listen.map(|a| a.to_string()),
+            doh3_enabled: doh3_listen.is_some(),
+            doh3_listen: doh3_listen.map(|a| a.to_string()),
             cert_path: Some(cert.display().to_string()),
             key_path: Some(key.display().to_string()),
             last_loaded_at: Some(Utc::now()),
@@ -170,6 +181,7 @@ impl TlsManager {
             dot_acceptor,
             https_acceptor,
             doq_endpoint: Mutex::new(None),
+            doh3_endpoint: Mutex::new(None),
             doq_idle_timeout,
             cert_path: ArcSwap::from_pointee(Some(cert.to_path_buf())),
             key_path: ArcSwap::from_pointee(Some(key.to_path_buf())),
@@ -194,11 +206,20 @@ impl TlsManager {
         *guard = endpoint;
     }
 
+    pub fn set_doh3_endpoint(&self, endpoint: Option<quinn::Endpoint>) {
+        let mut guard = self
+            .doh3_endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = endpoint;
+    }
+
     pub fn update_bound_addrs(
         &self,
         https_addr: Option<SocketAddr>,
         dot_addr: Option<SocketAddr>,
         quic_addr: Option<SocketAddr>,
+        doh3_addr: Option<SocketAddr>,
     ) {
         let mut next = self.status.load().as_ref().clone();
         if let Some(addr) = https_addr {
@@ -209,6 +230,9 @@ impl TlsManager {
         }
         if let Some(addr) = quic_addr {
             next.doq_listen = Some(addr.to_string());
+        }
+        if let Some(addr) = doh3_addr {
+            next.doh3_listen = Some(addr.to_string());
         }
         self.status.store(Arc::new(next));
     }
@@ -285,6 +309,7 @@ impl TlsReloader for TlsManager {
         if self.dot_acceptor.is_none()
             && self.https_acceptor.is_none()
             && !self.status.load().doq_enabled
+            && !self.status.load().doh3_enabled
         {
             return Err("TLS listeners are not active".to_string());
         }
@@ -323,6 +348,16 @@ impl TlsReloader for TlsManager {
             let doq_cfg = build_doq_server_config(&eff_cert, &eff_key, self.doq_idle_timeout)
                 .map_err(|e| e.to_string())?;
             ep.set_server_config(Some(doq_cfg));
+        }
+        if let Some(ep) = self
+            .doh3_endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            let doh3_cfg = build_doh3_server_config(&eff_cert, &eff_key, self.doq_idle_timeout)
+                .map_err(|e| e.to_string())?;
+            ep.set_server_config(Some(doh3_cfg));
         }
         self.cert_path.store(Arc::new(Some(eff_cert.clone())));
         self.key_path.store(Arc::new(Some(eff_key.clone())));

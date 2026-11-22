@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
-use crabdns_core::{Config, DnsPipeline};
+use crabdns_core::{Config, DnsPipeline, NeighborTable};
 use crabdns_storage::StorageEngine;
+use crabdns_web::acme_api::{AcmeHttpChallengeStore, AcmeManager, serve_http01_from_store};
 use crabdns_web::tls_api::TlsReloader;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -227,6 +228,31 @@ pub fn spawn_dhcp_lease_refresh_task(
                             }
                         }
                     }
+                }
+            }
+        }
+    })
+}
+
+pub fn spawn_neighbor_watch_task(
+    pipeline: Arc<DnsPipeline>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = delay_interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    let pipe = Arc::clone(&pipeline);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        pipe.reload_neighbor_table(NeighborTable::load_system());
+                    })
+                    .await;
                 }
             }
         }
@@ -483,4 +509,77 @@ pub fn spawn_sighup_task(
     _shutdown_rx: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     None
+}
+
+pub fn spawn_acme_renew_task(
+    config: Arc<ArcSwap<Config>>,
+    pipeline: Arc<DnsPipeline>,
+    tls_manager: Arc<TlsManager>,
+    acme_manager: Arc<AcmeManager>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = delay_interval(Duration::from_hours(12));
+        let reloader: Arc<dyn TlsReloader> = tls_manager;
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    let cfg = config.load_full();
+                    if acme_manager.needs_renewal(&cfg) {
+                        tracing::info!(domains = ?cfg.acme_domains, "checking/renewing ACME certificate");
+                        if let Err(err) = acme_manager
+                            .issue_or_renew(&cfg, &pipeline, Some(&reloader), false)
+                            .await
+                        {
+                            tracing::warn!(error = %err, "ACME certificate renewal failed");
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+pub async fn start_acme_http_listener(
+    addr: Option<std::net::SocketAddr>,
+    store: AcmeHttpChallengeStore,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> anyhow::Result<Option<JoinHandle<()>>> {
+    let Some(bind_addr) = addr else {
+        return Ok(None);
+    };
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    let app = axum::Router::new().route(
+        "/.well-known/acme-challenge/{token}",
+        axum::routing::get(
+            move |axum::extract::Path(token): axum::extract::Path<String>| {
+                let st = store.clone();
+                async move { serve_http01_from_store(&st, &token) }
+            },
+        ),
+    );
+    let task = tokio::spawn(async move {
+        let shutdown = async move {
+            if *shutdown_rx.borrow() {
+                return;
+            }
+            while shutdown_rx.changed().await.is_ok() {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        };
+        if let Err(err) = axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+        {
+            tracing::error!(error = %err, "ACME HTTP-01 listener error");
+        }
+    });
+    Ok(Some(task))
 }

@@ -27,6 +27,7 @@ const fn default_true() -> bool {
 #[ts(export)]
 pub struct DiscoveredClient {
     pub ip: String,
+    pub mac: Option<String>,
     pub resolved_name: Option<String>,
     pub name_source: String,
     #[ts(type = "number")]
@@ -139,7 +140,7 @@ fn normalize_client(id: String, payload: ClientProfilePayload) -> ApiResult<Clie
     if identifiers.is_empty() {
         return Err(err_response(
             StatusCode::BAD_REQUEST,
-            "At least one client identifier (IP, CIDR, or ClientID) is required",
+            "At least one client identifier (IP, CIDR, MAC, or ClientID) is required",
         ));
     }
     for ident in &identifiers {
@@ -224,11 +225,13 @@ pub async fn list_clients_overview(
         .take(200)
         .map(|(ip_str, act)| {
             if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                let mac = state.app.pipeline.resolve_client_mac(ip);
                 let (resolved_name, name_source) =
                     state.app.pipeline.resolve_client_display_name(ip, None);
                 let matched = state.app.pipeline.match_client_summary(ip);
                 DiscoveredClient {
                     ip: ip_str,
+                    mac,
                     resolved_name,
                     name_source: name_source.to_string(),
                     query_count: act.total_queries,
@@ -248,6 +251,7 @@ pub async fn list_clients_overview(
             } else {
                 DiscoveredClient {
                     ip: ip_str,
+                    mac: None,
                     resolved_name: None,
                     name_source: "unknown".to_string(),
                     query_count: act.total_queries,

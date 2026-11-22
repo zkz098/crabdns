@@ -95,6 +95,7 @@ function protocolBadges(p: ClientProtocolCounts): Array<{ label: string; count: 
   if (p.dot > 0) items.push({ label: "DoT", count: p.dot });
   if (p.doq > 0) items.push({ label: "DoQ", count: p.doq });
   if (p.doh > 0) items.push({ label: "DoH", count: p.doh });
+  if (p.doh3 > 0) items.push({ label: "DoH3", count: p.doh3 });
   return items;
 }
 
@@ -949,6 +950,13 @@ export function ClientsView(props: ClientsViewProps) {
                           <span class="font-mono text-xs font-medium text-[#171717] dark:text-[#ededed]">
                             {item.ip}
                           </span>
+                          <Show when={item.mac}>
+                            {(mac) => (
+                              <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-500/10 text-[#525252] dark:text-[#a1a1aa] border border-[#eaeaea] dark:border-[#262626]">
+                                {mac()}
+                              </span>
+                            )}
+                          </Show>
                           <Show when={item.resolved_name}>
                             {(name) => (
                               <span class="text-xs text-[#171717] dark:text-[#ededed] font-medium truncate">

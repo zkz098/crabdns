@@ -40,6 +40,7 @@ pub enum QueryProtocol {
     Dot,
     Doq,
     Doh,
+    Doh3,
 }
 
 #[derive(Debug, Clone)]

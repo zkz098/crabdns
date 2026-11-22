@@ -601,3 +601,80 @@ async fn test_doq_sni_client_id_dhcp_leases_and_client_activity_stats() {
 
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn test_doh3_server_e2e() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cert_path, key_path, cert_pem) = generate_test_cert(dir.path(), "doh3-test");
+    let up_default = spawn_mock_udp_upstream(Ipv4Addr::new(10, 0, 0, 42)).await;
+
+    let server = spawn_server(Config {
+        listen_dns: "127.0.0.1:0".parse().unwrap(),
+        listen_web: "127.0.0.1:0".parse().unwrap(),
+        listen_doh3: Some("127.0.0.1:0".parse().unwrap()),
+        tls_cert_path: Some(cert_path),
+        tls_key_path: Some(key_path),
+        data_dir: dir.path().to_path_buf(),
+        upstreams: vec![format!("udp://{up_default}")],
+        rdns_enabled: false,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+
+    let doh3_addr = server.doh3_addr.expect("doh3 addr");
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut roots = rustls::RootCertStore::empty();
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls::pki_types::pem::PemObject::pem_slice_iter(&cert_pem)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+    roots.add(certs[0].clone()).unwrap();
+    let mut tls_cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls_cfg.alpn_protocols = vec![b"h3".to_vec()];
+    let quic_cfg = quinn::crypto::rustls::QuicClientConfig::try_from(tls_cfg).unwrap();
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic_cfg)));
+
+    let conn = endpoint
+        .connect(doh3_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (mut driver, mut send_request) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let wire_query = build_query(77, "doh3-test.example.", RecordType::A);
+    let req = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("https://localhost/dns-query")
+        .header(http::header::CONTENT_TYPE, "application/dns-message")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream
+        .send_data(bytes::Bytes::from(wire_query))
+        .await
+        .unwrap();
+    stream.finish().await.unwrap();
+
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        use bytes::Buf as _;
+        let len = chunk.remaining();
+        body.extend_from_slice(&chunk.copy_to_bytes(len));
+    }
+    let msg = Message::from_vec(&body).unwrap();
+    assert_eq!(first_a_ip(&msg), Some(Ipv4Addr::new(10, 0, 0, 42)));
+
+    server.shutdown().await;
+}

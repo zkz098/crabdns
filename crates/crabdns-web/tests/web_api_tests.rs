@@ -1175,3 +1175,75 @@ async fn test_port_precheck_endpoint() {
     assert_eq!(results[3]["available"], true);
     assert_eq!(results[3]["in_use_by_self"], false);
 }
+
+#[tokio::test]
+async fn test_acme_http01_challenge_and_status_api() {
+    use crabdns_web::acme_api::AcmeManager;
+    use crabdns_web::build_router_with_managers;
+    use crabdns_web::update_api::UpdateManager;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+    let cfg = Config {
+        data_dir: dir.path().to_path_buf(),
+        acme_enabled: true,
+        acme_domains: vec!["dns.example.com".to_string()],
+        ..Config::default()
+    };
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, false));
+    let upstream = Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
+    let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+    let (live_tx, _) = broadcast::channel(16);
+    let acme = Arc::new(AcmeManager::new());
+
+    acme.http_challenges
+        .set("tok-abc".to_string(), "tok-abc.thumbprint".to_string());
+
+    let app = build_router_with_managers(
+        AppState {
+            config,
+            pipeline,
+            storage,
+            live_tx,
+            tls_reloader: None,
+        },
+        Arc::new(UpdateManager::new()),
+        Arc::clone(&acme),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let hit = client
+        .get(format!("{base}/.well-known/acme-challenge/tok-abc"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hit.status(), StatusCode::OK);
+    assert_eq!(hit.text().await.unwrap(), "tok-abc.thumbprint");
+
+    let miss = client
+        .get(format!("{base}/.well-known/acme-challenge/missing"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+
+    let status_res = client
+        .get(format!("{base}/api/acme/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status_res.status(), StatusCode::OK);
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status_res.bytes().await.unwrap()).unwrap();
+    assert_eq!(status_json["enabled"], true);
+    assert_eq!(status_json["domains"][0], "dns.example.com");
+}

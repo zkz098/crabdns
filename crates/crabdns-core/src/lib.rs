@@ -14,6 +14,7 @@ pub mod filter;
 pub mod filter_rules;
 mod filter_trie;
 pub mod lan;
+pub mod neighbor;
 pub mod pipeline;
 mod pipeline_cache;
 mod pipeline_exec;
@@ -39,7 +40,7 @@ pub use clients::{
     ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ParsedClientIdentifier,
     ResolvedClientPolicy, ip_to_ptr_domain, validate_client_id, validate_client_identifier,
 };
-pub use config::{BlockMode, Config, SplitDnsRule, UpstreamStrategy};
+pub use config::{AcmeChallengeType, BlockMode, Config, SplitDnsRule, UpstreamStrategy};
 pub use cookies::{CookieCheck, DnsCookieEngine};
 pub use device_names::{
     DEFAULT_DHCP_LEASES_PATH, DhcpLeaseTable, MdnsNameResolver, OPENWRT_DHCP_LEASES_PATH,
@@ -54,6 +55,7 @@ pub use filter_rules::{
     DnsRewriteEntry, DnsRewriteKind, FilterQueryContext, RewriteAction, validate_dns_rewrite,
 };
 pub use lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter};
+pub use neighbor::{NeighborTable, PROC_NET_ARP_PATH, normalize_mac};
 pub use pipeline::{
     DnsPipeline, LatencyHistogramSnapshot, PipelineRuntimeMetrics, QueryContext, QueryEvent,
     QueryOutcome, QueryProtocol,

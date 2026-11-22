@@ -2,4 +2,4 @@
 import type { ClientProtocolCounts } from "./ClientProtocolCounts";
 import type { TopItem } from "./TopItem";
 
-export type DiscoveredClient = { ip: string, resolved_name: string | null, name_source: string, query_count: number, blocked_count: number, cached_count: number, rewritten_count: number, error_count: number, block_rate: number, last_seen: string | null, last_client_id: string | null, protocols: ClientProtocolCounts, top_domains: Array<TopItem>, top_blocked: Array<TopItem>, profile_id: string | null, group_id: string | null, };
+export type DiscoveredClient = { ip: string, mac: string | null, resolved_name: string | null, name_source: string, query_count: number, blocked_count: number, cached_count: number, rewritten_count: number, error_count: number, block_rate: number, last_seen: string | null, last_client_id: string | null, protocols: ClientProtocolCounts, top_domains: Array<TopItem>, top_blocked: Array<TopItem>, profile_id: string | null, group_id: string | null, };

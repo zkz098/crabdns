@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
+use foldhash::fast::RandomState;
 use hickory_proto::rr::RecordType;
 use tokio::sync::{Notify, Semaphore, mpsc};
 
@@ -23,6 +25,7 @@ use crate::error::Result;
 use crate::filter::{FilterDecision, FilterEngine};
 use crate::filter_rules::FilterQueryContext;
 use crate::lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter, is_private_ptr_domain};
+use crate::neighbor::NeighborTable;
 use crate::rrl::{ResponseRateLimiter, RrlConfig};
 use crate::safesearch::SafeSearchConfig;
 use crate::security::is_private_or_special_ip;
@@ -62,6 +65,7 @@ pub struct DnsPipeline {
     pub(crate) hosts_table: ArcSwap<HostsTable>,
     pub(crate) dhcp_leases_enabled: AtomicBool,
     pub(crate) dhcp_leases: ArcSwap<DhcpLeaseTable>,
+    pub(crate) neighbor_table: ArcSwap<NeighborTable>,
     pub(crate) mdns_enabled: AtomicBool,
     pub(crate) mdns_resolver: Arc<MdnsNameResolver>,
     pub(crate) mdns_notify: Arc<Notify>,
@@ -77,6 +81,7 @@ pub struct DnsPipeline {
     pub(crate) dns_cookies: DnsCookieEngine,
     pub(crate) max_udp_payload_size: AtomicU16,
     pub(crate) rrl: ResponseRateLimiter,
+    pub(crate) acme_dns_challenges: Arc<DashMap<String, Vec<String>, RandomState>>,
     pub(crate) latency: QueryLatencyHistogram,
     counters: ServerRuntimeCounters,
 }
@@ -128,6 +133,7 @@ impl DnsPipeline {
             hosts_table: ArcSwap::from_pointee(HostsTable::default()),
             dhcp_leases_enabled: AtomicBool::new(false),
             dhcp_leases: ArcSwap::from_pointee(DhcpLeaseTable::default()),
+            neighbor_table: ArcSwap::from_pointee(NeighborTable::default()),
             mdns_enabled: AtomicBool::new(false),
             mdns_resolver: Arc::new(MdnsNameResolver::new()),
             mdns_notify: Arc::new(Notify::new()),
@@ -143,6 +149,7 @@ impl DnsPipeline {
             dns_cookies: DnsCookieEngine::new(),
             max_udp_payload_size: AtomicU16::new(DEFAULT_MAX_UDP_PAYLOAD),
             rrl: ResponseRateLimiter::default(),
+            acme_dns_challenges: Arc::new(DashMap::with_hasher(RandomState::default())),
             latency: QueryLatencyHistogram::default(),
             counters: ServerRuntimeCounters::default(),
         }
@@ -151,11 +158,9 @@ impl DnsPipeline {
     pub fn filter(&self) -> &Arc<FilterEngine> {
         &self.filter
     }
-
     pub fn cache(&self) -> Arc<DnsCache> {
         self.cache.load_full()
     }
-
     pub fn upstream(&self) -> Arc<UpstreamPool> {
         self.upstream.load_full()
     }
@@ -210,14 +215,14 @@ impl DnsPipeline {
         ip: IpAddr,
         client_id: Option<&str>,
     ) -> (Option<String>, &'static str) {
-        if let Some(policy) = self.clients.load().match_client(ip, client_id) {
+        if let Some(policy) = self.match_client_policy(ip, client_id) {
             return (Some(policy.client_name.clone()), "profile");
         }
         self.resolve_unconfigured_client_name(ip)
     }
 
     pub fn match_client_summary(&self, ip: IpAddr) -> Option<(String, String, Option<String>)> {
-        self.clients.load().match_client(ip, None).map(|p| {
+        self.match_client_policy(ip, None).map(|p| {
             (
                 p.profile_id.clone(),
                 p.client_name.clone(),
@@ -489,6 +494,10 @@ impl DnsPipeline {
         let count = table.len();
         self.dhcp_leases.store(Arc::new(table));
         Ok(count)
+    }
+
+    pub fn reload_neighbor_table(&self, table: NeighborTable) {
+        self.neighbor_table.store(Arc::new(table));
     }
 
     pub fn set_mdns_enabled(&self, enabled: bool) {

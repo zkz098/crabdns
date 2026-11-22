@@ -6,14 +6,15 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
-    AccessController, BlockMode, ClientRegistry, Config, DdrConfig, DhcpLeaseTable, Dns64Config,
-    EcsConfig, HostsTable, PrivatePtrRouter, SafeSearchConfig, SplitDnsRule, SplitUpstreamRouter,
-    UpstreamPool, UpstreamStrategy,
+    AccessController, AcmeChallengeType, BlockMode, ClientRegistry, Config, DdrConfig,
+    DhcpLeaseTable, Dns64Config, EcsConfig, HostsTable, PrivatePtrRouter, SafeSearchConfig,
+    SplitDnsRule, SplitUpstreamRouter, UpstreamPool, UpstreamStrategy,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::RouterState;
+use crate::acme_api::{AcmeConfigUpdates, apply_acme_updates};
 
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -24,6 +25,7 @@ pub struct ConfigResponse {
     pub listen_web_tls: Option<String>,
     pub listen_dot: Option<String>,
     pub listen_doq: Option<String>,
+    pub listen_doh3: Option<String>,
     pub sni_client_id_hostnames: Vec<String>,
     pub tls_cert_path: Option<String>,
     pub tls_key_path: Option<String>,
@@ -84,6 +86,13 @@ pub struct ConfigResponse {
     pub rrl_slip: u32,
     #[ts(type = "number")]
     pub rrl_window_secs: u64,
+    pub acme_enabled: bool,
+    pub acme_domains: Vec<String>,
+    pub acme_email: Option<String>,
+    pub acme_directory_url: String,
+    pub acme_challenge_type: AcmeChallengeType,
+    pub acme_http_listen: Option<String>,
+    pub acme_renew_before_days: u32,
 }
 
 impl From<&Config> for ConfigResponse {
@@ -94,6 +103,7 @@ impl From<&Config> for ConfigResponse {
             listen_web_tls: cfg.listen_web_tls.map(|addr| addr.to_string()),
             listen_dot: cfg.listen_dot.map(|addr| addr.to_string()),
             listen_doq: cfg.listen_doq.map(|addr| addr.to_string()),
+            listen_doh3: cfg.listen_doh3.map(|addr| addr.to_string()),
             sni_client_id_hostnames: cfg.sni_client_id_hostnames.clone(),
             tls_cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
             tls_key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
@@ -150,6 +160,13 @@ impl From<&Config> for ConfigResponse {
             rrl_responses_per_second: cfg.rrl_responses_per_second,
             rrl_slip: cfg.rrl_slip,
             rrl_window_secs: cfg.rrl_window_secs,
+            acme_enabled: cfg.acme_enabled,
+            acme_domains: cfg.acme_domains.clone(),
+            acme_email: cfg.acme_email.clone(),
+            acme_directory_url: cfg.acme_directory_url.clone(),
+            acme_challenge_type: cfg.acme_challenge_type,
+            acme_http_listen: cfg.acme_http_listen.map(|addr| addr.to_string()),
+            acme_renew_before_days: cfg.acme_renew_before_days,
         }
     }
 }
@@ -263,6 +280,20 @@ pub struct ConfigUpdatePayload {
     #[serde(default)]
     #[ts(type = "number | null")]
     pub rrl_window_secs: Option<u64>,
+    #[serde(default)]
+    pub acme_enabled: Option<bool>,
+    #[serde(default)]
+    pub acme_domains: Option<Vec<String>>,
+    #[serde(default)]
+    pub acme_email: Option<String>,
+    #[serde(default)]
+    pub acme_directory_url: Option<String>,
+    #[serde(default)]
+    pub acme_challenge_type: Option<AcmeChallengeType>,
+    #[serde(default)]
+    pub acme_http_listen: Option<String>,
+    #[serde(default)]
+    pub acme_renew_before_days: Option<u32>,
 }
 
 pub async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
@@ -438,6 +469,15 @@ pub async fn update_config(
         .max_udp_payload_size
         .unwrap_or(current.max_udp_payload_size)
         .max(512);
+    let acme_updates = AcmeConfigUpdates {
+        enabled: payload.acme_enabled,
+        domains: payload.acme_domains,
+        email: payload.acme_email,
+        directory_url: payload.acme_directory_url,
+        challenge_type: payload.acme_challenge_type,
+        http_listen: payload.acme_http_listen,
+        renew_before_days: payload.acme_renew_before_days,
+    };
     let rrl_enabled = payload.rrl_enabled.unwrap_or(current.rrl_enabled);
     let rrl_responses_per_second = payload
         .rrl_responses_per_second
@@ -614,6 +654,7 @@ pub async fn update_config(
     next.rrl_responses_per_second = rrl_responses_per_second;
     next.rrl_slip = rrl_slip;
     next.rrl_window_secs = rrl_window_secs;
+    apply_acme_updates(&mut next, acme_updates)?;
 
     // Phase 2: Persist config first, then atomically swap all runtime state.
     let storage = Arc::clone(&state.app.storage);

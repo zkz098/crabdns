@@ -181,7 +181,7 @@ impl DnsPipeline {
         qtype: RecordType,
         start: Instant,
     ) -> (Option<Arc<ResolvedClientPolicy>>, LogMeta) {
-        let policy = self.clients.load().match_client(client_addr.ip(), None);
+        let policy = self.match_client_policy(client_addr.ip(), None);
         let client_name = match &policy {
             Some(p) => Some(p.client_name.clone()),
             None => self.resolve_unconfigured_client_name(client_addr.ip()).0,
@@ -270,6 +270,9 @@ impl DnsPipeline {
             if match_safesearch(&cfg, clean_domain, client_override).is_some() {
                 return true;
             }
+        }
+        if qtype == RecordType::TXT && !self.acme_dns_challenges.is_empty() {
+            return true;
         }
         if qtype == RecordType::PTR && is_private_ptr_domain(clean_domain) {
             let ptr_router = self.private_ptr_router.load();
