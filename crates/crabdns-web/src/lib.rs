@@ -249,7 +249,9 @@ pub fn build_router_with_managers(
         .route("/api/auth/settings", put(auth::update_auth))
         .route("/api/update/status", get(update_api::get_update_status))
         .route("/api/update/check", post(update_api::check_update))
-        .route("/api/update/apply", post(update_api::apply_update));
+        .route("/api/update/apply", post(update_api::apply_update))
+        .route("/api/cf-cdn/status", get(controls::get_cf_cdn_status))
+        .route("/api/cf-cdn/test", post(controls::trigger_cf_cdn_test));
 
     #[cfg(all(feature = "prof-jemalloc", unix))]
     let protected_api = protected_api.route("/debug/pprof/heap", get(metrics::pprof_heap));

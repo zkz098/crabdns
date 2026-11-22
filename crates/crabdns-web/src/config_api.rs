@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
-    AccessController, AcmeChallengeType, BlockMode, ClientRegistry, Config, DdrConfig,
+    AccessController, AcmeChallengeType, BlockMode, CfCdnConfig, ClientRegistry, Config, DdrConfig,
     DhcpLeaseTable, Dns64Config, EcsConfig, HostsTable, PrivatePtrRouter, SafeSearchConfig,
     SplitDnsRule, SplitUpstreamRouter, UpstreamPool, UpstreamStrategy,
 };
@@ -95,6 +95,7 @@ pub struct ConfigResponse {
     pub acme_challenge_type: AcmeChallengeType,
     pub acme_http_listen: Option<String>,
     pub acme_renew_before_days: u32,
+    pub cf_cdn: CfCdnConfig,
 }
 
 impl From<&Config> for ConfigResponse {
@@ -171,6 +172,7 @@ impl From<&Config> for ConfigResponse {
             acme_challenge_type: cfg.acme_challenge_type,
             acme_http_listen: cfg.acme_http_listen.map(|addr| addr.to_string()),
             acme_renew_before_days: cfg.acme_renew_before_days,
+            cf_cdn: cfg.cf_cdn.clone(),
         }
     }
 }
@@ -302,6 +304,8 @@ pub struct ConfigUpdatePayload {
     pub acme_http_listen: Option<String>,
     #[serde(default)]
     pub acme_renew_before_days: Option<u32>,
+    #[serde(default)]
+    pub cf_cdn: Option<CfCdnConfig>,
 }
 
 pub async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
@@ -690,6 +694,9 @@ pub async fn update_config(
     next.rrl_responses_per_second = rrl_responses_per_second;
     next.rrl_slip = rrl_slip;
     next.rrl_window_secs = rrl_window_secs;
+    if let Some(cf_cdn) = payload.cf_cdn {
+        next.cf_cdn = cf_cdn;
+    }
     apply_acme_updates(&mut next, acme_updates)?;
 
     // Phase 2: Persist config first, then atomically swap all runtime state.
@@ -734,6 +741,7 @@ pub async fn update_config(
     pipe.set_safesearch(safesearch);
     let _ = pipe.reload_dns64(dns64_enabled, &dns64_prefixes);
     pipe.set_svcb_sanitization(svcb_strip_ech, svcb_strip_hints);
+    pipe.reload_cf_cdn(next.cf_cdn.clone());
     pipe.set_ede_enabled(ede_enabled);
     pipe.set_dns_cookies(dns_cookies_enabled, dns_cookies_require_valid);
     pipe.set_max_udp_payload_size(max_udp_payload_size);

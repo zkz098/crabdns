@@ -312,3 +312,24 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<QueryEvent
         }
     }
 }
+
+pub async fn get_cf_cdn_status(
+    State(state): State<RouterState>,
+) -> Json<crabdns_core::CfCdnStatus> {
+    Json(state.app.pipeline.cf_cdn_manager().status())
+}
+
+pub async fn trigger_cf_cdn_test(
+    State(state): State<RouterState>,
+) -> (StatusCode, Json<crabdns_core::CfCdnStatus>) {
+    let mgr = std::sync::Arc::clone(state.app.pipeline.cf_cdn_manager());
+    if !mgr.is_testing() {
+        let mgr_bg = std::sync::Arc::clone(&mgr);
+        tokio::spawn(async move {
+            let _ = mgr_bg.run_speedtest().await;
+        });
+    }
+    let mut status = mgr.status();
+    status.testing = true;
+    (StatusCode::ACCEPTED, Json(status))
+}

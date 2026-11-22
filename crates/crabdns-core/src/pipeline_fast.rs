@@ -152,6 +152,9 @@ impl DnsPipeline {
         {
             return true;
         }
+        if self.cf_cdn.is_enabled() && matches!(q.qtype, 1 | 28 | 64 | 65) {
+            return true;
+        }
         if self.block_any_queries.load(Ordering::Relaxed) && q.qtype == 255 {
             return true;
         }

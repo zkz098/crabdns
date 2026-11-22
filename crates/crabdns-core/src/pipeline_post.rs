@@ -226,6 +226,40 @@ impl DnsPipeline {
         self.svcb_strip_ech.load(Ordering::Relaxed) || self.svcb_strip_hints.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn maybe_accelerate_cf_cdn(
+        &self,
+        domain: &str,
+        qtype: RecordType,
+        resp_bytes: Vec<u8>,
+        parsed_msg: Option<Message>,
+    ) -> (Vec<u8>, Option<Message>, bool) {
+        if !self.cf_cdn.is_enabled()
+            || !matches!(
+                qtype,
+                RecordType::A | RecordType::AAAA | RecordType::HTTPS | RecordType::SVCB
+            )
+        {
+            return (resp_bytes, parsed_msg, false);
+        }
+
+        let mut msg = match parsed_msg {
+            Some(m) => m,
+            None => match Message::from_vec(&resp_bytes) {
+                Ok(m) => m,
+                Err(_) => return (resp_bytes, None, false),
+            },
+        };
+
+        if !self.cf_cdn.rewrite_message_if_cloudflare(domain, &mut msg) {
+            return (resp_bytes, Some(msg), false);
+        }
+
+        match msg.to_vec() {
+            Ok(updated) => (updated, Some(msg), true),
+            Err(_) => (resp_bytes, Some(msg), false),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn post_process_and_log(
         &self,
@@ -239,6 +273,8 @@ impl DnsPipeline {
         matched_list: Option<String>,
         upstream_source: String,
     ) -> Result<Vec<u8>> {
+        let (resp_bytes, parsed_msg, cf_accelerated) =
+            self.maybe_accelerate_cf_cdn(&meta.domain, meta.qtype, resp_bytes, parsed_msg);
         let (resp_bytes, parsed_msg) = if self.svcb_sanitization_enabled() {
             self.maybe_sanitize_svcb(meta.qtype, resp_bytes, parsed_msg)
         } else {
@@ -260,23 +296,27 @@ impl DnsPipeline {
             None => ("UNKNOWN".to_string(), Vec::new()),
         };
 
+        let (final_outcome, final_rule, final_list) = if dns64_synth {
+            (
+                QueryOutcome::Rewritten,
+                Some("dns64:synth".to_string()),
+                Some("dns64".to_string()),
+            )
+        } else if cf_accelerated {
+            (
+                QueryOutcome::Rewritten,
+                Some("cf_cdn:accelerate".to_string()),
+                Some("cloudflare_cdn".to_string()),
+            )
+        } else {
+            (base_outcome, matched_rule, matched_list)
+        };
+
         self.emit_log(
             meta,
-            if dns64_synth {
-                QueryOutcome::Rewritten
-            } else {
-                base_outcome
-            },
-            if dns64_synth {
-                Some("dns64:synth".to_string())
-            } else {
-                matched_rule
-            },
-            if dns64_synth {
-                Some("dns64".to_string())
-            } else {
-                matched_list
-            },
+            final_outcome,
+            final_rule,
+            final_list,
             Some(upstream_source),
             &rcode_str,
             answers,

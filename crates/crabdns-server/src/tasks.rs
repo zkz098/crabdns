@@ -625,3 +625,53 @@ pub async fn start_acme_http_listener(
     });
     Ok(Some(task))
 }
+
+pub fn spawn_cf_cdn_speedtest_task(
+    config: Arc<ArcSwap<Config>>,
+    pipeline: Arc<DnsPipeline>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // Short initial delay so listeners start up first.
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+
+        let mut interval = delay_interval(Duration::from_secs(30));
+        loop {
+            let cf_cfg = config.load().cf_cdn.clone();
+            if cf_cfg.enabled {
+                let status = pipeline.cf_cdn_manager().status();
+                let interval_ms = cf_cfg.interval_secs.max(60).saturating_mul(1000);
+                let now_ms = current_unix_ms();
+                let due = match status.last_run_unix_ms {
+                    None => true,
+                    Some(last) => now_ms.saturating_sub(last) >= interval_ms,
+                };
+                if due && !status.testing {
+                    let result = pipeline.cf_cdn_manager().run_speedtest().await;
+                    tracing::info!(
+                        best_ipv4 = ?result.best_ipv4,
+                        best_ipv6 = ?result.best_ipv6,
+                        error = ?result.last_error,
+                        "Cloudflare CDN speed test finished"
+                    );
+                }
+            }
+
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {}
+            }
+        }
+    })
+}

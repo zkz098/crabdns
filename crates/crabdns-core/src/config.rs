@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::cf_cdn::CfCdnConfig;
 use crate::error::{CoreError, Result};
 use crate::safesearch::SafeSearchConfig;
 
@@ -205,6 +206,8 @@ pub struct Config {
     pub acme_http_listen: Option<SocketAddr>,
     #[serde(default = "default_acme_renew_before_days")]
     pub acme_renew_before_days: u32,
+    #[serde(default)]
+    pub cf_cdn: CfCdnConfig,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -381,6 +384,7 @@ impl Default for Config {
             acme_challenge_type: AcmeChallengeType::default(),
             acme_http_listen: None,
             acme_renew_before_days: default_acme_renew_before_days(),
+            cf_cdn: CfCdnConfig::default(),
         }
     }
 }

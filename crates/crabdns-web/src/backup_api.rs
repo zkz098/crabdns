@@ -152,6 +152,7 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         acme_challenge_type: Some(cfg.acme_challenge_type),
         acme_http_listen: cfg.acme_http_listen.map(|a| a.to_string()),
         acme_renew_before_days: Some(cfg.acme_renew_before_days),
+        cf_cdn: Some(cfg.cf_cdn.clone()),
     }
 }
 
@@ -464,6 +465,9 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
         .unwrap_or(current.rrl_responses_per_second);
     next.rrl_slip = payload.rrl_slip.unwrap_or(current.rrl_slip);
     next.rrl_window_secs = payload.rrl_window_secs.unwrap_or(current.rrl_window_secs);
+    if let Some(cf_cdn) = payload.cf_cdn {
+        next.cf_cdn = cf_cdn;
+    }
 }
 
 pub(crate) struct CompiledRuntime {
@@ -570,6 +574,7 @@ pub(crate) fn apply_compiled_to_pipeline(
     pipe.set_safesearch(next.safesearch.clone());
     let _ = pipe.reload_dns64(next.dns64_enabled, &next.dns64_prefixes);
     pipe.set_svcb_sanitization(next.svcb_strip_ech, next.svcb_strip_hints);
+    pipe.reload_cf_cdn(next.cf_cdn.clone());
     pipe.set_ede_enabled(next.ede_enabled);
     pipe.set_dns_cookies(next.dns_cookies_enabled, next.dns_cookies_require_valid);
     pipe.set_max_udp_payload_size(next.max_udp_payload_size);

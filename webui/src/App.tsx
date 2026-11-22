@@ -16,6 +16,7 @@ import type { AcmeStatusResponse } from "./types/AcmeStatusResponse";
 import type { AuthStatusResponse } from "./types/AuthStatusResponse";
 import type { BlockMode } from "./types/BlockMode";
 import type { BlockingStatusResponse } from "./types/BlockingStatusResponse";
+import type { CfCdnStatus } from "./types/CfCdnStatus";
 import type { ClientGroupPayload } from "./types/ClientGroupPayload";
 import type { ClientProfilePayload } from "./types/ClientProfilePayload";
 import type { ClientsOverviewResponse } from "./types/ClientsOverviewResponse";
@@ -130,6 +131,15 @@ export default function App() {
   const [dns64PrefixesText, setDns64PrefixesText] = createSignal("64:ff9b::/96");
   const [svcbStripEch, setSvcbStripEch] = createSignal(false);
   const [svcbStripHints, setSvcbStripHints] = createSignal(false);
+  const [cfCdnEnabled, setCfCdnEnabled] = createSignal(false);
+  const [cfCdnIpv6Enabled, setCfCdnIpv6Enabled] = createSignal(true);
+  const [cfCdnIntervalSecs, setCfCdnIntervalSecs] = createSignal(1800);
+  const [cfCdnTtlSecs, setCfCdnTtlSecs] = createSignal(60);
+  const [cfCdnSpeedtestUrl, setCfCdnSpeedtestUrl] = createSignal(
+    "https://speed.cloudflare.com/__down?bytes=99999999",
+  );
+  const [cfCdnExcludedDomainsText, setCfCdnExcludedDomainsText] = createSignal("");
+  const [cfCdnStatus, setCfCdnStatus] = createSignal<CfCdnStatus | null>(null);
   const [tlsStatus, setTlsStatus] = createSignal<TlsStatusResponse | null>(null);
   const [reloadingTls, setReloadingTls] = createSignal(false);
   const [tlsMessage, setTlsMessage] = createSignal("");
@@ -399,6 +409,7 @@ export default function App() {
           fetchUpstreamHealth(),
           fetchTlsStatus(),
           fetchAcmeStatus(),
+          fetchCfCdnStatus(),
         ]);
         setBackupMessage(t("backupRestoredMsg"));
         setTimeout(() => setBackupMessage(""), 3500);
@@ -689,6 +700,14 @@ export default function App() {
     setDns64PrefixesText((data.dns64_prefixes ?? ["64:ff9b::/96"]).join("\n"));
     setSvcbStripEch(data.svcb_strip_ech);
     setSvcbStripHints(data.svcb_strip_hints);
+    if (data.cf_cdn) {
+      setCfCdnEnabled(data.cf_cdn.enabled);
+      setCfCdnIpv6Enabled(data.cf_cdn.ipv6_enabled);
+      setCfCdnIntervalSecs(data.cf_cdn.interval_secs);
+      setCfCdnTtlSecs(data.cf_cdn.ttl_secs);
+      setCfCdnSpeedtestUrl(data.cf_cdn.speedtest_url);
+      setCfCdnExcludedDomainsText((data.cf_cdn.excluded_domains ?? []).join("\n"));
+    }
   }
 
   const clientNameMap = createMemo<Record<string, string>>(() => {
@@ -856,6 +875,49 @@ export default function App() {
       // ignore
     }
   }
+
+  let cfCdnPollTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function fetchCfCdnStatus() {
+    try {
+      const res = await fetch("/api/cf-cdn/status");
+      if (res.ok) {
+        const data: CfCdnStatus = await res.json();
+        setCfCdnStatus(data);
+        if (!data.testing && cfCdnPollTimer !== null) {
+          clearInterval(cfCdnPollTimer);
+          cfCdnPollTimer = null;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function runCfCdnSpeedtest() {
+    try {
+      const res = await fetch("/api/cf-cdn/test", { method: "POST" });
+      if (res.ok) {
+        const data: CfCdnStatus = await res.json();
+        setCfCdnStatus(data);
+        if (cfCdnPollTimer !== null) {
+          clearInterval(cfCdnPollTimer);
+        }
+        cfCdnPollTimer = setInterval(() => {
+          void fetchCfCdnStatus();
+        }, 1500);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  onCleanup(() => {
+    if (cfCdnPollTimer !== null) {
+      clearInterval(cfCdnPollTimer);
+      cfCdnPollTimer = null;
+    }
+  });
 
   async function issueAcmeCertificate() {
     setIssuingAcme(true);
@@ -1100,6 +1162,7 @@ export default function App() {
           fetchClients(),
           fetchTlsStatus(),
           fetchAcmeStatus(),
+          fetchCfCdnStatus(),
         ]);
         return null;
       }
@@ -1236,6 +1299,21 @@ export default function App() {
       dns64_prefixes: parseLines(dns64PrefixesText()),
       svcb_strip_ech: svcbStripEch(),
       svcb_strip_hints: svcbStripHints(),
+      cf_cdn: {
+        enabled: cfCdnEnabled(),
+        ipv6_enabled: cfCdnIpv6Enabled(),
+        interval_secs: Number(cfCdnIntervalSecs()) || 1800,
+        speedtest_url:
+          cfCdnSpeedtestUrl().trim() ||
+          "https://speed.cloudflare.com/__down?bytes=99999999",
+        concurrency: configData()?.cf_cdn?.concurrency ?? 50,
+        top_n: configData()?.cf_cdn?.top_n ?? 3,
+        samples_per_cidr: configData()?.cf_cdn?.samples_per_cidr ?? 3,
+        ttl_secs: Number(cfCdnTtlSecs()) || 60,
+        excluded_domains: parseLines(cfCdnExcludedDomainsText()),
+        custom_ipv4_cidrs: configData()?.cf_cdn?.custom_ipv4_cidrs ?? [],
+        custom_ipv6_cidrs: configData()?.cf_cdn?.custom_ipv6_cidrs ?? [],
+      },
       ede_enabled: null,
       dns_cookies_enabled: null,
       dns_cookies_require_valid: null,
@@ -1271,6 +1349,7 @@ export default function App() {
           fetchStats(),
           fetchTlsStatus(),
           fetchAcmeStatus(),
+          fetchCfCdnStatus(),
           fetchConfigHistory(),
         ]);
       } else {
@@ -1587,6 +1666,20 @@ export default function App() {
                 onSvcbStripEchChange={setSvcbStripEch}
                 svcbStripHints={svcbStripHints()}
                 onSvcbStripHintsChange={setSvcbStripHints}
+                cfCdnEnabled={cfCdnEnabled()}
+                onCfCdnEnabledChange={setCfCdnEnabled}
+                cfCdnIpv6Enabled={cfCdnIpv6Enabled()}
+                onCfCdnIpv6EnabledChange={setCfCdnIpv6Enabled}
+                cfCdnIntervalSecs={cfCdnIntervalSecs()}
+                onCfCdnIntervalSecsChange={setCfCdnIntervalSecs}
+                cfCdnTtlSecs={cfCdnTtlSecs()}
+                onCfCdnTtlSecsChange={setCfCdnTtlSecs}
+                cfCdnSpeedtestUrl={cfCdnSpeedtestUrl()}
+                onCfCdnSpeedtestUrlChange={setCfCdnSpeedtestUrl}
+                cfCdnExcludedDomainsText={cfCdnExcludedDomainsText()}
+                onCfCdnExcludedDomainsChange={setCfCdnExcludedDomainsText}
+                cfCdnStatus={cfCdnStatus()}
+                onRunCfCdnSpeedtest={() => void runCfCdnSpeedtest()}
                 tlsCertPath={tlsCertPath()}
                 onTlsCertPathChange={setTlsCertPath}
                 tlsKeyPath={tlsKeyPath()}

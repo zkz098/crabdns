@@ -3,6 +3,7 @@ import { t } from "../i18n";
 import type { AcmeChallengeType } from "../types/AcmeChallengeType";
 import type { AcmeStatusResponse } from "../types/AcmeStatusResponse";
 import type { BlockMode } from "../types/BlockMode";
+import type { CfCdnStatus } from "../types/CfCdnStatus";
 import type { ConfigResponse } from "../types/ConfigResponse";
 import type { ConfigSnapshotMeta } from "../types/ConfigSnapshotMeta";
 import type { SafeSearchConfig } from "../types/SafeSearchConfig";
@@ -120,6 +121,20 @@ interface SettingsViewProps {
   onSvcbStripEchChange: (val: boolean) => void;
   svcbStripHints: boolean;
   onSvcbStripHintsChange: (val: boolean) => void;
+  cfCdnEnabled: boolean;
+  onCfCdnEnabledChange: (val: boolean) => void;
+  cfCdnIpv6Enabled: boolean;
+  onCfCdnIpv6EnabledChange: (val: boolean) => void;
+  cfCdnIntervalSecs: number;
+  onCfCdnIntervalSecsChange: (val: number) => void;
+  cfCdnTtlSecs: number;
+  onCfCdnTtlSecsChange: (val: number) => void;
+  cfCdnSpeedtestUrl: string;
+  onCfCdnSpeedtestUrlChange: (val: string) => void;
+  cfCdnExcludedDomainsText: string;
+  onCfCdnExcludedDomainsChange: (val: string) => void;
+  cfCdnStatus: CfCdnStatus | null;
+  onRunCfCdnSpeedtest: () => void;
   tlsCertPath: string;
   onTlsCertPathChange: (val: string) => void;
   tlsKeyPath: string;
@@ -989,6 +1004,195 @@ export function SettingsView(props: SettingsViewProps) {
                       placeholder="64:ff9b::/96"
                       value={props.dns64PrefixesText}
                       onInput={(e) => props.onDns64PrefixesChange(e.currentTarget.value)}
+                      class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-2.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+                    />
+                  </div>
+                </Show>
+              </div>
+
+              {/* Cloudflare CDN Active Acceleration */}
+              <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-5 space-y-3">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <p class="inline-flex items-center gap-1.5 text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                      <span>{t("settingsCfCdnTitle")}</span>
+                      <InfoTooltip text={t("tooltipCfCdn")} align="left" />
+                    </p>
+                    <p class="text-[11px] text-[#666666] dark:text-[#a1a1aa] mt-0.5">
+                      {t("settingsCfCdnDesc")}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={props.cfCdnStatus?.testing}
+                    onClick={() => props.onRunCfCdnSpeedtest()}
+                    class="px-3 py-1.5 rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#000000] hover:bg-[#f0f0f0] dark:hover:bg-[#111111] text-xs font-medium text-[#171717] dark:text-[#ededed] disabled:opacity-50 shrink-0 cursor-pointer"
+                  >
+                    {props.cfCdnStatus?.testing
+                      ? t("settingsCfCdnTesting")
+                      : t("settingsCfCdnRunTest")}
+                  </button>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={props.cfCdnEnabled}
+                      onChange={(e) => props.onCfCdnEnabledChange(e.currentTarget.checked)}
+                      class="rounded border-[#eaeaea] dark:border-[#262626]"
+                    />
+                    <span>{t("settingsCfCdnEnabled")}</span>
+                  </label>
+                  <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={props.cfCdnIpv6Enabled}
+                      onChange={(e) => props.onCfCdnIpv6EnabledChange(e.currentTarget.checked)}
+                      class="rounded border-[#eaeaea] dark:border-[#262626]"
+                    />
+                    <span>{t("settingsCfCdnIpv6Enabled")}</span>
+                  </label>
+                </div>
+
+                {/* Live status summary */}
+                <Show when={props.cfCdnStatus}>
+                  {(st) => (
+                    <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#000000] p-3 space-y-2 text-xs">
+                      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div>
+                          <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                            {t("settingsCfCdnBestIpv4")}
+                          </div>
+                          <div class="font-mono font-medium text-[#171717] dark:text-[#ededed] mt-0.5">
+                            {st().best_ipv4 ?? "—"}
+                            <Show when={st().best_ipv4_latency_ms !== null}>
+                              <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa] ml-1.5">
+                                ({st().best_ipv4_latency_ms?.toFixed(1)} ms
+                                <Show when={st().best_ipv4_throughput_mbps !== null}>
+                                  {` · ${st().best_ipv4_throughput_mbps?.toFixed(2)} MB/s`}
+                                </Show>
+                                )
+                              </span>
+                            </Show>
+                          </div>
+                        </div>
+                        <div>
+                          <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                            {t("settingsCfCdnBestIpv6")}
+                          </div>
+                          <div class="font-mono font-medium text-[#171717] dark:text-[#ededed] mt-0.5 break-all">
+                            {st().best_ipv6 ?? "—"}
+                            <Show when={st().best_ipv6_latency_ms !== null}>
+                              <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa] ml-1.5">
+                                ({st().best_ipv6_latency_ms?.toFixed(1)} ms
+                                <Show when={st().best_ipv6_throughput_mbps !== null}>
+                                  {` · ${st().best_ipv6_throughput_mbps?.toFixed(2)} MB/s`}
+                                </Show>
+                                )
+                              </span>
+                            </Show>
+                          </div>
+                        </div>
+                        <div>
+                          <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                            {t("settingsCfCdnLastRun")}
+                          </div>
+                          <div class="text-[#171717] dark:text-[#ededed] mt-0.5">
+                            {st().last_run_unix_ms
+                              ? new Date(st().last_run_unix_ms!).toLocaleString()
+                              : t("settingsCfCdnNotTested")}
+                          </div>
+                        </div>
+                      </div>
+                      <Show when={st().last_error}>
+                        <div class="text-[11px] text-amber-600 dark:text-amber-400">
+                          {st().last_error}
+                        </div>
+                      </Show>
+                      <Show
+                        when={
+                          st().candidates_v4.length > 0 || st().candidates_v6.length > 0
+                        }
+                      >
+                        <details class="pt-1">
+                          <summary class="cursor-pointer text-[11px] text-[#666666] dark:text-[#a1a1aa] hover:text-[#171717] dark:hover:text-[#ededed]">
+                            {t("settingsCfCdnCandidatesTitle")} (IPv4: {st().candidates_v4.length}, IPv6: {st().candidates_v6.length})
+                          </summary>
+                          <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono text-[11px]">
+                            <For each={[...st().candidates_v4, ...st().candidates_v6]}>
+                              {(node) => (
+                                <div class="flex items-center justify-between gap-2 px-2 py-1 rounded border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a]">
+                                  <span class="truncate">{node.ip}</span>
+                                  <span class="text-[#666666] dark:text-[#a1a1aa] shrink-0">
+                                    {node.latency_ms.toFixed(1)} ms
+                                    {node.throughput_mbps !== null
+                                      ? ` · ${node.throughput_mbps.toFixed(2)} MB/s`
+                                      : ""}
+                                  </span>
+                                </div>
+                              )}
+                            </For>
+                          </div>
+                        </details>
+                      </Show>
+                    </div>
+                  )}
+                </Show>
+
+                <Show when={props.cfCdnEnabled}>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
+                        {t("settingsCfCdnIntervalLabel")}
+                      </label>
+                      <input
+                        type="number"
+                        min={60}
+                        value={props.cfCdnIntervalSecs}
+                        onInput={(e) =>
+                          props.onCfCdnIntervalSecsChange(Number(e.currentTarget.value) || 1800)
+                        }
+                        class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-2.5 py-1.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
+                        {t("settingsCfCdnTtlLabel")}
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={props.cfCdnTtlSecs}
+                        onInput={(e) =>
+                          props.onCfCdnTtlSecsChange(Number(e.currentTarget.value) || 60)
+                        }
+                        class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-2.5 py-1.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
+                      {t("settingsCfCdnSpeedtestUrlLabel")}
+                    </label>
+                    <input
+                      type="text"
+                      spellcheck={false}
+                      value={props.cfCdnSpeedtestUrl}
+                      onInput={(e) => props.onCfCdnSpeedtestUrlChange(e.currentTarget.value)}
+                      class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-2.5 py-1.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
+                      {t("settingsCfCdnExcludedLabel")}
+                    </label>
+                    <textarea
+                      rows={2}
+                      spellcheck={false}
+                      placeholder="workers.dev"
+                      value={props.cfCdnExcludedDomainsText}
+                      onInput={(e) => props.onCfCdnExcludedDomainsChange(e.currentTarget.value)}
                       class="w-full bg-[#fafafa] dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-lg p-2.5 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
                     />
                   </div>

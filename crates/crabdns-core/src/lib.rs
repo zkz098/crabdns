@@ -1,5 +1,6 @@
 pub mod acl;
 pub mod cache;
+pub mod cf_cdn;
 pub mod clients;
 mod clock;
 pub mod config;
@@ -37,6 +38,7 @@ mod wire_fast;
 
 pub use acl::{AccessController, AclDecision, IpNet};
 pub use cache::{CacheHit, CacheStats, DnsCache, PersistedCacheEntry};
+pub use cf_cdn::{CfCdnConfig, CfCdnManager, CfCdnStatus, CfSpeedTestNode};
 pub use clients::{
     ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ParsedClientIdentifier,
     ResolvedClientPolicy, ip_to_ptr_domain, validate_client_id, validate_client_identifier,

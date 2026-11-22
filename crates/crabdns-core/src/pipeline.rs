@@ -10,6 +10,7 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 
 use crate::acl::AccessController;
 use crate::cache::{CacheKey, DnsCache};
+use crate::cf_cdn::{CfCdnConfig, CfCdnManager};
 use crate::clients::{
     ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ResolvedClientPolicy,
     ip_to_ptr_domain,
@@ -79,6 +80,7 @@ pub struct DnsPipeline {
     pub(crate) dns64: ArcSwap<Dns64Config>,
     pub(crate) svcb_strip_ech: AtomicBool,
     pub(crate) svcb_strip_hints: AtomicBool,
+    pub(crate) cf_cdn: Arc<CfCdnManager>,
     pub(crate) ede_enabled: AtomicBool,
     pub(crate) dns_cookies: DnsCookieEngine,
     pub(crate) max_udp_payload_size: AtomicU16,
@@ -149,6 +151,7 @@ impl DnsPipeline {
             dns64: ArcSwap::from_pointee(Dns64Config::default()),
             svcb_strip_ech: AtomicBool::new(false),
             svcb_strip_hints: AtomicBool::new(false),
+            cf_cdn: Arc::new(CfCdnManager::new()),
             ede_enabled: AtomicBool::new(true),
             dns_cookies: DnsCookieEngine::new(),
             max_udp_payload_size: AtomicU16::new(DEFAULT_MAX_UDP_PAYLOAD),
@@ -573,6 +576,14 @@ impl DnsPipeline {
     pub fn set_svcb_sanitization(&self, strip_ech: bool, strip_hints: bool) {
         self.svcb_strip_ech.store(strip_ech, Ordering::Relaxed);
         self.svcb_strip_hints.store(strip_hints, Ordering::Relaxed);
+    }
+
+    pub fn cf_cdn_manager(&self) -> &Arc<CfCdnManager> {
+        &self.cf_cdn
+    }
+
+    pub fn reload_cf_cdn(&self, cfg: CfCdnConfig) {
+        self.cf_cdn.reload_config(cfg);
     }
 
     pub fn set_ede_enabled(&self, enabled: bool) {
