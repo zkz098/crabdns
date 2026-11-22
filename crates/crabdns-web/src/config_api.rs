@@ -5,7 +5,10 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use crabdns_core::acl::parse_cidr_list;
-use crabdns_core::{BlockMode, Config, DdrConfig, SplitDnsRule, UpstreamStrategy};
+use crabdns_core::{
+    AccessController, BlockMode, ClientRegistry, Config, DdrConfig, EcsConfig, HostsTable,
+    PrivatePtrRouter, SplitDnsRule, SplitUpstreamRouter, UpstreamPool, UpstreamStrategy,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -254,6 +257,9 @@ pub async fn update_config(
         ));
     }
 
+    let _config_guard = state.app.storage.config_lock().lock().await;
+    let _client_guard = state.app.storage.client_lock().lock().await;
+
     let cleaned_upstreams = clean_string_list(payload.upstreams);
     let current = state.app.config.load_full();
     let bootstrap_dns = clean_string_list(
@@ -325,104 +331,6 @@ pub async fn update_config(
     let tls_key_path = merge_opt_path(payload.tls_key_path, current.tls_key_path.as_deref());
     let rdns_enabled = payload.rdns_enabled.unwrap_or(current.rdns_enabled);
 
-    if let Err(err) = parse_cidr_list(&trusted_proxies) {
-        return Err(bad_request(err.to_string()));
-    }
-
-    if let Err(err) = state
-        .app
-        .pipeline
-        .reload_acl(&allow_cidrs, &deny_cidrs, rate_limit_qps)
-    {
-        return Err(bad_request(err.to_string()));
-    }
-
-    if let Err(err) = state.app.pipeline.reload_ecs(
-        ecs_enabled,
-        ecs_custom_ip.as_deref(),
-        ecs_ipv4_prefix,
-        ecs_ipv6_prefix,
-    ) {
-        return Err(bad_request(err.to_string()));
-    }
-
-    if let Err(err) = state.app.pipeline.reload_upstream_with_options(
-        &cleaned_upstreams,
-        payload.upstream_timeout_ms,
-        strategy,
-        &bootstrap_dns,
-    ) {
-        return Err(bad_request(err.to_string()));
-    }
-
-    if let Err(err) = state.app.pipeline.reload_split_dns_with_bootstrap(
-        &split_dns,
-        payload.upstream_timeout_ms,
-        strategy,
-        &bootstrap_dns,
-    ) {
-        return Err(bad_request(err.to_string()));
-    }
-
-    if let Err(err) = state.app.pipeline.reload_private_ptr(
-        private_ptr_enabled,
-        &private_ptr_upstreams,
-        payload.upstream_timeout_ms,
-        strategy,
-        &bootstrap_dns,
-    ) {
-        return Err(bad_request(err.to_string()));
-    }
-
-    reload_clients_for_config(
-        &state,
-        payload.upstream_timeout_ms,
-        strategy,
-        &bootstrap_dns,
-    )?;
-
-    if (tls_cert_path != current.tls_cert_path || tls_key_path != current.tls_key_path)
-        && let Some(reloader) = &state.app.tls_reloader
-        && let Err(err) = reloader.reload(tls_cert_path.as_deref(), tls_key_path.as_deref())
-    {
-        return Err(bad_request(err));
-    }
-
-    if hosts_enabled {
-        let resolved_hosts = hosts_path.as_deref().unwrap_or("/etc/hosts");
-        if let Err(err) = state
-            .app
-            .pipeline
-            .reload_hosts_from_path(std::path::Path::new(resolved_hosts))
-        {
-            tracing::warn!(path = %resolved_hosts, error = %err, "failed to load hosts file");
-        }
-    }
-
-    state.app.pipeline.set_block_mode(block_mode);
-    state
-        .app
-        .pipeline
-        .set_cname_cloaking(cname_cloaking_blocking);
-    state.app.pipeline.set_dnssec_enabled(dnssec_enabled);
-    state.app.pipeline.set_hosts_enabled(hosts_enabled);
-    state
-        .app
-        .pipeline
-        .set_dns_rebinding_protection(dns_rebinding_protection);
-    state.app.pipeline.set_block_any_queries(block_any_queries);
-    state.app.pipeline.set_rdns_enabled(rdns_enabled);
-    state.app.pipeline.reload_ddr(DdrConfig {
-        enabled: ddr_enabled,
-        hostname: ddr_hostname.clone(),
-        dot_port: current.listen_dot.map(|a| a.port()),
-        doh_enabled,
-        doh_port: current
-            .listen_web_tls
-            .map(|a| a.port())
-            .or(Some(current.listen_web.port())),
-    });
-
     let cache_min_ttl_secs = payload
         .cache_min_ttl_secs
         .unwrap_or(current.cache_min_ttl_secs)
@@ -442,19 +350,75 @@ pub async fn update_config(
         .cache_persist_enabled
         .unwrap_or(current.cache_persist_enabled);
 
-    let cache_changed = current.cache_size != payload.cache_size
-        || current.optimistic_cache != payload.optimistic_cache
-        || current.cache_min_ttl_secs != cache_min_ttl_secs
-        || current.cache_max_ttl_secs != cache_max_ttl_secs
-        || current.cache_prefetch_enabled != cache_prefetch_enabled;
-    if cache_changed {
-        state.app.pipeline.reload_cache_with_options(
-            payload.cache_size,
-            payload.optimistic_cache,
-            cache_min_ttl_secs,
-            cache_max_ttl_secs,
-            cache_prefetch_enabled,
-        );
+    // Phase 1: Validate and build all runtime objects without mutating live state.
+    if let Err(err) = parse_cidr_list(&trusted_proxies) {
+        return Err(bad_request(err.to_string()));
+    }
+    let next_acl = AccessController::new(&allow_cidrs, &deny_cidrs, rate_limit_qps)
+        .map_err(|err| bad_request(err.to_string()))?;
+    let next_ecs = EcsConfig::from_parts(
+        ecs_enabled,
+        ecs_custom_ip.as_deref(),
+        ecs_ipv4_prefix,
+        ecs_ipv6_prefix,
+    )
+    .map_err(|err| bad_request(err.to_string()))?;
+    let next_upstream = UpstreamPool::new_with_bootstrap(
+        &cleaned_upstreams,
+        payload.upstream_timeout_ms,
+        strategy,
+        &bootstrap_dns,
+    )
+    .map_err(|err| bad_request(err.to_string()))?;
+    let next_split_dns = SplitUpstreamRouter::new_with_bootstrap(
+        &split_dns,
+        payload.upstream_timeout_ms,
+        strategy,
+        &bootstrap_dns,
+    )
+    .map_err(|err| bad_request(err.to_string()))?;
+    let next_private_ptr = PrivatePtrRouter::new(
+        private_ptr_enabled,
+        &private_ptr_upstreams,
+        payload.upstream_timeout_ms,
+        strategy,
+        &bootstrap_dns,
+    )
+    .map_err(|err| bad_request(err.to_string()))?;
+
+    let next_clients = compile_clients_for_config(
+        &state,
+        payload.upstream_timeout_ms,
+        strategy,
+        &bootstrap_dns,
+    )
+    .await?;
+
+    let hosts_table_opt = if hosts_enabled {
+        let resolved_hosts = hosts_path.as_deref().unwrap_or("/etc/hosts").to_string();
+        let path_for_log = resolved_hosts.clone();
+        match tokio::task::spawn_blocking(move || HostsTable::from_file(Path::new(&resolved_hosts)))
+            .await
+        {
+            Ok(Ok(table)) => Some(table),
+            Ok(Err(err)) => {
+                tracing::warn!(path = %path_for_log, error = %err, "failed to load hosts file");
+                None
+            }
+            Err(err) => {
+                tracing::warn!(path = %path_for_log, error = %err, "hosts load task panicked");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if (tls_cert_path != current.tls_cert_path || tls_key_path != current.tls_key_path)
+        && let Some(reloader) = &state.app.tls_reloader
+        && let Err(err) = reloader.reload(tls_cert_path.as_deref(), tls_key_path.as_deref())
+    {
+        return Err(bad_request(err));
     }
 
     let mut next = (*current).clone();
@@ -487,7 +451,7 @@ pub async fn update_config(
     next.private_ptr_enabled = private_ptr_enabled;
     next.private_ptr_upstreams = private_ptr_upstreams;
     next.ddr_enabled = ddr_enabled;
-    next.ddr_hostname = ddr_hostname;
+    next.ddr_hostname = ddr_hostname.clone();
     next.dns_rebinding_protection = dns_rebinding_protection;
     next.block_any_queries = block_any_queries;
     next.trusted_proxies = trusted_proxies;
@@ -495,39 +459,104 @@ pub async fn update_config(
     next.tls_key_path = tls_key_path;
     next.rdns_enabled = rdns_enabled;
 
-    state.app.storage.save_config(&next).map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        )
-    })?;
+    // Phase 2: Persist config first, then atomically swap all runtime state.
+    let storage = Arc::clone(&state.app.storage);
+    let to_save = next.clone();
+    tokio::task::spawn_blocking(move || storage.save_config(&to_save))
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+        })?
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+        })?;
+
+    state.app.pipeline.swap_acl(next_acl);
+    state.app.pipeline.swap_ecs(next_ecs);
+    state.app.pipeline.swap_upstream(next_upstream);
+    state.app.pipeline.swap_split_dns(next_split_dns);
+    state.app.pipeline.swap_private_ptr(next_private_ptr);
+    state.app.pipeline.swap_clients(next_clients);
+    if let Some(table) = hosts_table_opt {
+        state.app.pipeline.reload_hosts_table(table);
+    }
+    state.app.pipeline.set_block_mode(block_mode);
+    state
+        .app
+        .pipeline
+        .set_cname_cloaking(cname_cloaking_blocking);
+    state.app.pipeline.set_dnssec_enabled(dnssec_enabled);
+    state.app.pipeline.set_hosts_enabled(hosts_enabled);
+    state
+        .app
+        .pipeline
+        .set_dns_rebinding_protection(dns_rebinding_protection);
+    state.app.pipeline.set_block_any_queries(block_any_queries);
+    state.app.pipeline.set_rdns_enabled(rdns_enabled);
+    state.app.pipeline.reload_ddr(DdrConfig {
+        enabled: ddr_enabled,
+        hostname: ddr_hostname,
+        dot_port: current.listen_dot.map(|a| a.port()),
+        doh_enabled,
+        doh_port: current
+            .listen_web_tls
+            .map(|a| a.port())
+            .or(Some(current.listen_web.port())),
+    });
+
+    let cache_changed = current.cache_size != payload.cache_size
+        || current.optimistic_cache != payload.optimistic_cache
+        || current.cache_min_ttl_secs != cache_min_ttl_secs
+        || current.cache_max_ttl_secs != cache_max_ttl_secs
+        || current.cache_prefetch_enabled != cache_prefetch_enabled;
+    if cache_changed {
+        state.app.pipeline.reload_cache_with_options(
+            payload.cache_size,
+            payload.optimistic_cache,
+            cache_min_ttl_secs,
+            cache_max_ttl_secs,
+            cache_prefetch_enabled,
+        );
+    }
 
     let response = ConfigResponse::from(&next);
     state.app.config.store(Arc::new(next));
     Ok(Json(response))
 }
 
-fn reload_clients_for_config(
+async fn compile_clients_for_config(
     state: &RouterState,
     timeout_ms: u64,
     strategy: UpstreamStrategy,
     bootstrap_dns: &[String],
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let clients = state.app.storage.list_clients().map_err(|err| {
+) -> Result<ClientRegistry, (StatusCode, Json<serde_json::Value>)> {
+    let storage = Arc::clone(&state.app.storage);
+    let (clients, groups) = tokio::task::spawn_blocking(move || {
+        Ok::<_, crabdns_storage::StorageError>((
+            storage.list_clients()?,
+            storage.list_client_groups()?,
+        ))
+    })
+    .await
+    .map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+    })?
+    .map_err(|err| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": err.to_string() })),
         )
     })?;
-    let groups = state.app.storage.list_client_groups().map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": err.to_string() })),
-        )
-    })?;
-    state
-        .app
-        .pipeline
-        .reload_clients(&clients, &groups, timeout_ms, strategy, bootstrap_dns)
+
+    ClientRegistry::compile(&clients, &groups, timeout_ms, strategy, bootstrap_dns)
         .map_err(|err| bad_request(err.to_string()))
 }

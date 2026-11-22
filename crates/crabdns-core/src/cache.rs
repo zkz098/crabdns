@@ -220,7 +220,8 @@ impl DnsCache {
 
     pub fn export_persisted(&self, now_unix_secs: i64) -> Vec<PersistedCacheEntry> {
         let stale_secs = self.stale_grace_secs();
-        let mut out = Vec::new();
+        let cap = usize::try_from(self.inner.entry_count()).unwrap_or(0);
+        let mut out = Vec::with_capacity(cap);
         for (key, entry) in &self.inner {
             let elapsed_secs = i64::try_from(entry.inserted_at.elapsed().as_secs()).unwrap_or(0);
             let ttl_secs = u32::try_from(entry.ttl.as_secs()).unwrap_or(self.max_ttl_secs);

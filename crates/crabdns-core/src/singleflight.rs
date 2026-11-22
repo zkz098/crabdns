@@ -6,7 +6,8 @@ use dashmap::mapref::entry::Entry;
 use foldhash::fast::RandomState;
 use tokio::sync::watch;
 
-type FlightResult<V> = std::result::Result<V, String>;
+pub type FlightResult<V> = std::result::Result<V, String>;
+pub type FlightReceiver<V> = watch::Receiver<Option<FlightResult<V>>>;
 type FlightMap<K, V> = DashMap<K, watch::Sender<Option<FlightResult<V>>>, RandomState>;
 
 /// Deduplicates concurrent in-flight async operations sharing the same key.

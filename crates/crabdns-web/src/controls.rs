@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
@@ -12,7 +13,7 @@ use tokio::sync::broadcast;
 use ts_rs::TS;
 
 use crate::RouterState;
-use crate::subscriptions::{ApiError, rebuild_filter_engine};
+use crate::subscriptions::{ApiError, rebuild_filter_engine_async};
 
 const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
 const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -117,8 +118,15 @@ pub async fn resume_blocking(State(state): State<RouterState>) -> Json<BlockingS
 
 pub async fn flush_cache(State(state): State<RouterState>) -> Json<OkResponse> {
     state.app.pipeline.cache().flush();
-    if let Err(err) = state.app.storage.clear_dns_cache() {
-        tracing::warn!(error = %err, "failed to clear persisted dns cache");
+    let storage = Arc::clone(&state.app.storage);
+    match tokio::task::spawn_blocking(move || storage.clear_dns_cache()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "failed to clear persisted dns cache");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "clear persisted dns cache task panicked");
+        }
     }
     Json(OkResponse { status: "ok" })
 }
@@ -141,31 +149,35 @@ pub async fn quick_rule(
         QuickRuleAction::Block => format!("||{clean}^"),
     };
 
-    let _guard = state.sub_lock.lock().await;
-    let existing = state
-        .app
-        .storage
-        .load_custom_rules()
-        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or_default();
-
-    let already_present = existing.lines().any(|line| line.trim() == rule);
-    let added = !already_present;
-    if added {
-        let mut updated = existing.trim_end().to_string();
-        if !updated.is_empty() {
+    let _guard = state.app.storage.subscription_lock().lock().await;
+    let storage = Arc::clone(&state.app.storage);
+    let rule_clone = rule.clone();
+    let added = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let existing = storage
+            .load_custom_rules()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let already_present = existing.lines().any(|line| line.trim() == rule_clone);
+        let added = !already_present;
+        if added {
+            let mut updated = existing.trim_end().to_string();
+            if !updated.is_empty() {
+                updated.push('\n');
+            }
+            updated.push_str(&rule_clone);
             updated.push('\n');
+            storage
+                .save_custom_rules(&updated)
+                .map_err(|e| e.to_string())?;
         }
-        updated.push_str(&rule);
-        updated.push('\n');
-        state
-            .app
-            .storage
-            .save_custom_rules(&updated)
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
+        Ok(added)
+    })
+    .await
+    .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    rebuild_filter_engine(&state.app.storage, &state.app.pipeline)
+    rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
+        .await
         .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.app.pipeline.cache().flush();
 

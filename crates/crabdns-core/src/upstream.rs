@@ -1,12 +1,13 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use dashmap::DashMap;
+use foldhash::fast::RandomState;
 use futures_util::future::select_ok;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
+use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
@@ -17,6 +18,7 @@ use ts_rs::TS;
 use crate::clock::monotonic_now_ms;
 use crate::config::UpstreamStrategy;
 use crate::error::{CoreError, Result};
+use crate::singleflight::{FlightRole, Singleflight, wait_follower};
 use crate::upstream_transport::{
     ConnPool, UdpSocketPool, exchange_doh, exchange_dot_addrs, exchange_tcp, exchange_tcp_pooled,
     exchange_udp, is_udp_truncated, parse_socket_addr, try_exchange_dot_pooled,
@@ -25,6 +27,21 @@ pub(crate) use crate::upstream_transport::{read_tcp_framed, send_tcp_framed, spl
 
 const UNHEALTHY_FAILURE_THRESHOLD: u32 = 3;
 const UNHEALTHY_COOLDOWN_MS: u64 = 15_000;
+const BOOTSTRAP_CACHE_CAPACITY: u64 = 256;
+
+static TX_ID_SEQ: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+
+/// Generates a low-collision DNS transaction ID for internal queries (bootstrap, DNSSEC, rDNS).
+pub(crate) fn next_tx_id() -> u16 {
+    let nanos = u64::from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos()),
+    );
+    let seq = TX_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mixed = (seq ^ nanos).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    ((mixed >> 32) ^ mixed) as u16
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -44,9 +61,23 @@ pub struct UpstreamStatus {
 struct EndpointHealth {
     consecutive_failures: AtomicU32,
     unhealthy_until_ms: AtomicU64,
+    probe_inflight: AtomicBool,
     ewma_latency_us: AtomicU64,
     total_requests: AtomicU64,
     total_failures: AtomicU64,
+}
+
+struct ProbeGuard<'a> {
+    health: &'a EndpointHealth,
+    defused: bool,
+}
+
+impl Drop for ProbeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.defused {
+            self.health.probe_inflight.store(false, Ordering::Release);
+        }
+    }
 }
 
 impl EndpointHealth {
@@ -55,10 +86,36 @@ impl EndpointHealth {
         until == 0 || now_ms >= until
     }
 
+    fn try_select(&self, now_ms: u64) -> (bool, Option<ProbeGuard<'_>>) {
+        let until = self.unhealthy_until_ms.load(Ordering::Relaxed);
+        if until == 0 {
+            return (true, None);
+        }
+        if now_ms < until {
+            return (false, None);
+        }
+        // Half-open cooldown expired: allow only one concurrent probe to avoid thundering herd.
+        if self
+            .probe_inflight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return (
+                true,
+                Some(ProbeGuard {
+                    health: self,
+                    defused: false,
+                }),
+            );
+        }
+        (false, None)
+    }
+
     fn record_success(&self, elapsed_us: u64) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         self.consecutive_failures.store(0, Ordering::Relaxed);
         self.unhealthy_until_ms.store(0, Ordering::Relaxed);
+        self.probe_inflight.store(false, Ordering::Release);
 
         let prev = self.ewma_latency_us.load(Ordering::Relaxed);
         let next = if prev == 0 {
@@ -73,12 +130,14 @@ impl EndpointHealth {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         self.total_failures.fetch_add(1, Ordering::Relaxed);
         let fails = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        if fails >= UNHEALTHY_FAILURE_THRESHOLD {
+        let was_open = self.unhealthy_until_ms.load(Ordering::Relaxed) != 0;
+        if was_open || fails >= UNHEALTHY_FAILURE_THRESHOLD {
             self.unhealthy_until_ms.store(
                 now_ms.saturating_add(UNHEALTHY_COOLDOWN_MS),
                 Ordering::Relaxed,
             );
         }
+        self.probe_inflight.store(false, Ordering::Release);
     }
 
     fn snapshot(&self, label: String, now_ms: u64) -> UpstreamStatus {
@@ -158,11 +217,12 @@ struct CachedIpEntry {
     expires_at: Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct BootstrapResolver {
     endpoints: Vec<BootstrapEndpoint>,
     timeout: Duration,
-    cache: Arc<DashMap<String, CachedIpEntry>>,
+    cache: Cache<String, CachedIpEntry, RandomState>,
+    inflight: Arc<Singleflight<String, Vec<IpAddr>>>,
 }
 
 impl BootstrapResolver {
@@ -174,10 +234,15 @@ impl BootstrapResolver {
                 endpoints.push(parse_bootstrap_endpoint(trimmed)?);
             }
         }
+        let cache = Cache::builder()
+            .max_capacity(BOOTSTRAP_CACHE_CAPACITY)
+            .time_to_live(Duration::from_hours(1))
+            .build_with_hasher(RandomState::default());
         Ok(Self {
             endpoints,
             timeout,
-            cache: Arc::new(DashMap::new()),
+            cache,
+            inflight: Arc::new(Singleflight::new()),
         })
     }
 
@@ -199,28 +264,40 @@ impl BootstrapResolver {
         if let Some(entry) = self.cache.get(&key)
             && Instant::now() < entry.expires_at
         {
-            return Ok(entry.ips.clone());
+            return Ok(entry.ips);
         }
 
-        for endpoint in &self.endpoints {
-            if let Ok((ips, ttl_secs)) = query_bootstrap_host(endpoint, &key, self.timeout).await
-                && !ips.is_empty()
-            {
-                let ttl = Duration::from_secs(u64::from(ttl_secs).clamp(30, 3600));
-                self.cache.insert(
-                    key,
-                    CachedIpEntry {
-                        ips: ips.clone(),
-                        expires_at: Instant::now() + ttl,
-                    },
-                );
-                return Ok(ips);
+        match self.inflight.acquire(key.clone()) {
+            FlightRole::Leader(guard) => {
+                if let Some(entry) = self.cache.get(&key)
+                    && Instant::now() < entry.expires_at
+                {
+                    guard.complete(Ok(entry.ips.clone()));
+                    return Ok(entry.ips);
+                }
+                for endpoint in &self.endpoints {
+                    if let Ok((ips, ttl_secs)) =
+                        query_bootstrap_host(endpoint, &key, self.timeout).await
+                        && !ips.is_empty()
+                    {
+                        let ttl = Duration::from_secs(u64::from(ttl_secs).clamp(30, 3600));
+                        self.cache.insert(
+                            key,
+                            CachedIpEntry {
+                                ips: ips.clone(),
+                                expires_at: Instant::now() + ttl,
+                            },
+                        );
+                        guard.complete(Ok(ips.clone()));
+                        return Ok(ips);
+                    }
+                }
+                let msg = format!("bootstrap DNS failed to resolve '{host_clean}'");
+                guard.complete(Err(msg.clone()));
+                Err(CoreError::Upstream(msg))
             }
+            FlightRole::Follower(rx) => wait_follower(rx).await.map_err(CoreError::Upstream),
         }
-
-        Err(CoreError::Upstream(format!(
-            "bootstrap DNS failed to resolve '{host_clean}'"
-        )))
     }
 
     pub(crate) async fn resolve_socket_addrs(
@@ -282,8 +359,8 @@ async fn query_bootstrap_host(
         .map_err(|e| CoreError::Upstream(format!("invalid hostname '{host}': {e}")))?;
 
     let (res_a, res_aaaa) = tokio::join!(
-        query_bootstrap_record(endpoint, name.clone(), RecordType::A, 0xB001, timeout),
-        query_bootstrap_record(endpoint, name, RecordType::AAAA, 0xB002, timeout),
+        query_bootstrap_record(endpoint, name.clone(), RecordType::A, next_tx_id(), timeout),
+        query_bootstrap_record(endpoint, name, RecordType::AAAA, next_tx_id(), timeout),
     );
 
     let mut ips = Vec::new();
@@ -342,6 +419,11 @@ async fn query_bootstrap_record(
 
     let resp = Message::from_vec(&raw_resp)
         .map_err(|e| CoreError::Protocol(format!("invalid bootstrap DNS response: {e}")))?;
+    if resp.id != tx_id {
+        return Err(CoreError::Upstream(
+            "bootstrap DNS response transaction ID mismatch".to_string(),
+        ));
+    }
     if resp.response_code != ResponseCode::NoError {
         return Err(CoreError::Upstream(format!(
             "bootstrap DNS returned {}",
@@ -454,6 +536,17 @@ impl UpstreamPool {
         self.strategy
     }
 
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    pub fn query_budget(&self) -> Duration {
+        let mult = u32::try_from(self.endpoints.len().clamp(1, 3)).unwrap_or(3);
+        self.timeout
+            .saturating_mul(mult)
+            .clamp(Duration::from_secs(3), Duration::from_secs(30))
+    }
+
     pub fn has_private_endpoint(&self) -> bool {
         self.endpoints.iter().any(|ep| match ep {
             UpstreamEndpoint::Udp(addr) | UpstreamEndpoint::Tcp(addr) => {
@@ -479,43 +572,49 @@ impl UpstreamPool {
             0x02, 0x00, 0x01,
         ];
         for idx in 0..self.endpoints.len() {
-            let _ = self.try_endpoint(idx, &PROBE_QUERY).await;
+            let _ = self.try_endpoint(idx, &PROBE_QUERY, None).await;
         }
     }
 
     pub async fn exchange(&self, query_wire: &[u8]) -> Result<(Vec<u8>, String)> {
         let candidates = self.ordered_candidates();
         if self.strategy == UpstreamStrategy::Parallel && candidates.len() > 1 {
-            return self.exchange_parallel(&candidates, query_wire).await;
+            return self.exchange_parallel(candidates, query_wire).await;
         }
-        self.exchange_sequential(&candidates, query_wire).await
+        self.exchange_sequential(candidates, query_wire).await
     }
 
-    fn ordered_candidates(&self) -> Vec<usize> {
+    fn ordered_candidates(&self) -> Vec<(usize, Option<ProbeGuard<'_>>)> {
         let now_ms = monotonic_now_ms();
-        let mut healthy: Vec<usize> = (0..self.endpoints.len())
-            .filter(|&i| self.health[i].is_healthy(now_ms))
-            .collect();
-        if healthy.is_empty() {
-            healthy = (0..self.endpoints.len()).collect();
+        let mut selected = Vec::with_capacity(self.endpoints.len());
+        for (i, health) in self.health.iter().enumerate() {
+            let (ok, guard) = health.try_select(now_ms);
+            if ok {
+                selected.push((i, guard));
+            }
+        }
+        if selected.is_empty() {
+            selected = (0..self.endpoints.len()).map(|i| (i, None)).collect();
         }
         if self.strategy == UpstreamStrategy::LeastLatency {
-            healthy.sort_by_key(|&i| {
-                let lat = self.health[i].ewma_latency_us.load(Ordering::Relaxed);
-                if lat == 0 { 0 } else { lat }
+            selected.sort_by_key(|(i, _)| {
+                let lat = self.health[*i].ewma_latency_us.load(Ordering::Relaxed);
+                let fails = self.health[*i].consecutive_failures.load(Ordering::Relaxed);
+                let base = if lat == 0 { 0 } else { lat };
+                base.saturating_add(u64::from(fails).saturating_mul(50_000))
             });
         }
-        healthy
+        selected
     }
 
     async fn exchange_sequential(
         &self,
-        candidates: &[usize],
+        candidates: Vec<(usize, Option<ProbeGuard<'_>>)>,
         query_wire: &[u8],
     ) -> Result<(Vec<u8>, String)> {
         let mut last_err = CoreError::Upstream("no upstream endpoints configured".to_string());
-        for &idx in candidates {
-            match self.try_endpoint(idx, query_wire).await {
+        for (idx, guard) in candidates {
+            match self.try_endpoint(idx, query_wire, guard).await {
                 Ok(ok) => return Ok(ok),
                 Err(err) => last_err = err,
             }
@@ -525,12 +624,12 @@ impl UpstreamPool {
 
     async fn exchange_parallel(
         &self,
-        candidates: &[usize],
+        candidates: Vec<(usize, Option<ProbeGuard<'_>>)>,
         query_wire: &[u8],
     ) -> Result<(Vec<u8>, String)> {
         let futs: Vec<_> = candidates
-            .iter()
-            .map(|&idx| Box::pin(self.try_endpoint(idx, query_wire)))
+            .into_iter()
+            .map(|(idx, guard)| Box::pin(self.try_endpoint(idx, query_wire, guard)))
             .collect();
         match select_ok(futs).await {
             Ok((res, _remaining)) => Ok(res),
@@ -538,7 +637,12 @@ impl UpstreamPool {
         }
     }
 
-    async fn try_endpoint(&self, idx: usize, query_wire: &[u8]) -> Result<(Vec<u8>, String)> {
+    async fn try_endpoint(
+        &self,
+        idx: usize,
+        query_wire: &[u8],
+        mut probe_guard: Option<ProbeGuard<'_>>,
+    ) -> Result<(Vec<u8>, String)> {
         let endpoint = &self.endpoints[idx];
         let health = &self.health[idx];
         let label = endpoint_label(endpoint);
@@ -548,16 +652,25 @@ impl UpstreamPool {
         {
             Ok(Ok(resp)) => {
                 let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                if let Some(ref mut g) = probe_guard {
+                    g.defused = true;
+                }
                 health.record_success(elapsed_us);
                 Ok((resp, label))
             }
             Ok(Err(err)) => {
                 tracing::warn!(upstream = %label, error = %err, "upstream query failed");
+                if let Some(ref mut g) = probe_guard {
+                    g.defused = true;
+                }
                 health.record_failure(monotonic_now_ms());
                 Err(err)
             }
             Err(_) => {
                 tracing::warn!(upstream = %label, "upstream query timed out");
+                if let Some(ref mut g) = probe_guard {
+                    g.defused = true;
+                }
                 health.record_failure(monotonic_now_ms());
                 Err(CoreError::Upstream(format!("upstream {label} timed out")))
             }
@@ -786,5 +899,43 @@ mod tests {
             addrs,
             vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10)), 0)]
         );
+    }
+
+    #[test]
+    fn test_half_open_single_probe_prevents_thundering_herd() {
+        let health = EndpointHealth::default();
+        let start = 1_000_u64;
+        for _ in 0..UNHEALTHY_FAILURE_THRESHOLD {
+            health.record_failure(start);
+        }
+        assert!(!health.is_healthy(start + 1));
+
+        // During cooldown, no request is selected.
+        let (ok_during, guard_during) = health.try_select(start + 100);
+        assert!(!ok_during);
+        assert!(guard_during.is_none());
+
+        // At cooldown expiry, only one concurrent caller wins the half-open probe.
+        let half_open_at = start + UNHEALTHY_COOLDOWN_MS;
+        let (ok1, guard1) = health.try_select(half_open_at);
+        assert!(ok1);
+        assert!(guard1.is_some());
+
+        let (ok2, guard2) = health.try_select(half_open_at);
+        assert!(!ok2);
+        assert!(guard2.is_none());
+
+        // Dropping the probe guard (simulating task cancellation) frees the slot.
+        drop(guard1);
+        let (ok3, guard3) = health.try_select(half_open_at);
+        assert!(ok3);
+        assert!(guard3.is_some());
+
+        // Completing a probe failure immediately re-arms cooldown.
+        if let Some(mut g) = guard3 {
+            g.defused = true;
+        }
+        health.record_failure(half_open_at + 10);
+        assert!(!health.is_healthy(half_open_at + 11));
     }
 }

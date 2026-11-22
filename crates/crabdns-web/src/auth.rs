@@ -412,7 +412,15 @@ pub async fn login(
     }
 
     let user_ok = payload.username.trim() == cfg.web_username;
-    let pass_ok = verify_password(&payload.password, &cfg.web_password_hash);
+    let pass_ok = if user_ok {
+        let password = payload.password;
+        let stored_hash = cfg.web_password_hash.clone();
+        tokio::task::spawn_blocking(move || verify_password(&password, &stored_hash))
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
     if !user_ok || !pass_ok {
         state.login_limiter.record_failure(client_ip);
         return (
@@ -482,6 +490,7 @@ pub async fn update_auth(
         ));
     }
 
+    let _config_guard = state.app.storage.config_lock().lock().await;
     let current = state.app.config.load_full();
     let new_pass = payload
         .password
@@ -499,24 +508,47 @@ pub async fn update_auth(
     let mut next = (*current).clone();
     next.web_auth_enabled = payload.enabled;
     next.web_username.clone_from(&username);
+    let mut clear_sessions = false;
     if let Some(pw) = new_pass {
-        next.web_password_hash = hash_password(pw).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e })),
-            )
-        })?;
-        state.sessions.clear_all();
+        let pw_owned = pw.to_string();
+        next.web_password_hash = tokio::task::spawn_blocking(move || hash_password(&pw_owned))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e })),
+                )
+            })?;
+        clear_sessions = true;
     } else if !payload.enabled {
-        state.sessions.clear_all();
+        clear_sessions = true;
     }
 
-    state.app.storage.save_config(&next).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
+    let storage = Arc::clone(&state.app.storage);
+    let to_save = next.clone();
+    tokio::task::spawn_blocking(move || storage.save_config(&to_save))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+    if clear_sessions {
+        state.sessions.clear_all();
+    }
     state.app.config.store(Arc::new(next));
 
     Ok(Json(AuthStatusResponse {

@@ -5,10 +5,11 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use crabdns_core::{Config, DnsPipeline, QueryProtocol, validate_client_id};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
-use crate::handle_dns_stream_with_context;
+use crate::{GRACEFUL_DRAIN_TIMEOUT, drain_join_set, handle_dns_stream_with_context};
 
 fn extract_dot_client_id(sni: Option<&str>, base_hostname: Option<&str>) -> Option<String> {
     let sni = sni?.trim().trim_end_matches('.');
@@ -33,55 +34,70 @@ pub async fn run_dot_server(
     pipeline: Arc<DnsPipeline>,
     max_connections: usize,
     idle_timeout: Duration,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let limiter = Arc::new(Semaphore::new(max_connections.max(1)));
+    let mut tasks = JoinSet::new();
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(error = %err, "DoT accept error; backing off");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                continue;
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
             }
-        };
-        let _ = stream.set_nodelay(true);
-        let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
-            tracing::warn!(peer = %peer, "DoT connection rejected: max connections reached");
-            drop(stream);
-            continue;
-        };
-        let tls = acceptor.load_full();
-        let cfg = Arc::clone(&config);
-        let pipe = Arc::clone(&pipeline);
-        tokio::spawn(async move {
-            let _permit = permit;
-            match tokio::time::timeout(idle_timeout, tls.accept(stream)).await {
-                Ok(Ok(tls_stream)) => {
-                    let sni = tls_stream.get_ref().1.server_name().map(str::to_string);
-                    let ddr_host = cfg.load().ddr_hostname.clone();
-                    let client_id = extract_dot_client_id(sni.as_deref(), ddr_host.as_deref());
-                    if let Err(err) = handle_dns_stream_with_context(
-                        tls_stream,
-                        peer,
-                        pipe,
-                        idle_timeout,
-                        QueryProtocol::Dot,
-                        client_id,
-                    )
-                    .await
-                    {
-                        tracing::debug!(peer = %peer, error = %err, "DoT DNS connection closed");
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+            accept_res = listener.accept() => {
+                let (stream, peer) = match accept_res {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "DoT accept error; backing off");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
                     }
-                }
-                Ok(Err(err)) => {
-                    tracing::debug!(peer = %peer, error = %err, "DoT TLS handshake failed");
-                }
-                Err(_) => {
-                    tracing::debug!(peer = %peer, "DoT TLS handshake timed out");
-                }
+                };
+                let _ = stream.set_nodelay(true);
+                let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
+                    tracing::warn!(peer = %peer, "DoT connection rejected: max connections reached");
+                    drop(stream);
+                    continue;
+                };
+                let tls = acceptor.load_full();
+                let cfg = Arc::clone(&config);
+                let pipe = Arc::clone(&pipeline);
+                let conn_shutdown = shutdown_rx.clone();
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    match tokio::time::timeout(idle_timeout, tls.accept(stream)).await {
+                        Ok(Ok(tls_stream)) => {
+                            let sni = tls_stream.get_ref().1.server_name().map(str::to_string);
+                            let ddr_host = cfg.load().ddr_hostname.clone();
+                            let client_id = extract_dot_client_id(sni.as_deref(), ddr_host.as_deref());
+                            if let Err(err) = handle_dns_stream_with_context(
+                                tls_stream,
+                                peer,
+                                pipe,
+                                idle_timeout,
+                                QueryProtocol::Dot,
+                                client_id,
+                                conn_shutdown,
+                            )
+                            .await
+                            {
+                                tracing::debug!(peer = %peer, error = %err, "DoT DNS connection closed");
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            tracing::debug!(peer = %peer, error = %err, "DoT TLS handshake failed");
+                        }
+                        Err(_) => {
+                            tracing::debug!(peer = %peer, "DoT TLS handshake timed out");
+                        }
+                    }
+                });
             }
-        });
+        }
     }
+    drain_join_set(&mut tasks, GRACEFUL_DRAIN_TIMEOUT).await;
 }
 
 pub async fn bind_dot_listener(addr: SocketAddr) -> anyhow::Result<TcpListener> {

@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -19,7 +19,7 @@ use crate::acl::IpNet;
 use crate::config::{BlockMode, UpstreamStrategy};
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision, FilterEngine};
-use crate::upstream::UpstreamPool;
+use crate::upstream::{UpstreamPool, next_tx_id};
 
 const RDNS_CACHE_CAPACITY: u64 = 4096;
 const RDNS_CACHE_TTL: Duration = Duration::from_mins(15);
@@ -417,10 +417,7 @@ impl ClientNameResolver {
 async fn resolve_ptr_name(ip: IpAddr, upstream: &UpstreamPool) -> Option<String> {
     let ptr_domain = format!("{}.", ip_to_ptr_domain(ip));
     let name = Name::from_ascii(&ptr_domain).ok()?;
-    let tx_id = (SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0x5244, |d| d.subsec_nanos())
-        & 0xFFFF) as u16;
+    let tx_id = next_tx_id();
     let mut msg = Message::new(tx_id, MessageType::Query, OpCode::Query);
     msg.metadata.recursion_desired = true;
     msg.add_query(Query::query(name, RecordType::PTR));
@@ -431,7 +428,7 @@ async fn resolve_ptr_name(ip: IpAddr, upstream: &UpstreamPool) -> Option<String>
         .ok()?
         .ok()?;
     let resp = Message::from_vec(&resp_wire).ok()?;
-    if resp.response_code != ResponseCode::NoError {
+    if resp.id != tx_id || resp.response_code != ResponseCode::NoError {
         return None;
     }
     for answer in &resp.answers {

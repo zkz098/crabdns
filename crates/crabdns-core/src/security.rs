@@ -37,16 +37,21 @@ fn is_private_or_special_v6(v6: Ipv6Addr) -> bool {
     v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || is_ula || is_link_local
 }
 
-/// Returns `true` if the DNS response contains an `A` or `AAAA` answer pointing to a private/special IP.
-pub fn contains_rebinding_ip(resp_bytes: &[u8]) -> bool {
-    let Ok(msg) = Message::from_vec(resp_bytes) else {
-        return false;
-    };
+/// Returns `true` if the parsed DNS response contains an `A` or `AAAA` answer pointing to a private/special IP.
+pub fn contains_rebinding_ip_msg(msg: &Message) -> bool {
     msg.answers.iter().any(|record| match &record.data {
         RData::A(a) => is_private_or_special_v4(a.0),
         RData::AAAA(aaaa) => is_private_or_special_v6(aaaa.0),
         _ => false,
     })
+}
+
+/// Returns `true` if the DNS response contains an `A` or `AAAA` answer pointing to a private/special IP.
+pub fn contains_rebinding_ip(resp_bytes: &[u8]) -> bool {
+    let Ok(msg) = Message::from_vec(resp_bytes) else {
+        return false;
+    };
+    contains_rebinding_ip_msg(&msg)
 }
 
 /// Builds an RFC 8482 `HINFO` response to suppress `ANY` queries and prevent DNS amplification.

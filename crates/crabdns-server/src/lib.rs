@@ -13,8 +13,8 @@ use crabdns_web::tls_api::TlsReloader;
 use crabdns_web::{AppState, build_router};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{Semaphore, broadcast, mpsc};
-use tokio::task::JoinHandle;
+use tokio::sync::{Semaphore, broadcast, mpsc, watch};
+use tokio::task::{JoinHandle, JoinSet};
 
 mod dot;
 mod tasks;
@@ -23,7 +23,10 @@ mod tls;
 pub use tasks::prune_logs_once;
 
 const UDP_MAX_INFLIGHT: usize = 2048;
+const WEB_MAX_CONNECTIONS: usize = 512;
 const ACCEPT_ERR_BACKOFF: Duration = Duration::from_millis(50);
+pub(crate) const GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct RunningServer {
     pub dns_addr: SocketAddr,
@@ -33,6 +36,7 @@ pub struct RunningServer {
     pub pipeline: Arc<DnsPipeline>,
     pub storage: Arc<StorageEngine>,
     config: Arc<ArcSwap<Config>>,
+    shutdown_tx: watch::Sender<bool>,
     udp_tasks: Vec<JoinHandle<()>>,
     tcp_task: JoinHandle<()>,
     dot_task: Option<JoinHandle<()>>,
@@ -50,35 +54,22 @@ pub struct RunningServer {
 
 impl RunningServer {
     pub async fn shutdown(self) {
-        for task in &self.udp_tasks {
-            task.abort();
-        }
-        self.tcp_task.abort();
-        abort_opt(self.dot_task.as_ref());
-        self.web_task.abort();
-        abort_opt(self.web_tls_accept_task.as_ref());
-        abort_opt(self.web_tls_task.as_ref());
-        self.sub_refresh_task.abort();
-        self.hosts_watch_task.abort();
-        self.cache_persist_task.abort();
-        self.log_prune_task.abort();
-        abort_opt(self.tls_watch_task.as_ref());
-        abort_opt(self.sighup_task.as_ref());
+        let _ = self.shutdown_tx.send(true);
 
         for task in self.udp_tasks {
-            let _ = task.await;
+            join_with_timeout(task, SHUTDOWN_JOIN_TIMEOUT).await;
         }
-        let _ = self.tcp_task.await;
-        await_opt(self.dot_task).await;
-        let _ = self.web_task.await;
-        await_opt(self.web_tls_accept_task).await;
-        await_opt(self.web_tls_task).await;
-        let _ = self.sub_refresh_task.await;
-        let _ = self.hosts_watch_task.await;
-        let _ = self.cache_persist_task.await;
-        let _ = self.log_prune_task.await;
-        await_opt(self.tls_watch_task).await;
-        await_opt(self.sighup_task).await;
+        join_with_timeout(self.tcp_task, SHUTDOWN_JOIN_TIMEOUT).await;
+        join_opt_with_timeout(self.dot_task, SHUTDOWN_JOIN_TIMEOUT).await;
+        join_with_timeout(self.web_task, SHUTDOWN_JOIN_TIMEOUT).await;
+        join_opt_with_timeout(self.web_tls_accept_task, SHUTDOWN_JOIN_TIMEOUT).await;
+        join_opt_with_timeout(self.web_tls_task, SHUTDOWN_JOIN_TIMEOUT).await;
+        join_with_timeout(self.sub_refresh_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.hosts_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.cache_persist_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.log_prune_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_opt_with_timeout(self.tls_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_opt_with_timeout(self.sighup_task, GRACEFUL_DRAIN_TIMEOUT).await;
 
         if self.config.load().cache_persist_enabled {
             let now_secs = tasks::current_unix_secs();
@@ -101,20 +92,39 @@ impl RunningServer {
         }
 
         drop(self.pipeline);
-        let _ = self.sink_handle.await;
+        join_with_timeout(self.sink_handle, Duration::from_secs(5)).await;
         drop(self.storage);
     }
 }
 
-fn abort_opt(handle: Option<&JoinHandle<()>>) {
-    if let Some(h) = handle {
-        h.abort();
+pub(crate) async fn drain_join_set(tasks: &mut JoinSet<()>, timeout: Duration) {
+    let drain = async { while tasks.join_next().await.is_some() {} };
+    if tokio::time::timeout(timeout, drain).await.is_err() {
+        tasks.shutdown().await;
     }
 }
 
-async fn await_opt(handle: Option<JoinHandle<()>>) {
+async fn join_with_timeout(mut handle: JoinHandle<()>, timeout: Duration) {
+    if tokio::time::timeout(timeout, &mut handle).await.is_err() {
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
+async fn join_opt_with_timeout(handle: Option<JoinHandle<()>>, timeout: Duration) {
     if let Some(h) = handle {
-        let _ = h.await;
+        join_with_timeout(h, timeout).await;
+    }
+}
+
+async fn shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
+    if *shutdown_rx.borrow() {
+        return;
+    }
+    while shutdown_rx.changed().await.is_ok() {
+        if *shutdown_rx.borrow() {
+            break;
+        }
     }
 }
 
@@ -272,6 +282,7 @@ struct WebAndTlsHandles {
     web_tls_task: Option<JoinHandle<()>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_web_and_tls(
     config: &Arc<ArcSwap<Config>>,
     pipeline: &Arc<DnsPipeline>,
@@ -280,6 +291,7 @@ async fn start_web_and_tls(
     live_tx: broadcast::Sender<QueryEvent>,
     tcp_max_connections: usize,
     tcp_idle_timeout: Duration,
+    shutdown_rx: &watch::Receiver<bool>,
 ) -> anyhow::Result<WebAndTlsHandles> {
     let current_cfg = config.load_full();
 
@@ -294,6 +306,7 @@ async fn start_web_and_tls(
                 Arc::clone(pipeline),
                 tcp_max_connections,
                 tcp_idle_timeout,
+                shutdown_rx.clone(),
             ));
             (Some(bound_dot), Some(task))
         }
@@ -327,17 +340,25 @@ async fn start_web_and_tls(
         tls_reloader,
     });
 
+    let web_max_connections = tcp_max_connections.max(WEB_MAX_CONNECTIONS);
     let (web_tls_addr, web_tls_accept_task, web_tls_task) =
         match (web_tls_listener, tls_manager.https_acceptor()) {
             (Some(listener), Some(acceptor)) => {
-                let (https_listener, addr, accept_task) =
-                    tls::HttpsTlsListener::from_tcp_listener(listener, acceptor)?;
+                let (https_listener, addr, accept_task) = tls::HttpsTlsListener::from_tcp_listener(
+                    listener,
+                    acceptor,
+                    shutdown_rx.clone(),
+                )?;
                 let tls_app = app.clone();
+                let tls_shutdown = shutdown_rx.clone();
+                let limited_https =
+                    tls::PermittedListener::new(https_listener, web_max_connections);
                 let serve_task = tokio::spawn(async move {
                     if let Err(err) = axum::serve(
-                        https_listener.tap_io(|_| {}),
+                        limited_https.tap_io(|_| {}),
                         tls_app.into_make_service_with_connect_info::<SocketAddr>(),
                     )
+                    .with_graceful_shutdown(shutdown_signal(tls_shutdown))
                     .await
                     {
                         tracing::error!(error = %err, "HTTPS web server error");
@@ -348,11 +369,14 @@ async fn start_web_and_tls(
             _ => (None, None, None),
         };
 
+    let web_shutdown = shutdown_rx.clone();
+    let limited_web = tls::PermittedListener::new(web_listener, web_max_connections);
     let web_task = tokio::spawn(async move {
         if let Err(err) = axum::serve(
-            web_listener,
+            limited_web.tap_io(|_| {}),
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(shutdown_signal(web_shutdown))
         .await
         {
             tracing::error!(error = %err, "web server error");
@@ -368,6 +392,53 @@ async fn start_web_and_tls(
         web_tls_accept_task,
         web_tls_task,
     })
+}
+
+struct BackgroundTasks {
+    sub_refresh: JoinHandle<()>,
+    hosts_watch: JoinHandle<()>,
+    cache_persist: JoinHandle<()>,
+    log_prune: JoinHandle<()>,
+    tls_watch: Option<JoinHandle<()>>,
+    sighup: Option<JoinHandle<()>>,
+}
+
+fn spawn_background_tasks(
+    config: Arc<ArcSwap<Config>>,
+    pipeline: Arc<DnsPipeline>,
+    storage: Arc<StorageEngine>,
+    tls_manager: &Arc<tls::TlsManager>,
+    tls_active: bool,
+    shutdown_rx: &watch::Receiver<bool>,
+) -> BackgroundTasks {
+    BackgroundTasks {
+        tls_watch: tls_active
+            .then(|| tasks::spawn_tls_watch_task(Arc::clone(tls_manager), shutdown_rx.clone())),
+        sighup: tasks::spawn_sighup_task(
+            Arc::clone(&config),
+            Arc::clone(&pipeline),
+            Arc::clone(tls_manager),
+            shutdown_rx.clone(),
+        ),
+        sub_refresh: tasks::spawn_subscription_refresh_task(
+            Arc::clone(&config),
+            Arc::clone(&storage),
+            Arc::clone(&pipeline),
+            shutdown_rx.clone(),
+        ),
+        hosts_watch: tasks::spawn_hosts_watch_task(
+            Arc::clone(&config),
+            Arc::clone(&pipeline),
+            shutdown_rx.clone(),
+        ),
+        cache_persist: tasks::spawn_cache_persist_task(
+            Arc::clone(&config),
+            pipeline,
+            Arc::clone(&storage),
+            shutdown_rx.clone(),
+        ),
+        log_prune: tasks::spawn_log_prune_task(config, storage, shutdown_rx.clone()),
+    }
 }
 
 pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
@@ -401,6 +472,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
 
     let tcp_max_connections = current_cfg.tcp_max_connections.max(1);
     let tcp_idle_timeout = Duration::from_secs(current_cfg.tcp_idle_timeout_secs.max(1));
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let web_tls = start_web_and_tls(
         &config,
@@ -410,6 +482,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         live_tx,
         tcp_max_connections,
         tcp_idle_timeout,
+        &shutdown_rx,
     )
     .await?;
 
@@ -427,7 +500,8 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         .map(|sock| {
             let udp_pipeline = Arc::clone(&pipeline);
             let limiter = Arc::clone(&udp_limiter);
-            tokio::spawn(run_udp_server(sock, udp_pipeline, limiter))
+            let rx = shutdown_rx.clone();
+            tokio::spawn(run_udp_server(sock, udp_pipeline, limiter, rx))
         })
         .collect();
 
@@ -436,14 +510,17 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         Arc::clone(&pipeline),
         tcp_max_connections,
         tcp_idle_timeout,
+        shutdown_rx.clone(),
     ));
 
     let tls_active = web_tls.dot_addr.is_some() || web_tls.web_tls_addr.is_some();
-    let tls_watch_task = tls_active.then(|| tasks::spawn_tls_watch_task(Arc::clone(&tls_manager)));
-    let sighup_task = tasks::spawn_sighup_task(
+    let bg = spawn_background_tasks(
         Arc::clone(&config),
         Arc::clone(&pipeline),
-        Arc::clone(&tls_manager),
+        Arc::clone(&storage),
+        &tls_manager,
+        tls_active,
+        &shutdown_rx,
     );
 
     Ok(RunningServer {
@@ -451,29 +528,22 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         web_addr: web_tls.web_addr,
         web_tls_addr: web_tls.web_tls_addr,
         dot_addr: web_tls.dot_addr,
-        pipeline: Arc::clone(&pipeline),
-        storage: Arc::clone(&storage),
-        config: Arc::clone(&config),
+        pipeline,
+        storage,
+        config,
+        shutdown_tx,
         udp_tasks,
         tcp_task,
         dot_task: web_tls.dot_task,
         web_task: web_tls.web_task,
         web_tls_accept_task: web_tls.web_tls_accept_task,
         web_tls_task: web_tls.web_tls_task,
-        sub_refresh_task: tasks::spawn_subscription_refresh_task(
-            Arc::clone(&config),
-            Arc::clone(&storage),
-            Arc::clone(&pipeline),
-        ),
-        hosts_watch_task: tasks::spawn_hosts_watch_task(Arc::clone(&config), Arc::clone(&pipeline)),
-        cache_persist_task: tasks::spawn_cache_persist_task(
-            Arc::clone(&config),
-            Arc::clone(&pipeline),
-            Arc::clone(&storage),
-        ),
-        log_prune_task: tasks::spawn_log_prune_task(config, storage),
-        tls_watch_task,
-        sighup_task,
+        sub_refresh_task: bg.sub_refresh,
+        hosts_watch_task: bg.hosts_watch,
+        cache_persist_task: bg.cache_persist,
+        log_prune_task: bg.log_prune,
+        tls_watch_task: bg.tls_watch,
+        sighup_task: bg.sighup,
         sink_handle,
     })
 }
@@ -508,36 +578,49 @@ async fn run_udp_server(
     socket: Arc<UdpSocket>,
     pipeline: Arc<DnsPipeline>,
     limiter: Arc<Semaphore>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut buf = vec![0_u8; 4096];
+    let mut tasks = JoinSet::new();
     loop {
-        let (len, peer) = match socket.recv_from(&mut buf).await {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(error = %err, "UDP DNS recv error; backing off");
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-        };
-        let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
-            tracing::warn!(peer = %peer, "UDP DNS query dropped: max inflight reached");
-            continue;
-        };
-        let packet = buf[..len].to_vec();
-        let sock = Arc::clone(&socket);
-        let pipe = Arc::clone(&pipeline);
-        tokio::spawn(async move {
-            let _permit = permit;
-            match pipe.handle_packet(&packet, peer).await {
-                Ok(resp) => {
-                    let _ = sock.send_to(&resp, peer).await;
-                }
-                Err(err) => {
-                    tracing::debug!(peer = %peer, error = %err, "failed to handle UDP DNS query");
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
                 }
             }
-        });
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+            recv_res = socket.recv_from(&mut buf) => {
+                let (len, peer) = match recv_res {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "UDP DNS recv error; backing off");
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                };
+                let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
+                    tracing::warn!(peer = %peer, "UDP DNS query dropped: max inflight reached");
+                    continue;
+                };
+                let packet = buf[..len].to_vec();
+                let sock = Arc::clone(&socket);
+                let pipe = Arc::clone(&pipeline);
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    match pipe.handle_packet(&packet, peer).await {
+                        Ok(resp) => {
+                            let _ = sock.send_to(&resp, peer).await;
+                        }
+                        Err(err) => {
+                            tracing::debug!(peer = %peer, error = %err, "failed to handle UDP DNS query");
+                        }
+                    }
+                });
+            }
+        }
     }
+    drain_join_set(&mut tasks, GRACEFUL_DRAIN_TIMEOUT).await;
 }
 
 async fn run_tcp_server(
@@ -545,40 +628,55 @@ async fn run_tcp_server(
     pipeline: Arc<DnsPipeline>,
     max_connections: usize,
     idle_timeout: Duration,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let limiter = Arc::new(Semaphore::new(max_connections.max(1)));
+    let mut tasks = JoinSet::new();
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(error = %err, "TCP DNS accept error; backing off");
-                tokio::time::sleep(ACCEPT_ERR_BACKOFF).await;
-                continue;
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
             }
-        };
-        let _ = stream.set_nodelay(true);
-        let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
-            tracing::warn!(peer = %peer, "TCP DNS connection rejected: max connections reached");
-            drop(stream);
-            continue;
-        };
-        let pipe = Arc::clone(&pipeline);
-        tokio::spawn(async move {
-            let _permit = permit;
-            if let Err(err) = handle_dns_stream_with_context(
-                stream,
-                peer,
-                pipe,
-                idle_timeout,
-                QueryProtocol::Tcp,
-                None,
-            )
-            .await
-            {
-                tracing::debug!(peer = %peer, error = %err, "TCP DNS connection closed");
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+            accept_res = listener.accept() => {
+                let (stream, peer) = match accept_res {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "TCP DNS accept error; backing off");
+                        tokio::time::sleep(ACCEPT_ERR_BACKOFF).await;
+                        continue;
+                    }
+                };
+                let _ = stream.set_nodelay(true);
+                let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
+                    tracing::warn!(peer = %peer, "TCP DNS connection rejected: max connections reached");
+                    drop(stream);
+                    continue;
+                };
+                let pipe = Arc::clone(&pipeline);
+                let conn_shutdown = shutdown_rx.clone();
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    if let Err(err) = handle_dns_stream_with_context(
+                        stream,
+                        peer,
+                        pipe,
+                        idle_timeout,
+                        QueryProtocol::Tcp,
+                        None,
+                        conn_shutdown,
+                    )
+                    .await
+                    {
+                        tracing::debug!(peer = %peer, error = %err, "TCP DNS connection closed");
+                    }
+                });
             }
-        });
+        }
     }
+    drain_join_set(&mut tasks, GRACEFUL_DRAIN_TIMEOUT).await;
 }
 
 pub(crate) async fn handle_dns_stream_with_context<S>(
@@ -588,6 +686,7 @@ pub(crate) async fn handle_dns_stream_with_context<S>(
     idle_timeout: Duration,
     protocol: QueryProtocol,
     client_id: Option<String>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -595,8 +694,19 @@ where
     let mut len_buf = [0_u8; 2];
     let mut query = Vec::with_capacity(512);
     let mut write_buf = Vec::with_capacity(514);
-    while let Ok(Ok(_)) = tokio::time::timeout(idle_timeout, stream.read_exact(&mut len_buf)).await
-    {
+    loop {
+        let read_res = tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+            res = tokio::time::timeout(idle_timeout, stream.read_exact(&mut len_buf)) => res,
+        };
+        let Ok(Ok(_)) = read_res else {
+            break;
+        };
         let len = usize::from(u16::from_be_bytes(len_buf));
         if len == 0 || len > 65_535 {
             break;

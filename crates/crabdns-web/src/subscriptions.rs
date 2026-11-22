@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
@@ -222,6 +223,29 @@ pub fn rebuild_filter_engine(
     Ok(())
 }
 
+pub async fn rebuild_filter_engine_async(
+    storage: &Arc<StorageEngine>,
+    pipeline: &Arc<DnsPipeline>,
+) -> Result<(), String> {
+    let st = Arc::clone(storage);
+    let pipe = Arc::clone(pipeline);
+    tokio::task::spawn_blocking(move || rebuild_filter_engine(&st, &pipe))
+        .await
+        .map_err(|e| format!("filter rebuild task panicked: {e}"))?
+}
+
+async fn storage_blocking<T, F>(storage: &Arc<StorageEngine>, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&StorageEngine) -> crabdns_storage::Result<T> + Send + 'static,
+{
+    let st = Arc::clone(storage);
+    tokio::task::spawn_blocking(move || f(&st))
+        .await
+        .map_err(|e| format!("storage task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
 fn generate_sub_id() -> String {
     let nanos = Utc::now()
         .timestamp_nanos_opt()
@@ -232,20 +256,34 @@ fn generate_sub_id() -> String {
 
 async fn fetch_and_store_subscription(
     client: &reqwest::Client,
-    storage: &StorageEngine,
+    storage: &Arc<StorageEngine>,
     sub: &mut FilterSubscription,
     allow_private: bool,
 ) {
     match fetch_subscription_text_with_policy(client, &sub.url, allow_private).await {
         Ok(text) => {
-            let stats = FilterEngine::count_rules_in_text(&text);
-            if let Err(err) = storage.save_subscription_content(&sub.id, &text) {
-                sub.last_error = Some(err.to_string());
-                return;
+            let st = Arc::clone(storage);
+            let sub_id = sub.id.clone();
+            let save_res = tokio::task::spawn_blocking(move || {
+                let stats = FilterEngine::count_rules_in_text(&text);
+                st.save_subscription_content(&sub_id, &text)?;
+                Ok::<_, crabdns_storage::StorageError>(stats.total_rules)
+            })
+            .await;
+
+            match save_res {
+                Ok(Ok(total_rules)) => {
+                    sub.rule_count = total_rules;
+                    sub.last_updated = Some(Utc::now());
+                    sub.last_error = None;
+                }
+                Ok(Err(err)) => {
+                    sub.last_error = Some(err.to_string());
+                }
+                Err(err) => {
+                    sub.last_error = Some(format!("save task panicked: {err}"));
+                }
             }
-            sub.rule_count = stats.total_rules;
-            sub.last_updated = Some(Utc::now());
-            sub.last_error = None;
         }
         Err(err) => {
             sub.last_error = Some(err);
@@ -255,39 +293,56 @@ async fn fetch_and_store_subscription(
 
 pub async fn refresh_enabled_subscriptions_job(
     client: &reqwest::Client,
-    storage: &StorageEngine,
-    pipeline: &DnsPipeline,
+    storage: &Arc<StorageEngine>,
+    pipeline: &Arc<DnsPipeline>,
 ) -> Result<Vec<FilterSubscription>, String> {
     refresh_enabled_subscriptions_job_with_policy(client, storage, pipeline, false).await
 }
 
 pub async fn refresh_enabled_subscriptions_job_with_policy(
     client: &reqwest::Client,
-    storage: &StorageEngine,
-    pipeline: &DnsPipeline,
+    storage: &Arc<StorageEngine>,
+    pipeline: &Arc<DnsPipeline>,
     allow_private: bool,
 ) -> Result<Vec<FilterSubscription>, String> {
-    let mut subs = storage.list_subscriptions().map_err(|e| e.to_string())?;
-    for sub in &mut subs {
+    let mut snapshot = {
+        let _guard = storage.subscription_lock().lock().await;
+        storage_blocking(storage, StorageEngine::list_subscriptions).await?
+    };
+
+    for sub in &mut snapshot {
         if sub.enabled {
             fetch_and_store_subscription(client, storage, sub, allow_private).await;
         }
     }
-    storage
-        .save_subscriptions(&subs)
-        .map_err(|e| e.to_string())?;
-    rebuild_filter_engine(storage, pipeline)?;
-    Ok(subs)
+
+    let updated = {
+        let _guard = storage.subscription_lock().lock().await;
+        let mut latest = storage_blocking(storage, StorageEngine::list_subscriptions).await?;
+        for fetched in snapshot {
+            if fetched.enabled
+                && let Some(cur) = latest.iter_mut().find(|s| s.id == fetched.id)
+            {
+                cur.rule_count = fetched.rule_count;
+                cur.last_updated = fetched.last_updated;
+                cur.last_error = fetched.last_error;
+            }
+        }
+        let to_save = latest.clone();
+        storage_blocking(storage, move |st| st.save_subscriptions(&to_save)).await?;
+        latest
+    };
+
+    rebuild_filter_engine_async(storage, pipeline).await?;
+    Ok(updated)
 }
 
 pub async fn list_subscriptions(
     State(state): State<RouterState>,
 ) -> ApiResult<Json<Vec<FilterSubscription>>> {
-    let subs = state
-        .app
-        .storage
-        .list_subscriptions()
-        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
+        .await
+        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(subs))
 }
 
@@ -326,21 +381,18 @@ pub async fn create_subscription(
         .await;
     }
 
-    let _guard = state.sub_lock.lock().await;
-    let mut subs = state
-        .app
-        .storage
-        .list_subscriptions()
-        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _guard = state.app.storage.subscription_lock().lock().await;
+    let mut subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
+        .await
+        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     subs.push(sub.clone());
-    state
-        .app
-        .storage
-        .save_subscriptions(&subs)
-        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    storage_blocking(&state.app.storage, move |st| st.save_subscriptions(&subs))
+        .await
+        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     if sub.enabled && sub.last_error.is_none() {
-        rebuild_filter_engine(&state.app.storage, &state.app.pipeline)
+        rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
+            .await
             .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
@@ -363,12 +415,10 @@ pub async fn update_subscription(
 
     let mut should_fetch = false;
     let mut updated_sub = {
-        let _guard = state.sub_lock.lock().await;
-        let mut subs = state
-            .app
-            .storage
-            .list_subscriptions()
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let _guard = state.app.storage.subscription_lock().lock().await;
+        let mut subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
+            .await
+            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let Some(sub) = subs.iter_mut().find(|s| s.id == id) else {
             return Err(err_response(
                 StatusCode::NOT_FOUND,
@@ -400,11 +450,9 @@ pub async fn update_subscription(
         }
 
         let clone = sub.clone();
-        state
-            .app
-            .storage
-            .save_subscriptions(&subs)
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        storage_blocking(&state.app.storage, move |st| st.save_subscriptions(&subs))
+            .await
+            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         clone
     };
 
@@ -416,25 +464,25 @@ pub async fn update_subscription(
             allow_private,
         )
         .await;
-        let _guard = state.sub_lock.lock().await;
-        let mut subs = state
-            .app
-            .storage
-            .list_subscriptions()
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    let _guard = state.app.storage.subscription_lock().lock().await;
+    if should_fetch {
+        let mut subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
+            .await
+            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         if let Some(sub) = subs.iter_mut().find(|s| s.id == id) {
             sub.rule_count = updated_sub.rule_count;
             sub.last_updated = updated_sub.last_updated;
             sub.last_error.clone_from(&updated_sub.last_error);
-            state
-                .app
-                .storage
-                .save_subscriptions(&subs)
-                .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            storage_blocking(&state.app.storage, move |st| st.save_subscriptions(&subs))
+                .await
+                .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         }
     }
 
-    rebuild_filter_engine(&state.app.storage, &state.app.pipeline)
+    rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
+        .await
         .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(updated_sub))
@@ -444,34 +492,28 @@ pub async fn delete_subscription(
     State(state): State<RouterState>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    {
-        let _guard = state.sub_lock.lock().await;
-        let mut subs = state
-            .app
-            .storage
-            .list_subscriptions()
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let before = subs.len();
-        subs.retain(|s| s.id != id);
-        if subs.len() == before {
-            return Err(err_response(
-                StatusCode::NOT_FOUND,
-                "Subscription not found",
-            ));
-        }
-        state
-            .app
-            .storage
-            .save_subscriptions(&subs)
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        state
-            .app
-            .storage
-            .delete_subscription_content(&id)
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _guard = state.app.storage.subscription_lock().lock().await;
+    let mut subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
+        .await
+        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let before = subs.len();
+    subs.retain(|s| s.id != id);
+    if subs.len() == before {
+        return Err(err_response(
+            StatusCode::NOT_FOUND,
+            "Subscription not found",
+        ));
     }
+    let del_id = id.clone();
+    storage_blocking(&state.app.storage, move |st| {
+        st.save_subscriptions(&subs)?;
+        st.delete_subscription_content(&del_id)
+    })
+    .await
+    .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    rebuild_filter_engine(&state.app.storage, &state.app.pipeline)
+    rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
+        .await
         .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -482,11 +524,10 @@ pub async fn refresh_subscription(
     Path(id): Path<String>,
 ) -> ApiResult<Json<FilterSubscription>> {
     let mut target = {
-        let subs = state
-            .app
-            .storage
-            .list_subscriptions()
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let _guard = state.app.storage.subscription_lock().lock().await;
+        let subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
+            .await
+            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         subs.into_iter()
             .find(|s| s.id == id)
             .ok_or_else(|| err_response(StatusCode::NOT_FOUND, "Subscription not found"))?
@@ -501,27 +542,22 @@ pub async fn refresh_subscription(
     )
     .await;
 
-    {
-        let _guard = state.sub_lock.lock().await;
-        let mut subs = state
-            .app
-            .storage
-            .list_subscriptions()
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        if let Some(sub) = subs.iter_mut().find(|s| s.id == id) {
-            sub.rule_count = target.rule_count;
-            sub.last_updated = target.last_updated;
-            sub.last_error.clone_from(&target.last_error);
-            state
-                .app
-                .storage
-                .save_subscriptions(&subs)
-                .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        }
+    let _guard = state.app.storage.subscription_lock().lock().await;
+    let mut subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
+        .await
+        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if let Some(sub) = subs.iter_mut().find(|s| s.id == id) {
+        sub.rule_count = target.rule_count;
+        sub.last_updated = target.last_updated;
+        sub.last_error.clone_from(&target.last_error);
+        storage_blocking(&state.app.storage, move |st| st.save_subscriptions(&subs))
+            .await
+            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
     if target.enabled {
-        rebuild_filter_engine(&state.app.storage, &state.app.pipeline)
+        rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
+            .await
             .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
@@ -531,7 +567,6 @@ pub async fn refresh_subscription(
 pub async fn refresh_all_subscriptions(
     State(state): State<RouterState>,
 ) -> ApiResult<Json<Vec<FilterSubscription>>> {
-    let _guard = state.sub_lock.lock().await;
     let allow_private = state.app.config.load().allow_private_subscriptions;
     let subs = refresh_enabled_subscriptions_job_with_policy(
         &state.http_client,

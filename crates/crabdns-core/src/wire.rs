@@ -251,6 +251,11 @@ pub fn extract_answer_summaries(wire: &[u8]) -> Vec<String> {
     let Ok(msg) = Message::from_vec(wire) else {
         return Vec::new();
     };
+    extract_answer_summaries_msg(&msg)
+}
+
+/// Formats concise human-readable summaries from an already-parsed DNS `Message`.
+pub fn extract_answer_summaries_msg(msg: &Message) -> Vec<String> {
     let mut out = Vec::with_capacity(msg.answers.len().min(MAX_LOG_ANSWERS));
     for record in msg.answers.iter().take(MAX_LOG_ANSWERS) {
         out.push(format_rdata_summary(record));

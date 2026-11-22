@@ -1,9 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use axum::extract::{Query, State};
+use axum::extract::{DefaultBodyLimit, Query, Request, State};
 use axum::http::{StatusCode, Uri, header};
-use axum::middleware;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
@@ -14,7 +15,7 @@ use crabdns_core::{
 use crabdns_storage::{StatsSnapshot, StorageEngine};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Semaphore, broadcast};
 use tower_http::cors::CorsLayer;
 use ts_rs::TS;
 
@@ -41,14 +42,16 @@ pub struct AppState {
     pub tls_reloader: Option<Arc<dyn tls_api::TlsReloader>>,
 }
 
+const DOH_MAX_INFLIGHT: usize = 512;
+const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+
 #[derive(Clone)]
 pub struct RouterState {
     pub app: AppState,
-    pub sub_lock: Arc<Mutex<()>>,
-    pub client_lock: Arc<Mutex<()>>,
     pub http_client: reqwest::Client,
     pub sessions: Arc<auth::SessionStore>,
     pub login_limiter: Arc<auth::LoginRateLimiter>,
+    pub doh_limiter: Arc<Semaphore>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -107,11 +110,10 @@ pub use config_api::{ConfigResponse, ConfigUpdatePayload};
 pub fn build_router(state: AppState) -> Router {
     let router_state = RouterState {
         app: state,
-        sub_lock: Arc::new(Mutex::new(())),
-        client_lock: Arc::new(Mutex::new(())),
         http_client: subscriptions::build_http_client(),
         sessions: Arc::new(auth::SessionStore::default()),
         login_limiter: Arc::new(auth::LoginRateLimiter::default()),
+        doh_limiter: Arc::new(Semaphore::new(DOH_MAX_INFLIGHT)),
     };
 
     let protected_api = Router::new()
@@ -175,21 +177,36 @@ pub fn build_router(state: AppState) -> Router {
         auth::require_auth,
     ));
 
-    Router::new()
-        .route("/api/health", get(health))
-        .route("/metrics", get(metrics::prometheus_metrics))
+    let doh_routes = Router::new()
         .route("/dns-query", get(doh::doh_get).post(doh::doh_post))
         .route(
             "/dns-query/{client_id}",
             get(doh::doh_get_client).post(doh::doh_post_client),
         )
+        .layer(DefaultBodyLimit::max(doh::MAX_DOH_PACKET_BYTES));
+
+    Router::new()
+        .route("/api/health", get(health))
+        .route("/metrics", get(metrics::prometheus_metrics))
+        .merge(doh_routes)
         .route("/api/auth/status", get(auth::auth_status))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .merge(protected_api)
         .fallback(serve_spa)
+        .layer(middleware::from_fn(request_timeout_middleware))
         .layer(CorsLayer::permissive())
         .with_state(router_state)
+}
+
+async fn request_timeout_middleware(req: Request, next: Next) -> Response {
+    if req.uri().path() == "/api/logs/ws" {
+        return next.run(req).await;
+    }
+    match tokio::time::timeout(API_REQUEST_TIMEOUT, next.run(req)).await {
+        Ok(resp) => resp,
+        Err(_) => (StatusCode::REQUEST_TIMEOUT, "request timed out").into_response(),
+    }
 }
 
 async fn get_upstream_health(State(state): State<RouterState>) -> Json<Vec<UpstreamStatus>> {
@@ -277,21 +294,25 @@ async fn get_logs(
     Query(params): Query<LogsQuery>,
 ) -> std::result::Result<Json<Vec<QueryEvent>>, StatusCode> {
     let limit = params.limit.unwrap_or(100).clamp(1, 1000);
-    let logs = state
-        .app
-        .storage
-        .query_logs(limit, params.search.as_deref(), params.outcome.as_deref())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let storage = Arc::clone(&state.app.storage);
+    let search = params.search;
+    let outcome = params.outcome;
+    let logs = tokio::task::spawn_blocking(move || {
+        storage.query_logs(limit, search.as_deref(), outcome.as_deref())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(logs))
 }
 
 async fn get_rules(
     State(state): State<RouterState>,
 ) -> std::result::Result<Json<RulesPayload>, StatusCode> {
-    let enabled = state
-        .app
-        .storage
-        .load_custom_rules_enabled()
+    let storage = Arc::clone(&state.app.storage);
+    let enabled = tokio::task::spawn_blocking(move || storage.load_custom_rules_enabled())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(RulesPayload {
         rules_text: state.app.pipeline.filter().raw_rules_text(),
@@ -304,17 +325,21 @@ async fn update_rules(
     State(state): State<RouterState>,
     Json(payload): Json<RulesPayload>,
 ) -> std::result::Result<Json<RulesPayload>, StatusCode> {
-    state
-        .app
-        .storage
-        .save_custom_rules(&payload.rules_text)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .app
-        .storage
-        .save_custom_rules_enabled(payload.enabled)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    subscriptions::rebuild_filter_engine(&state.app.storage, &state.app.pipeline)
+    let _guard = state.app.storage.subscription_lock().lock().await;
+    let storage = Arc::clone(&state.app.storage);
+    let rules_text = payload.rules_text.clone();
+    let enabled = payload.enabled;
+    tokio::task::spawn_blocking(move || -> Result<(), crabdns_storage::StorageError> {
+        storage.save_custom_rules(&rules_text)?;
+        storage.save_custom_rules_enabled(enabled)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    subscriptions::rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let filter_stats = state.app.pipeline.filter().stats();
     Ok(Json(RulesPayload {
@@ -743,5 +768,75 @@ mod tests {
         assert_eq!(caps.len(), 1);
         assert!(!caps[0].reachable);
         assert_eq!(caps[0].endpoint, "udp://127.0.0.1:1");
+    }
+
+    #[tokio::test]
+    async fn test_doh_body_limit_and_atomic_config_rollback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+        let config = Arc::new(ArcSwap::from_pointee(Config {
+            data_dir: dir.path().to_path_buf(),
+            upstreams: vec!["udp://1.1.1.1:53".to_string()],
+            ..Config::default()
+        }));
+        let filter = Arc::new(FilterEngine::new(&[]));
+        let cache = Arc::new(DnsCache::new(64, false));
+        let upstream =
+            Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
+        let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+        let (live_tx, _) = broadcast::channel(16);
+
+        let app = build_router(AppState {
+            config: Arc::clone(&config),
+            pipeline: Arc::clone(&pipeline),
+            storage: Arc::clone(&storage),
+            live_tx,
+            tls_reloader: None,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // Oversized DoH POST body (> 65,535 bytes) is rejected at DefaultBodyLimit.
+        let big_res = client
+            .post(format!("{base}/dns-query"))
+            .header("content-type", "application/dns-message")
+            .body(vec![0_u8; 70_000])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(big_res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Partial invalid config (valid upstreams change + invalid split_dns) must NOT partially mutate pipeline.
+        let bad_cfg = serde_json::json!({
+            "upstreams": ["udp://9.9.9.9:53"],
+            "cache_size": 128,
+            "optimistic_cache": true,
+            "upstream_timeout_ms": 1500,
+            "log_retention_hours": 12,
+            "split_dns": [{"domain": "corp.test", "upstreams": ["not-an-upstream"]}]
+        });
+        let put_res = client
+            .put(format!("{base}/api/config"))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&bad_cfg).unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put_res.status(), StatusCode::BAD_REQUEST);
+
+        // Upstream in pipeline and stored config remain untouched (still 1.1.1.1).
+        let snap = pipeline.upstream().health_snapshot();
+        assert_eq!(snap[0].endpoint, "udp://1.1.1.1:53");
+        assert_eq!(
+            config.load().upstreams,
+            vec!["udp://1.1.1.1:53".to_string()]
+        );
+        assert!(storage.load_config().unwrap().is_none());
     }
 }

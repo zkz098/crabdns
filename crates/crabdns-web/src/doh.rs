@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Extension, Path, Query, State};
@@ -11,7 +13,8 @@ use crate::RouterState;
 use crate::proxy::extract_client_ip;
 
 const DNS_MESSAGE_MIME: &str = "application/dns-message";
-const MAX_DOH_PACKET_BYTES: usize = 65_535;
+pub(crate) const MAX_DOH_PACKET_BYTES: usize = 65_535;
+const DOH_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Deserialize)]
 pub struct DohQuery {
@@ -118,18 +121,25 @@ async fn handle_doh_packet(
     if packet.is_empty() || packet.len() > MAX_DOH_PACKET_BYTES {
         return (StatusCode::BAD_REQUEST, "invalid DNS message size").into_response();
     }
+    let Ok(_permit) = Arc::clone(&state.doh_limiter).try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "DoH inflight capacity reached",
+        )
+            .into_response();
+    };
     let ctx = QueryContext {
         client_addr: client,
         protocol: QueryProtocol::Doh,
         client_id,
     };
-    match state
-        .app
-        .pipeline
-        .handle_packet_with_context(packet, ctx)
-        .await
+    match tokio::time::timeout(
+        DOH_QUERY_TIMEOUT,
+        state.app.pipeline.handle_packet_with_context(packet, ctx),
+    )
+    .await
     {
-        Ok(resp) => (
+        Ok(Ok(resp)) => (
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, DNS_MESSAGE_MIME),
@@ -138,7 +148,8 @@ async fn handle_doh_packet(
             resp,
         )
             .into_response(),
-        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+        Ok(Err(err)) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+        Err(_) => (StatusCode::GATEWAY_TIMEOUT, "DNS query timed out").into_response(),
     }
 }
 

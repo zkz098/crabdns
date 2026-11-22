@@ -6,9 +6,12 @@ use arc_swap::ArcSwap;
 use crabdns_core::{Config, DnsPipeline};
 use crabdns_storage::StorageEngine;
 use crabdns_web::tls_api::TlsReloader;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::tls::TlsManager;
+
+const MAX_LOGS_DISK_BYTES: u64 = 256 * 1024 * 1024;
 
 fn current_unix_ms() -> u64 {
     u64::try_from(
@@ -41,23 +44,38 @@ fn delay_interval(period: Duration) -> tokio::time::Interval {
 pub fn spawn_log_prune_task(
     config: Arc<ArcSwap<Config>>,
     storage: Arc<StorageEngine>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = delay_interval(Duration::from_secs(600));
         loop {
-            interval.tick().await;
-            let retention_hours = config.load().log_retention_hours;
-            let st = Arc::clone(&storage);
-            match tokio::task::spawn_blocking(move || prune_logs_once(&st, retention_hours)).await {
-                Ok(Ok(removed)) if removed > 0 => {
-                    tracing::info!(removed, retention_hours, "pruned expired query logs");
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
                 }
-                Ok(Ok(_)) => {}
-                Ok(Err(err)) => {
-                    tracing::warn!(error = %err, "scheduled query log pruning failed");
-                }
-                Err(err) => {
-                    tracing::warn!(error = %err, "query log pruning task panicked");
+                _ = interval.tick() => {
+                    let retention_hours = config.load().log_retention_hours;
+                    let st = Arc::clone(&storage);
+                    match tokio::task::spawn_blocking(move || {
+                        let expired = prune_logs_once(&st, retention_hours)?;
+                        let oversized = st.prune_oversized_logs(MAX_LOGS_DISK_BYTES)?;
+                        Ok::<usize, anyhow::Error>(expired + oversized)
+                    })
+                    .await
+                    {
+                        Ok(Ok(removed)) if removed > 0 => {
+                            tracing::info!(removed, retention_hours, "pruned expired/oversized query logs");
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(err)) => {
+                            tracing::warn!(error = %err, "scheduled query log pruning failed");
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "query log pruning task panicked");
+                        }
+                    }
                 }
             }
         }
@@ -68,24 +86,33 @@ pub fn spawn_subscription_refresh_task(
     config: Arc<ArcSwap<Config>>,
     storage: Arc<StorageEngine>,
     pipeline: Arc<DnsPipeline>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let client = crabdns_web::subscriptions::build_http_client();
         let mut interval = delay_interval(Duration::from_hours(24));
         interval.tick().await;
         loop {
-            interval.tick().await;
-            let allow_private = config.load().allow_private_subscriptions;
-            if let Err(err) =
-                crabdns_web::subscriptions::refresh_enabled_subscriptions_job_with_policy(
-                    &client,
-                    &storage,
-                    &pipeline,
-                    allow_private,
-                )
-                .await
-            {
-                tracing::warn!(error = %err, "scheduled subscription refresh failed");
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    let allow_private = config.load().allow_private_subscriptions;
+                    if let Err(err) =
+                        crabdns_web::subscriptions::refresh_enabled_subscriptions_job_with_policy(
+                            &client,
+                            &storage,
+                            &pipeline,
+                            allow_private,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %err, "scheduled subscription refresh failed");
+                    }
+                }
             }
         }
     })
@@ -94,40 +121,49 @@ pub fn spawn_subscription_refresh_task(
 pub fn spawn_hosts_watch_task(
     config: Arc<ArcSwap<Config>>,
     pipeline: Arc<DnsPipeline>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = delay_interval(Duration::from_secs(30));
         let mut last_mtime: Option<SystemTime> = None;
         interval.tick().await;
         loop {
-            interval.tick().await;
-            let cfg = config.load();
-            if !cfg.hosts_enabled {
-                last_mtime = None;
-                continue;
-            }
-            let path_str = cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");
-            let path = std::path::Path::new(path_str);
-            let Ok(meta) = tokio::fs::metadata(path).await else {
-                continue;
-            };
-            let Ok(mtime) = meta.modified() else {
-                continue;
-            };
-            if last_mtime != Some(mtime) {
-                let pipe = Arc::clone(&pipeline);
-                let path_buf = path.to_path_buf();
-                match tokio::task::spawn_blocking(move || pipe.reload_hosts_from_path(&path_buf))
-                    .await
-                {
-                    Ok(Ok(_)) => {
-                        last_mtime = Some(mtime);
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
                     }
-                    Ok(Err(err)) => {
-                        tracing::warn!(path = %path_str, error = %err, "failed to reload hosts file");
+                }
+                _ = interval.tick() => {
+                    let cfg = config.load();
+                    if !cfg.hosts_enabled {
+                        last_mtime = None;
+                        continue;
                     }
-                    Err(err) => {
-                        tracing::warn!(path = %path_str, error = %err, "hosts reload task panicked");
+                    let path_str = cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");
+                    let path = std::path::Path::new(path_str);
+                    let Ok(meta) = tokio::fs::metadata(path).await else {
+                        continue;
+                    };
+                    let Ok(mtime) = meta.modified() else {
+                        continue;
+                    };
+                    if last_mtime != Some(mtime) {
+                        let pipe = Arc::clone(&pipeline);
+                        let path_buf = path.to_path_buf();
+                        match tokio::task::spawn_blocking(move || pipe.reload_hosts_from_path(&path_buf))
+                            .await
+                        {
+                            Ok(Ok(_)) => {
+                                last_mtime = Some(mtime);
+                            }
+                            Ok(Err(err)) => {
+                                tracing::warn!(path = %path_str, error = %err, "failed to reload hosts file");
+                            }
+                            Err(err) => {
+                                tracing::warn!(path = %path_str, error = %err, "hosts reload task panicked");
+                            }
+                        }
                     }
                 }
             }
@@ -139,30 +175,39 @@ pub fn spawn_cache_persist_task(
     config: Arc<ArcSwap<Config>>,
     pipeline: Arc<DnsPipeline>,
     storage: Arc<StorageEngine>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = delay_interval(Duration::from_secs(300));
         interval.tick().await;
         loop {
-            interval.tick().await;
-            if !config.load().cache_persist_enabled {
-                continue;
-            }
-            let now_secs = current_unix_secs();
-            let cache = pipeline.cache();
-            let st = Arc::clone(&storage);
-            match tokio::task::spawn_blocking(move || {
-                let snapshot = cache.export_persisted(now_secs);
-                st.save_dns_cache(&snapshot)
-            })
-            .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(err)) => {
-                    tracing::warn!(error = %err, "periodic dns cache persistence failed");
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
                 }
-                Err(err) => {
-                    tracing::warn!(error = %err, "periodic dns cache persistence task panicked");
+                _ = interval.tick() => {
+                    if !config.load().cache_persist_enabled {
+                        continue;
+                    }
+                    let now_secs = current_unix_secs();
+                    let cache = pipeline.cache();
+                    let st = Arc::clone(&storage);
+                    match tokio::task::spawn_blocking(move || {
+                        let snapshot = cache.export_persisted(now_secs);
+                        st.save_dns_cache(&snapshot)
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(err)) => {
+                            tracing::warn!(error = %err, "periodic dns cache persistence failed");
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "periodic dns cache persistence task panicked");
+                        }
+                    }
                 }
             }
         }
@@ -175,7 +220,10 @@ async fn file_stamp(path: Option<&PathBuf>) -> Option<(Option<SystemTime>, u64)>
     Some((meta.modified().ok(), meta.len()))
 }
 
-pub fn spawn_tls_watch_task(tls_manager: Arc<TlsManager>) -> JoinHandle<()> {
+pub fn spawn_tls_watch_task(
+    tls_manager: Arc<TlsManager>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = delay_interval(Duration::from_secs(30));
         let (init_cert, init_key) = tls_manager.paths();
@@ -185,20 +233,35 @@ pub fn spawn_tls_watch_task(tls_manager: Arc<TlsManager>) -> JoinHandle<()> {
         );
         interval.tick().await;
         loop {
-            interval.tick().await;
-            let (cert_path, key_path) = tls_manager.paths();
-            if cert_path.is_none() || key_path.is_none() {
-                continue;
-            }
-            let next_stamps = (
-                file_stamp(cert_path.as_ref()).await,
-                file_stamp(key_path.as_ref()).await,
-            );
-            if next_stamps.0.is_some() && next_stamps.1.is_some() && next_stamps != last_stamps {
-                if let Err(err) = tls_manager.reload(None, None) {
-                    tracing::warn!(error = %err, "automatic TLS certificate reload failed");
-                } else {
-                    last_stamps = next_stamps;
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    let (cert_path, key_path) = tls_manager.paths();
+                    if cert_path.is_none() || key_path.is_none() {
+                        continue;
+                    }
+                    let next_stamps = (
+                        file_stamp(cert_path.as_ref()).await,
+                        file_stamp(key_path.as_ref()).await,
+                    );
+                    if next_stamps.0.is_some() && next_stamps.1.is_some() && next_stamps != last_stamps {
+                        let mgr = Arc::clone(&tls_manager);
+                        match tokio::task::spawn_blocking(move || mgr.reload(None, None)).await {
+                            Ok(Ok(_)) => {
+                                last_stamps = next_stamps;
+                            }
+                            Ok(Err(err)) => {
+                                tracing::warn!(error = %err, "automatic TLS certificate reload failed");
+                            }
+                            Err(err) => {
+                                tracing::warn!(error = %err, "automatic TLS reload task panicked");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -210,6 +273,7 @@ pub fn spawn_sighup_task(
     config: Arc<ArcSwap<Config>>,
     pipeline: Arc<DnsPipeline>,
     tls_manager: Arc<TlsManager>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     use tokio::signal::unix::{SignalKind, signal};
     let Ok(mut sighup) = signal(SignalKind::hangup()) else {
@@ -217,20 +281,50 @@ pub fn spawn_sighup_task(
         return None;
     };
     Some(tokio::spawn(async move {
-        while sighup.recv().await.is_some() {
-            tracing::info!("received SIGHUP; reloading TLS certificates and hosts");
-            let (cert, key) = tls_manager.paths();
-            if cert.is_some()
-                && key.is_some()
-                && let Err(err) = tls_manager.reload(None, None)
-            {
-                tracing::warn!(error = %err, "SIGHUP TLS reload failed");
-            }
-            let cfg = config.load();
-            if cfg.hosts_enabled {
-                let path_str = cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");
-                if let Err(err) = pipeline.reload_hosts_from_path(std::path::Path::new(path_str)) {
-                    tracing::warn!(path = %path_str, error = %err, "SIGHUP hosts reload failed");
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                maybe_sig = sighup.recv() => {
+                    if maybe_sig.is_none() {
+                        break;
+                    }
+                    tracing::info!("received SIGHUP; reloading TLS certificates and hosts");
+                    let (cert, key) = tls_manager.paths();
+                    if cert.is_some() && key.is_some() {
+                        let mgr = Arc::clone(&tls_manager);
+                        match tokio::task::spawn_blocking(move || mgr.reload(None, None)).await {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(err)) => {
+                                tracing::warn!(error = %err, "SIGHUP TLS reload failed");
+                            }
+                            Err(err) => {
+                                tracing::warn!(error = %err, "SIGHUP TLS reload task panicked");
+                            }
+                        }
+                    }
+                    let cfg = config.load();
+                    if cfg.hosts_enabled {
+                        let path_str = cfg.hosts_path.as_deref().unwrap_or("/etc/hosts").to_string();
+                        let log_path = path_str.clone();
+                        let pipe = Arc::clone(&pipeline);
+                        match tokio::task::spawn_blocking(move || {
+                            pipe.reload_hosts_from_path(std::path::Path::new(&path_str))
+                        })
+                        .await
+                        {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(err)) => {
+                                tracing::warn!(path = %log_path, error = %err, "SIGHUP hosts reload failed");
+                            }
+                            Err(err) => {
+                                tracing::warn!(path = %log_path, error = %err, "SIGHUP hosts reload task panicked");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -242,6 +336,7 @@ pub fn spawn_sighup_task(
     _config: Arc<ArcSwap<Config>>,
     _pipeline: Arc<DnsPipeline>,
     _tls_manager: Arc<TlsManager>,
+    _shutdown_rx: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     None
 }

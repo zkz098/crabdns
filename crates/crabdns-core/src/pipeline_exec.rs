@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use hickory_proto::op::{Message, ResponseCode};
@@ -16,12 +16,12 @@ use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision};
 use crate::lan::{build_ddr_response, build_hosts_response, is_ddr_query, is_private_ptr_domain};
 use crate::pipeline::{DnsPipeline, QueryContext, QueryEvent, QueryOutcome, QueryProtocol};
-use crate::security::{build_rfc8482_any_response, contains_rebinding_ip};
-use crate::singleflight::{FlightRole, wait_follower};
+use crate::security::{build_rfc8482_any_response, contains_rebinding_ip_msg};
+use crate::singleflight::{FlightGuard, FlightReceiver, FlightRole, wait_follower};
 use crate::upstream::UpstreamPool;
 use crate::wire::{
     build_blocked_response, build_error_response, build_rewrite_response,
-    compute_response_cache_ttl, extract_answer_summaries,
+    compute_response_cache_ttl, extract_answer_summaries, extract_answer_summaries_msg,
 };
 
 #[derive(Clone)]
@@ -350,11 +350,14 @@ impl DnsPipeline {
             );
         }
 
+        let parsed_hit = Message::from_vec(&hit.wire_bytes).ok();
+
         if !flags.blocking_disabled
             && !flags.explicitly_allowed
             && flags.cname_cloaking_on
+            && let Some(ref resp_msg) = parsed_hit
             && let Some(blk) =
-                self.check_cname_cloaking(policy, request, &hit.wire_bytes, flags.block_mode)?
+                self.check_cname_cloaking_msg(policy, request, resp_msg, flags.block_mode)?
         {
             self.emit_log(
                 meta,
@@ -368,14 +371,22 @@ impl DnsPipeline {
             return Ok(Some(blk.bytes));
         }
 
+        let (rcode_str, answers) = match parsed_hit.as_ref() {
+            Some(msg) => (
+                msg.response_code.to_string(),
+                extract_answer_summaries_msg(msg),
+            ),
+            None => ("UNKNOWN".to_string(), Vec::new()),
+        };
+
         self.emit_log(
             meta,
             QueryOutcome::Cached,
             decision.matched_rule.clone(),
             decision.matched_list.clone(),
             Some("cache".to_string()),
-            &extract_rcode_str(&hit.wire_bytes),
-            extract_answer_summaries(&hit.wire_bytes),
+            &rcode_str,
+            answers,
         );
         Ok(Some(hit.wire_bytes))
     }
@@ -458,87 +469,39 @@ impl DnsPipeline {
         decision: &FilterDecision,
         flags: PolicyFlags,
     ) -> Result<Vec<u8>> {
-        let (resp_bytes, upstream_label) = match self.inflight.acquire(cache_key.clone()) {
-            FlightRole::Leader(guard) => {
-                match self
-                    .exchange_and_validate(upstream, upstream_query, &meta.domain, flags)
-                    .await
-                {
-                    Ok(res) => {
-                        let rebinding_hit = !is_local_route
-                            && self.dns_rebinding_protection.load(Ordering::Relaxed)
-                            && contains_rebinding_ip(&res.0);
-                        let cname_hit = !flags.blocking_disabled
-                            && !flags.explicitly_allowed
-                            && flags.cname_cloaking_on
-                            && self
-                                .check_cname_cloaking(policy, request, &res.0, flags.block_mode)?
-                                .is_some();
-                        if !rebinding_hit && !cname_hit {
-                            let cache = self.cache.load();
-                            let _ = cache_upstream_response(&cache, cache_key, &res.0);
-                        }
-                        guard.complete(Ok(res.clone()));
-                        res
-                    }
-                    Err(ExchangeError::DnssecBogus(label)) => {
-                        guard.complete(Err(format!("dnssec:bogus:{label}")));
-                        self.emit_log(
+        let query_budget = upstream.query_budget();
+        let (resp_bytes, upstream_label, parsed_msg) =
+            match self.inflight.acquire(cache_key.clone()) {
+                FlightRole::Leader(guard) => {
+                    match self
+                        .run_singleflight_leader(
+                            guard,
+                            request,
+                            upstream_query,
                             meta,
-                            QueryOutcome::Error,
-                            Some("dnssec:bogus".to_string()),
-                            Some("dnssec".to_string()),
-                            Some(label),
-                            "SERVFAIL",
-                            Vec::new(),
-                        );
-                        return build_error_response(request, ResponseCode::ServFail);
-                    }
-                    Err(ExchangeError::UpstreamFailed(err)) => {
-                        tracing::warn!(domain = %meta.domain, error = %err, "all upstreams failed");
-                        guard.complete(Err(err));
-                        self.emit_log(
-                            meta,
-                            QueryOutcome::Error,
-                            None,
-                            None,
-                            None,
-                            "SERVFAIL",
-                            Vec::new(),
-                        );
-                        return build_error_response(request, ResponseCode::ServFail);
+                            policy,
+                            upstream,
+                            is_local_route,
+                            cache_key,
+                            flags,
+                            query_budget,
+                        )
+                        .await
+                    {
+                        Ok(res) => res,
+                        Err(err_resp) => return err_resp,
                     }
                 }
-            }
-            FlightRole::Follower(rx) => match wait_follower(rx).await {
-                Ok((mut bytes, label)) => {
-                    patch_tx_id(&mut bytes, request.id);
-                    (bytes, label)
+                FlightRole::Follower(rx) => {
+                    match self
+                        .await_singleflight_follower(request, meta, rx, query_budget)
+                        .await
+                    {
+                        Ok(res) => res,
+                        Err(err_resp) => return err_resp,
+                    }
                 }
-                Err(err_msg) => {
-                    let (matched_rule, matched_list, upstream_opt) =
-                        if let Some(label) = err_msg.strip_prefix("dnssec:bogus:") {
-                            (
-                                Some("dnssec:bogus".to_string()),
-                                Some("dnssec".to_string()),
-                                Some(label.to_string()),
-                            )
-                        } else {
-                            (None, None, None)
-                        };
-                    self.emit_log(
-                        meta,
-                        QueryOutcome::Error,
-                        matched_rule,
-                        matched_list,
-                        upstream_opt,
-                        "SERVFAIL",
-                        Vec::new(),
-                    );
-                    return build_error_response(request, ResponseCode::ServFail);
-                }
-            },
-        };
+            };
 
         self.finalize_upstream_response(
             request,
@@ -549,7 +512,135 @@ impl DnsPipeline {
             flags,
             resp_bytes,
             upstream_label,
+            parsed_msg.as_ref(),
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_singleflight_leader(
+        &self,
+        guard: FlightGuard<CacheKey, (Vec<u8>, String)>,
+        request: &Message,
+        upstream_query: &[u8],
+        meta: &LogMeta,
+        policy: Option<&ResolvedClientPolicy>,
+        upstream: &Arc<UpstreamPool>,
+        is_local_route: bool,
+        cache_key: CacheKey,
+        flags: PolicyFlags,
+        query_budget: Duration,
+    ) -> std::result::Result<(Vec<u8>, String, Option<Message>), Result<Vec<u8>>> {
+        let exchange_res = match tokio::time::timeout(
+            query_budget,
+            self.exchange_and_validate(upstream, upstream_query, &meta.domain, flags),
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => Err(ExchangeError::UpstreamFailed(
+                "upstream query deadline exceeded".to_string(),
+            )),
+        };
+
+        match exchange_res {
+            Ok((resp_bytes, upstream_label)) => {
+                let parsed = Message::from_vec(&resp_bytes).ok();
+                let rebinding_hit = !is_local_route
+                    && self.dns_rebinding_protection.load(Ordering::Relaxed)
+                    && parsed.as_ref().is_some_and(contains_rebinding_ip_msg);
+                let cname_hit = if !flags.blocking_disabled
+                    && !flags.explicitly_allowed
+                    && flags.cname_cloaking_on
+                    && let Some(ref msg) = parsed
+                {
+                    match self.check_cname_cloaking_msg(policy, request, msg, flags.block_mode) {
+                        Ok(hit) => hit.is_some(),
+                        Err(err) => return Err(Err(err)),
+                    }
+                } else {
+                    false
+                };
+                if !rebinding_hit
+                    && !cname_hit
+                    && let Some(ref msg) = parsed
+                {
+                    let cache = self.cache.load();
+                    let _ = cache_upstream_response_msg(&cache, cache_key, &resp_bytes, msg);
+                }
+                guard.complete(Ok((resp_bytes.clone(), upstream_label.clone())));
+                Ok((resp_bytes, upstream_label, parsed))
+            }
+            Err(ExchangeError::DnssecBogus(label)) => {
+                guard.complete(Err(format!("dnssec:bogus:{label}")));
+                self.emit_log(
+                    meta,
+                    QueryOutcome::Error,
+                    Some("dnssec:bogus".to_string()),
+                    Some("dnssec".to_string()),
+                    Some(label),
+                    "SERVFAIL",
+                    Vec::new(),
+                );
+                Err(build_error_response(request, ResponseCode::ServFail))
+            }
+            Err(ExchangeError::UpstreamFailed(err)) => {
+                tracing::warn!(domain = %meta.domain, error = %err, "all upstreams failed");
+                guard.complete(Err(err));
+                self.emit_log(
+                    meta,
+                    QueryOutcome::Error,
+                    None,
+                    None,
+                    None,
+                    "SERVFAIL",
+                    Vec::new(),
+                );
+                Err(build_error_response(request, ResponseCode::ServFail))
+            }
+        }
+    }
+
+    async fn await_singleflight_follower(
+        &self,
+        request: &Message,
+        meta: &LogMeta,
+        rx: FlightReceiver<(Vec<u8>, String)>,
+        query_budget: Duration,
+    ) -> std::result::Result<(Vec<u8>, String, Option<Message>), Result<Vec<u8>>> {
+        let wait_budget = query_budget.saturating_add(Duration::from_secs(1));
+        let wait_res = match tokio::time::timeout(wait_budget, wait_follower(rx)).await {
+            Ok(res) => res,
+            Err(_) => Err("singleflight wait deadline exceeded".to_string()),
+        };
+        match wait_res {
+            Ok((mut bytes, label)) => {
+                patch_tx_id(&mut bytes, request.id);
+                let parsed = Message::from_vec(&bytes).ok();
+                Ok((bytes, label, parsed))
+            }
+            Err(err_msg) => {
+                let (matched_rule, matched_list, upstream_opt) =
+                    if let Some(label) = err_msg.strip_prefix("dnssec:bogus:") {
+                        (
+                            Some("dnssec:bogus".to_string()),
+                            Some("dnssec".to_string()),
+                            Some(label.to_string()),
+                        )
+                    } else {
+                        (None, None, None)
+                    };
+                self.emit_log(
+                    meta,
+                    QueryOutcome::Error,
+                    matched_rule,
+                    matched_list,
+                    upstream_opt,
+                    "SERVFAIL",
+                    Vec::new(),
+                );
+                Err(build_error_response(request, ResponseCode::ServFail))
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -563,12 +654,13 @@ impl DnsPipeline {
         flags: PolicyFlags,
         resp_bytes: Vec<u8>,
         upstream_label: String,
+        parsed_msg: Option<&Message>,
     ) -> Result<Vec<u8>> {
         if !flags.blocking_disabled
             && !flags.explicitly_allowed
             && !is_local_route
             && self.dns_rebinding_protection.load(Ordering::Relaxed)
-            && contains_rebinding_ip(&resp_bytes)
+            && parsed_msg.is_some_and(contains_rebinding_ip_msg)
         {
             let (blocked_bytes, rcode) =
                 build_blocked_response(request, meta.qtype, flags.block_mode)?;
@@ -587,8 +679,9 @@ impl DnsPipeline {
         if !flags.blocking_disabled
             && !flags.explicitly_allowed
             && flags.cname_cloaking_on
+            && let Some(msg) = parsed_msg
             && let Some(blk) =
-                self.check_cname_cloaking(policy, request, &resp_bytes, flags.block_mode)?
+                self.check_cname_cloaking_msg(policy, request, msg, flags.block_mode)?
         {
             self.emit_log(
                 meta,
@@ -602,8 +695,13 @@ impl DnsPipeline {
             return Ok(blk.bytes);
         }
 
-        let rcode_str = extract_rcode_str(&resp_bytes);
-        let answers = extract_answer_summaries(&resp_bytes);
+        let (rcode_str, answers) = match parsed_msg {
+            Some(msg) => (
+                msg.response_code.to_string(),
+                extract_answer_summaries_msg(msg),
+            ),
+            None => ("UNKNOWN".to_string(), Vec::new()),
+        };
         self.emit_log(
             meta,
             QueryOutcome::Forwarded,
@@ -616,16 +714,13 @@ impl DnsPipeline {
         Ok(resp_bytes)
     }
 
-    fn check_cname_cloaking(
+    fn check_cname_cloaking_msg(
         &self,
         policy: Option<&ResolvedClientPolicy>,
         request: &Message,
-        resp_bytes: &[u8],
+        resp_msg: &Message,
         block_mode: BlockMode,
     ) -> Result<Option<CnameBlock>> {
-        let Ok(resp_msg) = Message::from_vec(resp_bytes) else {
-            return Ok(None);
-        };
         let qtype = request
             .queries
             .first()
@@ -666,6 +761,7 @@ impl DnsPipeline {
             return;
         };
         let validator = Arc::clone(&self.dnssec_validator);
+        let budget = upstream.query_budget();
         tokio::spawn(async move {
             let _permit = permit;
             let mut guard = RefreshGuard {
@@ -673,13 +769,17 @@ impl DnsPipeline {
                 key,
                 inserted: false,
             };
-            let Ok((mut resp_bytes, _)) = upstream.exchange(&query_wire).await else {
+            let Ok(Ok((mut resp_bytes, _))) =
+                tokio::time::timeout(budget, upstream.exchange(&query_wire)).await
+            else {
                 return;
             };
             if dnssec_on {
-                let Ok(processed) = validator
-                    .validate_and_process(&resp_bytes, &upstream, client_wants_do)
-                    .await
+                let Ok(Ok(processed)) = tokio::time::timeout(
+                    budget,
+                    validator.validate_and_process(&resp_bytes, &upstream, client_wants_do),
+                )
+                .await
                 else {
                     return;
                 };
@@ -739,18 +839,20 @@ impl Drop for RefreshGuard {
     }
 }
 
-fn extract_rcode_str(resp_bytes: &[u8]) -> String {
-    Message::from_vec(resp_bytes).map_or_else(
-        |_| "UNKNOWN".to_string(),
-        |msg| msg.response_code.to_string(),
-    )
-}
-
 fn cache_upstream_response(cache: &DnsCache, key: CacheKey, resp_bytes: &[u8]) -> bool {
     let Ok(msg) = Message::from_vec(resp_bytes) else {
         return false;
     };
-    if let Some(ttl) = compute_response_cache_ttl(&msg) {
+    cache_upstream_response_msg(cache, key, resp_bytes, &msg)
+}
+
+fn cache_upstream_response_msg(
+    cache: &DnsCache,
+    key: CacheKey,
+    resp_bytes: &[u8],
+    msg: &Message,
+) -> bool {
+    if let Some(ttl) = compute_response_cache_ttl(msg) {
         cache.insert(key, resp_bytes.to_vec(), ttl);
         true
     } else {

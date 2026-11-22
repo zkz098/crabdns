@@ -197,8 +197,12 @@ impl DnsPipeline {
         rate_limit_qps: u32,
     ) -> Result<()> {
         let next = AccessController::new(allow_cidrs, deny_cidrs, rate_limit_qps)?;
-        self.acl.store(Arc::new(next));
+        self.swap_acl(next);
         Ok(())
+    }
+
+    pub fn swap_acl(&self, next: AccessController) {
+        self.acl.store(Arc::new(next));
     }
 
     pub fn reload_clients(
@@ -210,8 +214,12 @@ impl DnsPipeline {
         bootstrap_dns: &[String],
     ) -> Result<()> {
         let next = ClientRegistry::compile(clients, groups, timeout_ms, strategy, bootstrap_dns)?;
-        self.clients.store(Arc::new(next));
+        self.swap_clients(next);
         Ok(())
+    }
+
+    pub fn swap_clients(&self, next: ClientRegistry) {
+        self.clients.store(Arc::new(next));
     }
 
     pub fn set_rdns_enabled(&self, enabled: bool) {
@@ -322,8 +330,12 @@ impl DnsPipeline {
         bootstrap_dns: &[String],
     ) -> Result<()> {
         let next = UpstreamPool::new_with_bootstrap(specs, timeout_ms, strategy, bootstrap_dns)?;
-        self.upstream.store(Arc::new(next));
+        self.swap_upstream(next);
         Ok(())
+    }
+
+    pub fn swap_upstream(&self, next: UpstreamPool) {
+        self.upstream.store(Arc::new(next));
     }
 
     pub fn reload_cache(&self, max_capacity: u64, optimistic: bool) {
@@ -339,13 +351,27 @@ impl DnsPipeline {
         max_ttl_secs: u32,
         prefetch_enabled: bool,
     ) {
-        self.cache.store(Arc::new(DnsCache::with_options(
+        let next = DnsCache::with_options(
             max_capacity,
             optimistic,
             min_ttl_secs,
             max_ttl_secs,
             prefetch_enabled,
-        )));
+        );
+        let prev = self.cache.load_full();
+        if prev.entry_count() > 0 && max_capacity > 0 {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+            let mut entries = prev.export_persisted(now_secs);
+            let limit = usize::try_from(max_capacity).unwrap_or(usize::MAX);
+            if entries.len() > limit {
+                entries.sort_by_key(|e| std::cmp::Reverse(e.expires_at_unix_secs));
+                entries.truncate(limit);
+            }
+            let _ = next.import_persisted(entries, now_secs);
+        }
+        self.cache.store(Arc::new(next));
     }
 
     pub fn reload_split_dns(
@@ -366,8 +392,12 @@ impl DnsPipeline {
     ) -> Result<()> {
         let router =
             SplitUpstreamRouter::new_with_bootstrap(rules, timeout_ms, strategy, bootstrap_dns)?;
-        self.split_router.store(Arc::new(router));
+        self.swap_split_dns(router);
         Ok(())
+    }
+
+    pub fn swap_split_dns(&self, router: SplitUpstreamRouter) {
+        self.split_router.store(Arc::new(router));
     }
 
     pub fn set_cname_cloaking(&self, enabled: bool) {
@@ -386,8 +416,12 @@ impl DnsPipeline {
         ipv6_prefix: u8,
     ) -> Result<()> {
         let cfg = EcsConfig::from_parts(enabled, custom_ip, ipv4_prefix, ipv6_prefix)?;
-        self.ecs_config.store(Arc::new(cfg));
+        self.swap_ecs(cfg);
         Ok(())
+    }
+
+    pub fn swap_ecs(&self, cfg: EcsConfig) {
+        self.ecs_config.store(Arc::new(cfg));
     }
 
     pub fn set_dnssec_enabled(&self, enabled: bool) {
@@ -419,8 +453,12 @@ impl DnsPipeline {
     ) -> Result<()> {
         let router =
             PrivatePtrRouter::new(enabled, upstreams, timeout_ms, strategy, bootstrap_dns)?;
-        self.private_ptr_router.store(Arc::new(router));
+        self.swap_private_ptr(router);
         Ok(())
+    }
+
+    pub fn swap_private_ptr(&self, router: PrivatePtrRouter) {
+        self.private_ptr_router.store(Arc::new(router));
     }
 
     pub fn reload_ddr(&self, cfg: DdrConfig) {

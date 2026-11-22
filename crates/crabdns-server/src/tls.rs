@@ -1,7 +1,10 @@
 use std::fmt::Write as _;
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -12,9 +15,10 @@ use ring::digest::{SHA256, digest};
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, mpsc};
-use tokio::task::JoinHandle;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
@@ -299,40 +303,58 @@ impl HttpsTlsListener {
     pub fn from_tcp_listener(
         tcp_listener: TcpListener,
         acceptor: Arc<ArcSwap<TlsAcceptor>>,
+        mut shutdown_rx: watch::Receiver<bool>,
     ) -> std::io::Result<(Self, SocketAddr, JoinHandle<()>)> {
         let local_addr = tcp_listener.local_addr()?;
         let (tx, rx) = mpsc::channel(HTTPS_MAX_HANDSHAKES);
         let limiter = Arc::new(Semaphore::new(HTTPS_MAX_HANDSHAKES));
 
         let accept_task = tokio::spawn(async move {
+            let mut handshakes = JoinSet::new();
             loop {
-                let Ok((stream, peer)) = tcp_listener.accept().await else {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                };
-                let _ = stream.set_nodelay(true);
-                let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
-                    tracing::warn!(peer = %peer, "HTTPS TLS handshake rejected: capacity reached");
-                    drop(stream);
-                    continue;
-                };
-                let tls = acceptor.load_full();
-                let tx_inner = tx.clone();
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    match tokio::time::timeout(HTTPS_HANDSHAKE_TIMEOUT, tls.accept(stream)).await {
-                        Ok(Ok(tls_stream)) => {
-                            let _ = tx_inner.send((tls_stream, peer)).await;
-                        }
-                        Ok(Err(err)) => {
-                            tracing::debug!(peer = %peer, error = %err, "HTTPS TLS handshake failed");
-                        }
-                        Err(_) => {
-                            tracing::debug!(peer = %peer, "HTTPS TLS handshake timed out");
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
                         }
                     }
-                });
+                    Some(_) = handshakes.join_next(), if !handshakes.is_empty() => {}
+                    accept_res = tcp_listener.accept() => {
+                        let Ok((stream, peer)) = accept_res else {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            continue;
+                        };
+                        let _ = stream.set_nodelay(true);
+                        let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
+                            tracing::warn!(peer = %peer, "HTTPS TLS handshake rejected: capacity reached");
+                            drop(stream);
+                            continue;
+                        };
+                        let tls = acceptor.load_full();
+                        let tx_inner = tx.clone();
+                        handshakes.spawn(async move {
+                            let handshake_res = tokio::time::timeout(
+                                HTTPS_HANDSHAKE_TIMEOUT,
+                                tls.accept(stream),
+                            )
+                            .await;
+                            drop(permit);
+                            match handshake_res {
+                                Ok(Ok(tls_stream)) => {
+                                    let _ = tx_inner.send((tls_stream, peer)).await;
+                                }
+                                Ok(Err(err)) => {
+                                    tracing::debug!(peer = %peer, error = %err, "HTTPS TLS handshake failed");
+                                }
+                                Err(_) => {
+                                    tracing::debug!(peer = %peer, "HTTPS TLS handshake timed out");
+                                }
+                            }
+                        });
+                    }
+                }
             }
+            handshakes.shutdown().await;
         });
 
         Ok((Self { local_addr, rx }, local_addr, accept_task))
@@ -352,5 +374,96 @@ impl Listener for HttpsTlsListener {
 
     fn local_addr(&self) -> std::io::Result<Self::Addr> {
         Ok(self.local_addr)
+    }
+}
+
+/// Stream wrapper holding an active-connection semaphore permit until the connection closes.
+pub struct PermittedStream<S> {
+    inner: S,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PermittedStream<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PermittedStream<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
+
+/// Listener wrapper that caps concurrent accepted HTTP/HTTPS connections via a bounded semaphore.
+pub struct PermittedListener<L> {
+    inner: L,
+    limiter: Arc<Semaphore>,
+}
+
+impl<L> PermittedListener<L> {
+    pub fn new(inner: L, max_connections: usize) -> Self {
+        Self {
+            inner,
+            limiter: Arc::new(Semaphore::new(max_connections.max(1))),
+        }
+    }
+}
+
+impl<L> Listener for PermittedListener<L>
+where
+    L: Listener,
+    L::Addr: std::fmt::Display,
+{
+    type Io = PermittedStream<L::Io>;
+    type Addr = L::Addr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (io, addr) = self.inner.accept().await;
+            if let Ok(permit) = Arc::clone(&self.limiter).try_acquire_owned() {
+                return (
+                    PermittedStream {
+                        inner: io,
+                        _permit: permit,
+                    },
+                    addr,
+                );
+            }
+            tracing::warn!(peer = %addr, "web connection rejected: max active connections reached");
+            drop(io);
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
     }
 }

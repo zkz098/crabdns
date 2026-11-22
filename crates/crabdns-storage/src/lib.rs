@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crabdns_core::{
@@ -12,7 +12,7 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use foldhash::fast::RandomState;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use ts_rs::TS;
 
 #[derive(Debug, Error)]
@@ -78,6 +78,77 @@ const FJALL_MAX_CACHED_FILES: usize = 64;
 const FJALL_WORKER_THREADS: usize = 2;
 const FJALL_LOGS_MEMTABLE_BYTES: u64 = 4 * 1024 * 1024;
 const FJALL_SMALL_MEMTABLE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_STAT_KEYS: usize = 10_000;
+const MAX_LOG_SCAN: usize = 50_000;
+const BATCH_CHUNK_SIZE: usize = 1_024;
+
+#[derive(Debug, Default)]
+struct BoundedCountMap {
+    inner: DashMap<String, u64, RandomState>,
+    pruning: AtomicBool,
+}
+
+impl BoundedCountMap {
+    fn new() -> Self {
+        Self {
+            inner: DashMap::with_hasher(RandomState::default()),
+            pruning: AtomicBool::new(false),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn increment(&self, key: &str) {
+        if let Some(mut entry) = self.inner.get_mut(key) {
+            *entry = entry.saturating_add(1);
+            return;
+        }
+        if self.inner.len() >= MAX_STAT_KEYS {
+            self.decay_and_prune();
+        }
+        if self.inner.len() < MAX_STAT_KEYS {
+            self.inner
+                .entry(key.to_string())
+                .and_modify(|v| *v = v.saturating_add(1))
+                .or_insert(1);
+        }
+    }
+
+    fn decay_and_prune(&self) {
+        if self.pruning.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let before = self.inner.len();
+        self.inner.retain(|_, v| *v > 1);
+        if self.inner.len() >= (MAX_STAT_KEYS * 9) / 10 {
+            self.inner.retain(|_, v| {
+                *v /= 2;
+                *v > 0
+            });
+        }
+        let after = self.inner.len();
+        if after == 0 || after.saturating_mul(4) < before {
+            self.inner.shrink_to_fit();
+        }
+        self.pruning.store(false, Ordering::Release);
+    }
+
+    fn top_n(&self, limit: usize) -> Vec<TopItem> {
+        let mut items: Vec<TopItem> = self
+            .inner
+            .iter()
+            .map(|entry| TopItem {
+                name: entry.key().clone(),
+                count: *entry.value(),
+            })
+            .collect();
+        items.sort_by_key(|a| std::cmp::Reverse(a.count));
+        items.truncate(limit);
+        items
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PersistedCounters {
@@ -100,9 +171,12 @@ pub struct StorageEngine {
     cached_queries: AtomicU64,
     rewritten_queries: AtomicU64,
     error_queries: AtomicU64,
-    domain_counts: DashMap<String, u64, RandomState>,
-    blocked_counts: DashMap<String, u64, RandomState>,
-    client_counts: DashMap<String, u64, RandomState>,
+    domain_counts: BoundedCountMap,
+    blocked_counts: BoundedCountMap,
+    client_counts: BoundedCountMap,
+    sub_lock: Mutex<()>,
+    client_lock: Mutex<()>,
+    config_lock: Mutex<()>,
 }
 
 impl StorageEngine {
@@ -143,10 +217,25 @@ impl StorageEngine {
             cached_queries: AtomicU64::new(persisted.cached),
             rewritten_queries: AtomicU64::new(persisted.rewritten),
             error_queries: AtomicU64::new(persisted.error),
-            domain_counts: DashMap::with_hasher(RandomState::default()),
-            blocked_counts: DashMap::with_hasher(RandomState::default()),
-            client_counts: DashMap::with_hasher(RandomState::default()),
+            domain_counts: BoundedCountMap::new(),
+            blocked_counts: BoundedCountMap::new(),
+            client_counts: BoundedCountMap::new(),
+            sub_lock: Mutex::new(()),
+            client_lock: Mutex::new(()),
+            config_lock: Mutex::new(()),
         })
+    }
+
+    pub fn subscription_lock(&self) -> &Mutex<()> {
+        &self.sub_lock
+    }
+
+    pub fn client_lock(&self) -> &Mutex<()> {
+        &self.client_lock
+    }
+
+    pub fn config_lock(&self) -> &Mutex<()> {
+        &self.config_lock
     }
 
     pub fn record_batch(&self, events: &[QueryEvent]) -> Result<()> {
@@ -154,9 +243,22 @@ impl StorageEngine {
             return Ok(());
         }
 
+        let mut delta_total = 0_u64;
+        let mut delta_blocked = 0_u64;
+        let mut delta_cached = 0_u64;
+        let mut delta_rewritten = 0_u64;
+        let mut delta_error = 0_u64;
+
         let mut batch = self.db.batch();
         for event in events {
-            self.update_counters(event);
+            delta_total += 1;
+            match event.outcome {
+                QueryOutcome::Blocked => delta_blocked += 1,
+                QueryOutcome::Cached => delta_cached += 1,
+                QueryOutcome::Rewritten => delta_rewritten += 1,
+                QueryOutcome::Error => delta_error += 1,
+                QueryOutcome::Forwarded => {}
+            }
             let ts_ms = event.timestamp.timestamp_millis().max(0).cast_unsigned();
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);
             let key = encode_log_key(ts_ms, seq);
@@ -165,37 +267,47 @@ impl StorageEngine {
         }
 
         let counters = PersistedCounters {
-            total: self.total_queries.load(Ordering::Relaxed),
-            blocked: self.blocked_queries.load(Ordering::Relaxed),
-            cached: self.cached_queries.load(Ordering::Relaxed),
-            rewritten: self.rewritten_queries.load(Ordering::Relaxed),
-            error: self.error_queries.load(Ordering::Relaxed),
+            total: self
+                .total_queries
+                .load(Ordering::Relaxed)
+                .saturating_add(delta_total),
+            blocked: self
+                .blocked_queries
+                .load(Ordering::Relaxed)
+                .saturating_add(delta_blocked),
+            cached: self
+                .cached_queries
+                .load(Ordering::Relaxed)
+                .saturating_add(delta_cached),
+            rewritten: self
+                .rewritten_queries
+                .load(Ordering::Relaxed)
+                .saturating_add(delta_rewritten),
+            error: self
+                .error_queries
+                .load(Ordering::Relaxed)
+                .saturating_add(delta_error),
         };
         batch.insert(&self.meta, KEY_COUNTERS, serde_json::to_vec(&counters)?);
         batch.commit()?;
-        Ok(())
-    }
 
-    fn update_counters(&self, event: &QueryEvent) {
-        self.total_queries.fetch_add(1, Ordering::Relaxed);
-        match event.outcome {
-            QueryOutcome::Blocked => {
-                self.blocked_queries.fetch_add(1, Ordering::Relaxed);
-                increment_map(&self.blocked_counts, &event.domain);
+        self.total_queries.fetch_add(delta_total, Ordering::Relaxed);
+        self.blocked_queries
+            .fetch_add(delta_blocked, Ordering::Relaxed);
+        self.cached_queries
+            .fetch_add(delta_cached, Ordering::Relaxed);
+        self.rewritten_queries
+            .fetch_add(delta_rewritten, Ordering::Relaxed);
+        self.error_queries.fetch_add(delta_error, Ordering::Relaxed);
+
+        for event in events {
+            if event.outcome == QueryOutcome::Blocked {
+                self.blocked_counts.increment(&event.domain);
             }
-            QueryOutcome::Cached => {
-                self.cached_queries.fetch_add(1, Ordering::Relaxed);
-            }
-            QueryOutcome::Rewritten => {
-                self.rewritten_queries.fetch_add(1, Ordering::Relaxed);
-            }
-            QueryOutcome::Error => {
-                self.error_queries.fetch_add(1, Ordering::Relaxed);
-            }
-            QueryOutcome::Forwarded => {}
+            self.domain_counts.increment(&event.domain);
+            self.client_counts.increment(&event.client_ip);
         }
-        increment_map(&self.domain_counts, &event.domain);
-        increment_map(&self.client_counts, &event.client_ip);
+        Ok(())
     }
 
     pub fn query_logs(
@@ -207,7 +319,10 @@ impl StorageEngine {
         let mut results = Vec::with_capacity(limit.min(500));
         let needle = search.map(str::to_ascii_lowercase);
 
-        for guard in self.logs.iter().rev() {
+        for (scanned, guard) in self.logs.iter().rev().enumerate() {
+            if scanned >= MAX_LOG_SCAN {
+                break;
+            }
             let val = guard.value()?;
             let Ok(event) = serde_json::from_slice::<QueryEvent>(&val) else {
                 continue;
@@ -238,9 +353,9 @@ impl StorageEngine {
             cached_queries: self.cached_queries.load(Ordering::Relaxed),
             rewritten_queries: self.rewritten_queries.load(Ordering::Relaxed),
             error_queries: self.error_queries.load(Ordering::Relaxed),
-            top_domains: top_n(&self.domain_counts, 10),
-            top_blocked: top_n(&self.blocked_counts, 10),
-            top_clients: top_n(&self.client_counts, 10),
+            top_domains: self.domain_counts.top_n(10),
+            top_blocked: self.blocked_counts.top_n(10),
+            top_clients: self.client_counts.top_n(10),
         }
     }
 
@@ -355,6 +470,7 @@ impl StorageEngine {
     pub fn client_query_counts(&self) -> Vec<(String, u64)> {
         let mut out: Vec<(String, u64)> = self
             .client_counts
+            .inner
             .iter()
             .map(|e| (e.key().clone(), *e.value()))
             .collect();
@@ -404,30 +520,75 @@ impl StorageEngine {
         Ok(removed)
     }
 
-    pub fn clear_dns_cache(&self) -> Result<()> {
-        let mut batch = self.db.batch();
-        for guard in self.dns_cache.iter() {
-            let key = guard.key()?;
-            batch.remove(&self.dns_cache, key);
+    pub fn prune_oversized_logs(&self, max_disk_bytes: u64) -> Result<usize> {
+        const PRUNE_CHUNK: usize = 4096;
+        if self.logs.disk_space() <= max_disk_bytes {
+            return Ok(0);
         }
-        batch.commit()?;
+        let mut removed = 0_usize;
+        while self.logs.disk_space() > max_disk_bytes {
+            let mut keys = Vec::new();
+            for guard in self.logs.iter() {
+                keys.push(guard.key()?);
+                if keys.len() >= PRUNE_CHUNK {
+                    break;
+                }
+            }
+            if keys.is_empty() {
+                break;
+            }
+            let chunk_len = keys.len();
+            let mut batch = self.db.batch();
+            for k in keys {
+                batch.remove(&self.logs, k);
+            }
+            batch.commit()?;
+            removed += chunk_len;
+            if chunk_len < PRUNE_CHUNK {
+                break;
+            }
+        }
+        Ok(removed)
+    }
+
+    pub fn clear_dns_cache(&self) -> Result<()> {
+        loop {
+            let mut keys = Vec::new();
+            for guard in self.dns_cache.iter() {
+                keys.push(guard.key()?);
+                if keys.len() >= BATCH_CHUNK_SIZE {
+                    break;
+                }
+            }
+            if keys.is_empty() {
+                break;
+            }
+            let chunk_len = keys.len();
+            let mut batch = self.db.batch();
+            for key in keys {
+                batch.remove(&self.dns_cache, key);
+            }
+            batch.commit()?;
+            if chunk_len < BATCH_CHUNK_SIZE {
+                break;
+            }
+        }
         Ok(())
     }
 
     pub fn save_dns_cache(&self, entries: &[PersistedCacheEntry]) -> Result<usize> {
-        let mut batch = self.db.batch();
-        for guard in self.dns_cache.iter() {
-            let key = guard.key()?;
-            batch.remove(&self.dns_cache, key);
+        self.clear_dns_cache()?;
+        let mut saved: usize = 0;
+        for chunk in entries.chunks(BATCH_CHUNK_SIZE) {
+            let mut batch = self.db.batch();
+            for entry in chunk {
+                let key = saved.to_be_bytes();
+                let val = serde_json::to_vec(entry)?;
+                batch.insert(&self.dns_cache, key, val);
+                saved += 1;
+            }
+            batch.commit()?;
         }
-        let mut saved = 0;
-        for (idx, entry) in entries.iter().enumerate() {
-            let key = idx.to_be_bytes();
-            let val = serde_json::to_vec(entry)?;
-            batch.insert(&self.dns_cache, key, val);
-            saved += 1;
-        }
-        batch.commit()?;
         Ok(saved)
     }
 
@@ -454,27 +615,6 @@ fn encode_log_key(ts_ms: u64, seq: u64) -> [u8; 16] {
     key[0..8].copy_from_slice(&ts_ms.to_be_bytes());
     key[8..16].copy_from_slice(&seq.to_be_bytes());
     key
-}
-
-fn increment_map(map: &DashMap<String, u64, RandomState>, key: &str) {
-    if let Some(mut entry) = map.get_mut(key) {
-        *entry += 1;
-    } else if map.len() < 10_000 {
-        map.insert(key.to_string(), 1);
-    }
-}
-
-fn top_n(map: &DashMap<String, u64, RandomState>, limit: usize) -> Vec<TopItem> {
-    let mut items: Vec<TopItem> = map
-        .iter()
-        .map(|entry| TopItem {
-            name: entry.key().clone(),
-            count: *entry.value(),
-        })
-        .collect();
-    items.sort_by_key(|a| std::cmp::Reverse(a.count));
-    items.truncate(limit);
-    items
 }
 
 fn protocol_label(protocol: QueryProtocol) -> &'static str {
@@ -742,5 +882,24 @@ mod tests {
         let remaining = storage.query_logs(10, None, None).expect("logs");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].domain, "fresh.example.com");
+    }
+
+    #[test]
+    fn test_bounded_count_map_decays_and_admits_new_hot_keys() {
+        let map = BoundedCountMap::new();
+        for _ in 0..50 {
+            map.increment("hot-old.test");
+        }
+        for i in 0..MAX_STAT_KEYS {
+            map.increment(&format!("cold-{i}.test"));
+        }
+        assert!(map.len() <= MAX_STAT_KEYS);
+        for _ in 0..30 {
+            map.increment("hot-new.test");
+        }
+        assert!(map.len() <= MAX_STAT_KEYS);
+        let top = map.top_n(5);
+        assert!(top.iter().any(|item| item.name == "hot-old.test"));
+        assert!(top.iter().any(|item| item.name == "hot-new.test"));
     }
 }

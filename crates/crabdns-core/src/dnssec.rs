@@ -1,4 +1,6 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foldhash::fast::RandomState;
 use hickory_proto::dnssec::rdata::{DNSKEY, DNSSECRData, DS, RRSIG};
@@ -8,15 +10,25 @@ use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use moka::sync::Cache;
 
 use crate::error::{CoreError, Result};
-use crate::upstream::UpstreamPool;
+use crate::singleflight::{FlightRole, Singleflight, wait_follower};
+use crate::upstream::{UpstreamPool, next_tx_id};
 
 const ZONE_CACHE_CAPACITY: u64 = 4096;
 const ZONE_CACHE_TTL: Duration = Duration::from_hours(1);
+const MIN_ZONE_CACHE_TTL_SECS: u32 = 60;
+const MAX_ZONE_CACHE_TTL_SECS: u32 = 3600;
+const MIN_PLAUSIBLE_UNIX_SECS: u64 = 1_700_000_000;
 
 #[derive(Debug, Clone)]
 enum ZoneState {
     Secure(Vec<DNSKEY>),
     Insecure,
+}
+
+#[derive(Debug, Clone)]
+struct ZoneCacheEntry {
+    state: ZoneState,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +40,9 @@ pub enum ValidationOutcome {
 
 pub struct DnssecValidator {
     trust_anchors: TrustAnchors,
-    zone_cache: Cache<String, ZoneState, RandomState>,
+    zone_cache: Cache<String, ZoneCacheEntry, RandomState>,
+    zone_inflight: Arc<Singleflight<String, Option<Vec<DNSKEY>>>>,
+    unsynced_clock_warned: AtomicBool,
 }
 
 impl Default for DnssecValidator {
@@ -46,7 +60,30 @@ impl DnssecValidator {
         Self {
             trust_anchors,
             zone_cache,
+            zone_inflight: Arc::new(Singleflight::new()),
+            unsynced_clock_warned: AtomicBool::new(false),
         }
+    }
+
+    fn get_cached_zone(&self, zone: &str) -> Option<ZoneState> {
+        let entry = self.zone_cache.get(zone)?;
+        if Instant::now() < entry.expires_at {
+            Some(entry.state)
+        } else {
+            self.zone_cache.invalidate(zone);
+            None
+        }
+    }
+
+    fn put_cached_zone(&self, zone: String, state: ZoneState, ttl_secs: u32) {
+        let clamped = ttl_secs.clamp(MIN_ZONE_CACHE_TTL_SECS, MAX_ZONE_CACHE_TTL_SECS);
+        self.zone_cache.insert(
+            zone,
+            ZoneCacheEntry {
+                state,
+                expires_at: Instant::now() + Duration::from_secs(u64::from(clamped)),
+            },
+        );
     }
 
     /// Validates an upstream DNS response and returns the (possibly stripped/AD-marked) wire bytes.
@@ -59,7 +96,26 @@ impl DnssecValidator {
         let mut msg = Message::from_vec(resp_bytes)
             .map_err(|e| CoreError::Protocol(format!("invalid upstream DNS response: {e}")))?;
 
-        let now_secs = current_unix_secs();
+        let raw_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if raw_unix_secs < MIN_PLAUSIBLE_UNIX_SECS {
+            if !self.unsynced_clock_warned.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    unix_secs = raw_unix_secs,
+                    "system clock is before plausible epoch; bypassing DNSSEC time validation until NTP syncs"
+                );
+            }
+            msg.metadata.authentic_data = false;
+            if !client_wants_do {
+                strip_dnssec_records(&mut msg);
+            }
+            return msg
+                .to_vec()
+                .map_err(|e| CoreError::Protocol(format!("failed to encode response: {e}")));
+        }
+
+        let now_secs = (raw_unix_secs & 0xFFFF_FFFF) as u32;
         let outcome = self.validate_message(&msg, upstream, now_secs).await;
 
         match outcome {
@@ -160,42 +216,77 @@ impl DnssecValidator {
         upstream: &UpstreamPool,
         now_secs: u32,
     ) -> Result<Option<Vec<DNSKEY>>> {
-        if let Some(cached) = self.zone_cache.get(zone) {
+        if let Some(cached) = self.get_cached_zone(zone) {
             return Ok(match cached {
                 ZoneState::Secure(keys) => Some(keys),
                 ZoneState::Insecure => None,
             });
         }
 
+        match self.zone_inflight.acquire(zone.to_string()) {
+            FlightRole::Leader(guard) => {
+                if let Some(cached) = self.get_cached_zone(zone) {
+                    let res = match cached {
+                        ZoneState::Secure(keys) => Some(keys),
+                        ZoneState::Insecure => None,
+                    };
+                    guard.complete(Ok(res.clone()));
+                    return Ok(res);
+                }
+
+                let res = self
+                    .resolve_zone_keys_uncached(zone, upstream, now_secs)
+                    .await;
+                match &res {
+                    Ok(val) => guard.complete(Ok(val.clone())),
+                    Err(err) => guard.complete(Err(err.to_string())),
+                }
+                res
+            }
+            FlightRole::Follower(rx) => wait_follower(rx).await.map_err(CoreError::Protocol),
+        }
+    }
+
+    async fn resolve_zone_keys_uncached(
+        &self,
+        zone: &str,
+        upstream: &UpstreamPool,
+        now_secs: u32,
+    ) -> Result<Option<Vec<DNSKEY>>> {
         let chain = build_zone_chain(zone);
         let mut parent_keys = self.ensure_root_keys(upstream, now_secs).await?;
 
         for child in chain.into_iter().skip(1) {
-            if let Some(cached) = self.zone_cache.get(&child) {
+            if let Some(cached) = self.get_cached_zone(&child) {
                 match cached {
                     ZoneState::Secure(keys) => {
                         parent_keys = keys;
                         continue;
                     }
                     ZoneState::Insecure => {
-                        self.zone_cache
-                            .insert(zone.to_string(), ZoneState::Insecure);
+                        self.put_cached_zone(
+                            zone.to_string(),
+                            ZoneState::Insecure,
+                            MIN_ZONE_CACHE_TTL_SECS,
+                        );
                         return Ok(None);
                     }
                 }
             }
 
-            let Some(child_keys) = self
+            let Some((child_keys, ttl)) = self
                 .validate_child_zone(&child, &parent_keys, upstream, now_secs)
                 .await?
             else {
-                self.zone_cache.insert(child, ZoneState::Insecure);
-                self.zone_cache
-                    .insert(zone.to_string(), ZoneState::Insecure);
+                self.put_cached_zone(child, ZoneState::Insecure, MIN_ZONE_CACHE_TTL_SECS);
+                self.put_cached_zone(
+                    zone.to_string(),
+                    ZoneState::Insecure,
+                    MIN_ZONE_CACHE_TTL_SECS,
+                );
                 return Ok(None);
             };
-            self.zone_cache
-                .insert(child, ZoneState::Secure(child_keys.clone()));
+            self.put_cached_zone(child, ZoneState::Secure(child_keys.clone()), ttl);
             parent_keys = child_keys;
         }
 
@@ -207,7 +298,7 @@ impl DnssecValidator {
         upstream: &UpstreamPool,
         now_secs: u32,
     ) -> Result<Vec<DNSKEY>> {
-        if let Some(ZoneState::Secure(keys)) = self.zone_cache.get(".") {
+        if let Some(ZoneState::Secure(keys)) = self.get_cached_zone(".") {
             return Ok(keys);
         }
         let root_name = Name::root();
@@ -246,8 +337,12 @@ impl DnssecValidator {
             ));
         }
 
-        self.zone_cache
-            .insert(".".to_string(), ZoneState::Secure(keys.clone()));
+        let ttl = key_records
+            .iter()
+            .map(|r| r.ttl)
+            .min()
+            .unwrap_or(MAX_ZONE_CACHE_TTL_SECS);
+        self.put_cached_zone(".".to_string(), ZoneState::Secure(keys.clone()), ttl);
         Ok(keys)
     }
 
@@ -257,7 +352,7 @@ impl DnssecValidator {
         parent_keys: &[DNSKEY],
         upstream: &UpstreamPool,
         now_secs: u32,
-    ) -> Result<Option<Vec<DNSKEY>>> {
+    ) -> Result<Option<(Vec<DNSKEY>, u32)>> {
         let child_name = Name::from_ascii(child).map_err(|e| CoreError::Protocol(e.to_string()))?;
         let ds_resp = query_upstream_dnssec(upstream, &child_name, RecordType::DS).await?;
         let ds_list = extract_ds(&ds_resp.answers, &child_name);
@@ -322,15 +417,18 @@ impl DnssecValidator {
             )));
         }
 
-        Ok(Some(keys))
+        let ds_ttl = ds_records
+            .iter()
+            .map(|r| r.ttl)
+            .min()
+            .unwrap_or(MAX_ZONE_CACHE_TTL_SECS);
+        let key_ttl = key_records
+            .iter()
+            .map(|r| r.ttl)
+            .min()
+            .unwrap_or(MAX_ZONE_CACHE_TTL_SECS);
+        Ok(Some((keys, ds_ttl.min(key_ttl))))
     }
-}
-
-fn current_unix_secs() -> u32 {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    u32::try_from(secs).unwrap_or(u32::MAX)
 }
 
 fn normalize_zone(raw: &str) -> String {
@@ -364,7 +462,8 @@ async fn query_upstream_dnssec(
     name: &Name,
     qtype: RecordType,
 ) -> Result<Message> {
-    let mut msg = Message::new(rand_id(), MessageType::Query, OpCode::Query);
+    let tx_id = next_tx_id();
+    let mut msg = Message::new(tx_id, MessageType::Query, OpCode::Query);
     msg.metadata.recursion_desired = true;
     msg.add_query(Query::query(name.clone(), qtype));
     crate::edns::set_dnssec_ok(&mut msg);
@@ -372,14 +471,13 @@ async fn query_upstream_dnssec(
         .to_vec()
         .map_err(|e| CoreError::Protocol(e.to_string()))?;
     let (resp_bytes, _) = upstream.exchange(&wire).await?;
-    Message::from_vec(&resp_bytes).map_err(|e| CoreError::Protocol(e.to_string()))
-}
-
-fn rand_id() -> u16 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(1, |d| d.subsec_nanos());
-    (nanos & 0xFFFF) as u16
+    let resp = Message::from_vec(&resp_bytes).map_err(|e| CoreError::Protocol(e.to_string()))?;
+    if resp.id != tx_id {
+        return Err(CoreError::Protocol(
+            "DNSSEC auxiliary response transaction ID mismatch".to_string(),
+        ));
+    }
+    Ok(resp)
 }
 
 fn extract_rrsigs(records: &[Record]) -> Vec<(&Record, &RRSIG)> {
@@ -447,7 +545,10 @@ fn verify_rrset_with_keys(
     let input = sig.input();
     let inception = input.sig_inception.get();
     let expiration = input.sig_expiration.get();
-    if now_secs < inception || now_secs > expiration {
+    // RFC 4034 Section 3.1.5 / RFC 1982 serial number arithmetic (handles post-2038 wraparound).
+    let after_inception = now_secs.wrapping_sub(inception).cast_signed() >= 0;
+    let before_expiration = expiration.wrapping_sub(now_secs).cast_signed() >= 0;
+    if !after_inception || !before_expiration {
         return false;
     }
     for key in keys {

@@ -33,6 +33,7 @@ pub(crate) fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
 const UDP_SOCKET_POOL_MAX_IDLE: usize = 128;
 const CONN_POOL_MAX_IDLE: usize = 32;
 const CONN_POOL_IDLE_TTL: Duration = Duration::from_secs(30);
+const MAX_POOLED_RETRIES: usize = 2;
 const MAX_DOH_RESPONSE_BYTES: usize = 65_535;
 
 #[derive(Debug, Default)]
@@ -97,6 +98,7 @@ impl<S> ConnPool<S> {
             .conns
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.retain(|item| item.last_used.elapsed() < CONN_POOL_IDLE_TTL);
         if guard.len() < CONN_POOL_MAX_IDLE {
             guard.push(PooledConn {
                 stream,
@@ -107,10 +109,7 @@ impl<S> ConnPool<S> {
 }
 
 fn tx_id_matches(query: &[u8], resp: &[u8]) -> bool {
-    if query.len() < 2 || resp.len() < 2 {
-        return true;
-    }
-    query[0..2] == resp[0..2]
+    query.len() >= 2 && resp.len() >= 2 && query[0..2] == resp[0..2]
 }
 
 pub(crate) fn is_udp_truncated(resp: &[u8]) -> bool {
@@ -151,9 +150,12 @@ pub(crate) async fn exchange_udp(
 
     let fresh = bind_connected_udp(addr).await?;
     let resp = udp_roundtrip(&fresh, query_wire).await?;
-    if tx_id_matches(query_wire, &resp) {
-        pool.put(fresh);
+    if !tx_id_matches(query_wire, &resp) {
+        return Err(CoreError::Upstream(
+            "UDP DNS response transaction ID mismatch".to_string(),
+        ));
     }
+    pool.put(fresh);
     Ok(resp)
 }
 
@@ -168,20 +170,27 @@ pub(crate) async fn exchange_tcp_pooled(
     pool: &ConnPool<TcpStream>,
     query_wire: &[u8],
 ) -> Result<Vec<u8>> {
-    if let Some(mut stream) = pool.pop_fresh()
-        && let Ok(resp) = tcp_roundtrip(&mut stream, query_wire).await
-        && tx_id_matches(query_wire, &resp)
-    {
-        pool.put(stream);
-        return Ok(resp);
+    for _ in 0..MAX_POOLED_RETRIES {
+        let Some(mut stream) = pool.pop_fresh() else {
+            break;
+        };
+        if let Ok(resp) = tcp_roundtrip(&mut stream, query_wire).await
+            && tx_id_matches(query_wire, &resp)
+        {
+            pool.put(stream);
+            return Ok(resp);
+        }
     }
 
     let mut stream = TcpStream::connect(addr).await?;
     let _ = stream.set_nodelay(true);
     let resp = tcp_roundtrip(&mut stream, query_wire).await?;
-    if tx_id_matches(query_wire, &resp) {
-        pool.put(stream);
+    if !tx_id_matches(query_wire, &resp) {
+        return Err(CoreError::Upstream(
+            "TCP DNS response transaction ID mismatch".to_string(),
+        ));
     }
+    pool.put(stream);
     Ok(resp)
 }
 
@@ -189,12 +198,14 @@ pub(crate) async fn try_exchange_dot_pooled(
     pool: &ConnPool<TlsStream<TcpStream>>,
     query_wire: &[u8],
 ) -> Option<Vec<u8>> {
-    let mut tls_stream = pool.pop_fresh()?;
-    if let Ok(resp) = tcp_roundtrip(&mut tls_stream, query_wire).await
-        && tx_id_matches(query_wire, &resp)
-    {
-        pool.put(tls_stream);
-        return Some(resp);
+    for _ in 0..MAX_POOLED_RETRIES {
+        let mut tls_stream = pool.pop_fresh()?;
+        if let Ok(resp) = tcp_roundtrip(&mut tls_stream, query_wire).await
+            && tx_id_matches(query_wire, &resp)
+        {
+            pool.put(tls_stream);
+            return Some(resp);
+        }
     }
     None
 }
@@ -216,9 +227,12 @@ pub(crate) async fn exchange_dot_addrs(
         .await
         .map_err(|e| CoreError::Upstream(format!("TLS handshake failed: {e}")))?;
     let resp = tcp_roundtrip(&mut tls_stream, query_wire).await?;
-    if tx_id_matches(query_wire, &resp) {
-        pool.put(tls_stream);
+    if !tx_id_matches(query_wire, &resp) {
+        return Err(CoreError::Upstream(
+            "DoT DNS response transaction ID mismatch".to_string(),
+        ));
     }
+    pool.put(tls_stream);
     Ok(resp)
 }
 
