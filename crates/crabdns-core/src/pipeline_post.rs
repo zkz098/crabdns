@@ -153,13 +153,13 @@ impl DnsPipeline {
     pub(crate) fn maybe_sanitize_svcb(
         &self,
         qtype: RecordType,
+        opts: crate::svcb::SvcbSanitizeOptions,
         resp_bytes: Vec<u8>,
         parsed_msg: Option<Message>,
     ) -> (Vec<u8>, Option<Message>) {
         if !matches!(qtype, RecordType::HTTPS | RecordType::SVCB) {
             return (resp_bytes, parsed_msg);
         }
-        let opts = self.svcb_sanitize_options();
         if let Some(updated) = sanitize_svcb_bytes(&resp_bytes, opts) {
             let parsed = Message::from_vec(&updated).ok();
             return (updated, parsed);
@@ -172,6 +172,7 @@ impl DnsPipeline {
         request: &Message,
         meta: &LogMeta,
         upstream: &UpstreamPool,
+        dns64_on: bool,
         resp_bytes: Vec<u8>,
         parsed_msg: Option<Message>,
     ) -> Result<(Vec<u8>, Option<Message>, bool)> {
@@ -179,7 +180,7 @@ impl DnsPipeline {
             return Ok((resp_bytes, parsed_msg, false));
         }
         let dns64 = self.dns64.load();
-        if !dns64.enabled || dns64.prefixes.is_empty() {
+        if !dns64_on || dns64.prefixes.is_empty() {
             return Ok((resp_bytes, parsed_msg, false));
         }
         let Some(ref orig_msg) = parsed_msg else {
@@ -222,18 +223,16 @@ impl DnsPipeline {
         self.dns64.load().enabled
     }
 
-    pub(crate) fn svcb_sanitization_enabled(&self) -> bool {
-        self.svcb_strip_ech.load(Ordering::Relaxed) || self.svcb_strip_hints.load(Ordering::Relaxed)
-    }
-
     pub(crate) fn maybe_accelerate_cf_cdn(
         &self,
         domain: &str,
         qtype: RecordType,
+        cf_cdn_on: bool,
         resp_bytes: Vec<u8>,
         parsed_msg: Option<Message>,
     ) -> (Vec<u8>, Option<Message>, bool) {
-        if !self.cf_cdn.is_enabled()
+        if !cf_cdn_on
+            || !self.cf_cdn.is_enabled()
             || !matches!(
                 qtype,
                 RecordType::A | RecordType::AAAA | RecordType::HTTPS | RecordType::SVCB
@@ -266,6 +265,7 @@ impl DnsPipeline {
         request: &Message,
         meta: &LogMeta,
         upstream: &UpstreamPool,
+        flags: PolicyFlags,
         resp_bytes: Vec<u8>,
         parsed_msg: Option<Message>,
         base_outcome: QueryOutcome,
@@ -273,17 +273,33 @@ impl DnsPipeline {
         matched_list: Option<String>,
         upstream_source: String,
     ) -> Result<Vec<u8>> {
-        let (resp_bytes, parsed_msg, cf_accelerated) =
-            self.maybe_accelerate_cf_cdn(&meta.domain, meta.qtype, resp_bytes, parsed_msg);
-        let (resp_bytes, parsed_msg) = if self.svcb_sanitization_enabled() {
-            self.maybe_sanitize_svcb(meta.qtype, resp_bytes, parsed_msg)
+        let (resp_bytes, parsed_msg, cf_accelerated) = self.maybe_accelerate_cf_cdn(
+            &meta.domain,
+            meta.qtype,
+            flags.cf_cdn_on,
+            resp_bytes,
+            parsed_msg,
+        );
+        let (resp_bytes, parsed_msg) = if flags.svcb_strip_ech || flags.svcb_strip_hints {
+            let opts = crate::svcb::SvcbSanitizeOptions {
+                strip_ech: flags.svcb_strip_ech,
+                strip_hints: flags.svcb_strip_hints,
+            };
+            self.maybe_sanitize_svcb(meta.qtype, opts, resp_bytes, parsed_msg)
         } else {
             (resp_bytes, parsed_msg)
         };
         let (resp_bytes, parsed_msg, dns64_synth) =
-            if self.dns64_enabled() && meta.qtype == RecordType::AAAA {
-                self.maybe_synthesize_dns64(request, meta, upstream, resp_bytes, parsed_msg)
-                    .await?
+            if flags.dns64_on && meta.qtype == RecordType::AAAA {
+                self.maybe_synthesize_dns64(
+                    request,
+                    meta,
+                    upstream,
+                    flags.dns64_on,
+                    resp_bytes,
+                    parsed_msg,
+                )
+                .await?
             } else {
                 (resp_bytes, parsed_msg, false)
             };
@@ -382,7 +398,7 @@ impl DnsPipeline {
         meta: &LogMeta,
         policy: Option<&ResolvedClientPolicy>,
         upstream: &UpstreamPool,
-        is_local_route: bool,
+        _is_local_route: bool,
         decision: &FilterDecision,
         flags: PolicyFlags,
         resp_bytes: Vec<u8>,
@@ -391,8 +407,7 @@ impl DnsPipeline {
     ) -> Result<Vec<u8>> {
         if !flags.blocking_disabled
             && !flags.explicitly_allowed
-            && !is_local_route
-            && self.dns_rebinding_protection.load(Ordering::Relaxed)
+            && flags.dns_rebinding_on
             && parsed_msg.as_ref().is_some_and(contains_rebinding_ip_msg)
         {
             let (blocked_bytes, rcode) =
@@ -438,6 +453,7 @@ impl DnsPipeline {
             request,
             meta,
             upstream,
+            flags,
             resp_bytes,
             parsed_msg,
             QueryOutcome::Forwarded,

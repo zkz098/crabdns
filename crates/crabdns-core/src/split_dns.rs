@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::{SplitDnsRule, UpstreamStrategy};
+use crate::config::{CompiledUpstreamPolicy, SplitDnsRule, UpstreamStrategy};
 use crate::error::{CoreError, Result};
 use crate::split_dns_trie::{SplitDomainTrie, SplitDomainTrieBuilder};
 use crate::upstream::UpstreamPool;
@@ -10,6 +10,8 @@ struct SplitRoute {
     suffix: Option<String>,
     trie: SplitDomainTrie,
     pool: Arc<UpstreamPool>,
+    policy: Arc<CompiledUpstreamPolicy>,
+    scope: String,
     fallback_to_default: bool,
 }
 
@@ -67,8 +69,9 @@ impl SplitUpstreamRouter {
         F: Fn(&str) -> Option<String>,
     {
         let mut routes = Vec::with_capacity(rules.len());
-        for rule in rules {
+        for (idx, rule) in rules.iter().enumerate() {
             routes.push(build_split_route(
+                idx,
                 rule,
                 timeout_ms,
                 strategy,
@@ -84,6 +87,13 @@ impl SplitUpstreamRouter {
     }
 
     pub fn resolve(&self, domain: &str) -> Option<Arc<UpstreamPool>> {
+        self.resolve_with_policy(domain).map(|(pool, _, _)| pool)
+    }
+
+    pub fn resolve_with_policy(
+        &self,
+        domain: &str,
+    ) -> Option<(Arc<UpstreamPool>, Arc<CompiledUpstreamPolicy>, String)> {
         if self.routes.is_empty() {
             return None;
         }
@@ -97,7 +107,11 @@ impl SplitUpstreamRouter {
                 if route.fallback_to_default && !route.pool.has_healthy_endpoint() {
                     continue;
                 }
-                return Some(Arc::clone(&route.pool));
+                return Some((
+                    Arc::clone(&route.pool),
+                    Arc::clone(&route.policy),
+                    route.scope.clone(),
+                ));
             }
         }
         None
@@ -116,6 +130,7 @@ impl SplitUpstreamRouter {
 }
 
 fn build_split_route<F>(
+    idx: usize,
     rule: &SplitDnsRule,
     timeout_ms: u64,
     strategy: UpstreamStrategy,
@@ -170,16 +185,21 @@ where
             "split_dns rule for '{label}' must specify at least one upstream"
         )));
     }
+    let compiled_policy = Arc::new(CompiledUpstreamPolicy::compile(&rule.policy)?);
+    let effective_timeout = compiled_policy.upstream_timeout_ms.unwrap_or(timeout_ms);
+    let effective_strategy = compiled_policy.upstream_strategy.unwrap_or(strategy);
     let pool = Arc::new(UpstreamPool::new_with_bootstrap(
         &rule.upstreams,
-        timeout_ms,
-        strategy,
+        effective_timeout,
+        effective_strategy,
         bootstrap_dns,
     )?);
     Ok(SplitRoute {
         suffix,
         trie,
         pool,
+        policy: compiled_policy,
+        scope: format!("split:{idx}"),
         fallback_to_default: rule.fallback_to_default,
     })
 }
@@ -250,6 +270,7 @@ mod tests {
                 domains_url: None,
                 upstreams: vec!["udp://192.168.1.1:53".to_string()],
                 fallback_to_default: true,
+                policy: Default::default(),
             },
             SplitDnsRule {
                 domain: "*.corp.local".to_string(),
@@ -257,6 +278,7 @@ mod tests {
                 domains_url: None,
                 upstreams: vec!["udp://10.0.0.1:53".to_string()],
                 fallback_to_default: true,
+                policy: Default::default(),
             },
         ];
 
@@ -294,6 +316,7 @@ mod tests {
                 domains_url: None,
                 upstreams: vec!["udp://223.5.5.5:53".to_string()],
                 fallback_to_default: true,
+                policy: Default::default(),
             },
             SplitDnsRule {
                 domain: String::new(),
@@ -301,6 +324,7 @@ mod tests {
                 domains_url: Some("https://example.invalid/cn.txt".to_string()),
                 upstreams: vec!["udp://119.29.29.29:53".to_string()],
                 fallback_to_default: true,
+                policy: Default::default(),
             },
         ];
         let router = SplitUpstreamRouter::new_with_resolver(

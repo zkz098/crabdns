@@ -10,7 +10,13 @@ import type { ClientProtocolCounts } from "../types/ClientProtocolCounts";
 import type { ClientsOverviewResponse } from "../types/ClientsOverviewResponse";
 import type { DiscoveredClient } from "../types/DiscoveredClient";
 import type { TopItem } from "../types/TopItem";
+import type { UpstreamPolicy } from "../types/UpstreamPolicy";
 import { SelectMenu, type SelectOption } from "./SelectMenu";
+import {
+  UpstreamPolicyEditor,
+  emptyUpstreamPolicy,
+  upstreamPolicyBadges,
+} from "./UpstreamPolicyEditor";
 
 interface ClientsViewProps {
   overview: ClientsOverviewResponse | null;
@@ -136,6 +142,9 @@ export function ClientsView(props: ClientsViewProps) {
   const [groupSafeSearch, setGroupSafeSearch] = createSignal<TriState>("");
   const [groupUpstreams, setGroupUpstreams] = createSignal("");
   const [groupRules, setGroupRules] = createSignal("");
+  const [groupUpstreamPolicy, setGroupUpstreamPolicy] = createSignal<UpstreamPolicy>(
+    emptyUpstreamPolicy(),
+  );
 
   // Client profile form state
   const [clientFormOpen, setClientFormOpen] = createSignal(false);
@@ -149,6 +158,9 @@ export function ClientsView(props: ClientsViewProps) {
   const [clientSafeSearch, setClientSafeSearch] = createSignal<TriState>("");
   const [clientUpstreams, setClientUpstreams] = createSignal("");
   const [clientRules, setClientRules] = createSignal("");
+  const [clientUpstreamPolicy, setClientUpstreamPolicy] = createSignal<UpstreamPolicy>(
+    emptyUpstreamPolicy(),
+  );
   const [clientTags, setClientTags] = createSignal("");
   const [discoveredSearch, setDiscoveredSearch] = createSignal("");
   const [discoveredSort, setDiscoveredSort] = createSignal("last_seen");
@@ -207,6 +219,7 @@ export function ClientsView(props: ClientsViewProps) {
     setGroupSafeSearch("");
     setGroupUpstreams("");
     setGroupRules("");
+    setGroupUpstreamPolicy(emptyUpstreamPolicy());
     setGroupFormOpen(true);
   }
 
@@ -221,6 +234,7 @@ export function ClientsView(props: ClientsViewProps) {
     setGroupSafeSearch(toTriState(g.safesearch_enabled));
     setGroupUpstreams(g.upstreams.join("\n"));
     setGroupRules(g.custom_rules);
+    setGroupUpstreamPolicy(g.upstream_policy ? { ...g.upstream_policy } : emptyUpstreamPolicy());
     setGroupFormOpen(true);
   }
 
@@ -236,6 +250,7 @@ export function ClientsView(props: ClientsViewProps) {
       block_mode: groupBlockMode() === "" ? null : (groupBlockMode() as BlockMode),
       cname_cloaking_blocking: fromTriState(groupCnameCloak()),
       safesearch_enabled: fromTriState(groupSafeSearch()),
+      upstream_policy: groupUpstreamPolicy(),
     };
     const editId = editingGroupId();
     const ok = editId
@@ -257,6 +272,7 @@ export function ClientsView(props: ClientsViewProps) {
     setClientSafeSearch("");
     setClientUpstreams("");
     setClientRules("");
+    setClientUpstreamPolicy(emptyUpstreamPolicy());
     setClientTags("");
     setClientFormOpen(true);
   }
@@ -272,6 +288,7 @@ export function ClientsView(props: ClientsViewProps) {
     setClientSafeSearch(toTriState(c.safesearch_enabled));
     setClientUpstreams(c.upstreams.join("\n"));
     setClientRules(c.custom_rules);
+    setClientUpstreamPolicy(c.upstream_policy ? { ...c.upstream_policy } : emptyUpstreamPolicy());
     setClientTags(c.tags.join(", "));
     setClientFormOpen(true);
   }
@@ -299,6 +316,7 @@ export function ClientsView(props: ClientsViewProps) {
       upstreams: parseLines(clientUpstreams()),
       block_mode: clientBlockMode() === "" ? null : (clientBlockMode() as BlockMode),
       safesearch_enabled: fromTriState(clientSafeSearch()),
+      upstream_policy: clientUpstreamPolicy(),
       tags: parseTags(clientTags()),
     };
     const editId = editingClientId();
@@ -471,6 +489,10 @@ export function ClientsView(props: ClientsViewProps) {
                 />
               </div>
             </div>
+            <UpstreamPolicyEditor
+              policy={groupUpstreamPolicy()}
+              onChange={setGroupUpstreamPolicy}
+            />
             <div class="flex items-center justify-end gap-2">
               <button
                 type="button"
@@ -558,6 +580,13 @@ export function ClientsView(props: ClientsViewProps) {
                     <Show when={group.upstreams.length > 0}>
                       <span>Upstreams: {group.upstreams.length}</span>
                     </Show>
+                    <For each={upstreamPolicyBadges(group.upstream_policy)}>
+                      {(badge) => (
+                        <span class="px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700 dark:text-sky-400 font-mono text-[10px]">
+                          {badge}
+                        </span>
+                      )}
+                    </For>
                     <Show when={group.custom_rules.trim().length > 0}>
                       <span>Rules: {parseLines(group.custom_rules).length}</span>
                     </Show>
@@ -726,6 +755,10 @@ export function ClientsView(props: ClientsViewProps) {
               </div>
             </div>
 
+            <UpstreamPolicyEditor
+              policy={clientUpstreamPolicy()}
+              onChange={setClientUpstreamPolicy}
+            />
             <div class="flex items-center justify-end gap-2">
               <button
                 type="button"

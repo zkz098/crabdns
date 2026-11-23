@@ -64,6 +64,7 @@ async fn test_split_dns_routing() {
                 domains_url: None,
                 upstreams: vec![format!("udp://{corp_upstream}")],
                 fallback_to_default: true,
+                policy: Default::default(),
             }],
             1000,
             UpstreamStrategy::Failover,
@@ -398,6 +399,7 @@ async fn test_safesearch_dns64_and_svcb_sanitization_pipeline() {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: Some(false),
+                upstream_policy: Default::default(),
                 tags: Vec::new(),
             }],
             &[],
@@ -470,4 +472,192 @@ async fn test_acme_dns01_local_challenge_response() {
     assert!(resp.answers[0].data.to_string().contains("token-123"));
 
     pipeline.clear_acme_dns_challenges();
+}
+
+#[tokio::test]
+async fn test_per_group_upstream_policies_split_dns_and_client_group() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use crabdns_core::{BlockMode, UpstreamPolicy};
+    use hickory_proto::rr::rdata::opt::EdnsOption;
+
+    async fn spawn_inspecting_upstream(
+        reply_ip: Ipv4Addr,
+        saw_ecs: Arc<AtomicBool>,
+        saw_do: Arc<AtomicBool>,
+    ) -> SocketAddr {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((len, peer)) = sock.recv_from(&mut buf).await {
+                let req = Message::from_vec(&buf[..len]).unwrap();
+                if let Some(edns) = req.edns.as_ref() {
+                    if edns.flags().dnssec_ok {
+                        saw_do.store(true, Ordering::Relaxed);
+                    }
+                    if edns
+                        .options()
+                        .as_ref()
+                        .iter()
+                        .any(|opt| matches!(opt, (_, EdnsOption::Subnet(_))))
+                    {
+                        saw_ecs.store(true, Ordering::Relaxed);
+                    }
+                }
+                let q = req.queries[0].clone();
+                let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+                resp.metadata.recursion_desired = req.recursion_desired;
+                resp.metadata.recursion_available = true;
+                resp.metadata.response_code = ResponseCode::NoError;
+                resp.add_query(q.clone());
+                resp.add_answer(Record::from_rdata(
+                    q.name().clone(),
+                    60,
+                    RData::A(A(reply_ip)),
+                ));
+                let _ = sock.send_to(&resp.to_vec().unwrap(), peer).await;
+            }
+        });
+        addr
+    }
+
+    let cn_saw_ecs = Arc::new(AtomicBool::new(false));
+    let cn_saw_do = Arc::new(AtomicBool::new(false));
+    let cn_addr = spawn_inspecting_upstream(
+        Ipv4Addr::new(10, 0, 0, 55),
+        Arc::clone(&cn_saw_ecs),
+        Arc::clone(&cn_saw_do),
+    )
+    .await;
+
+    let overseas_saw_ecs = Arc::new(AtomicBool::new(false));
+    let overseas_saw_do = Arc::new(AtomicBool::new(false));
+    let overseas_addr = spawn_inspecting_upstream(
+        Ipv4Addr::new(127, 0, 0, 2),
+        Arc::clone(&overseas_saw_ecs),
+        Arc::clone(&overseas_saw_do),
+    )
+    .await;
+
+    let default_saw_ecs = Arc::new(AtomicBool::new(false));
+    let default_saw_do = Arc::new(AtomicBool::new(false));
+    let default_addr = spawn_inspecting_upstream(
+        Ipv4Addr::new(93, 184, 216, 34),
+        Arc::clone(&default_saw_ecs),
+        Arc::clone(&default_saw_do),
+    )
+    .await;
+
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, false));
+    let pool = Arc::new(UpstreamPool::new(&[format!("udp://{default_addr}")], 1000).unwrap());
+    let pipeline = DnsPipeline::new(filter, cache, pool, None);
+    pipeline.set_block_mode(BlockMode::NxDomain);
+
+    // Global: DNSSEC off, ECS off, rebinding protection off
+    pipeline.set_dnssec_enabled(false);
+    pipeline.set_dns_rebinding_protection(false);
+
+    pipeline
+        .reload_split_dns(
+            &[
+                SplitDnsRule {
+                    domain: "cn".to_string(),
+                    domains_file: None,
+                    domains_url: None,
+                    upstreams: vec![format!("udp://{cn_addr}")],
+                    fallback_to_default: false,
+                    policy: UpstreamPolicy {
+                        dnssec_enabled: Some(false),
+                        ecs_enabled: Some(false),
+                        dns_rebinding_protection: Some(false),
+                        ..Default::default()
+                    },
+                },
+                SplitDnsRule {
+                    domain: "overseas.test".to_string(),
+                    domains_file: None,
+                    domains_url: None,
+                    upstreams: vec![format!("udp://{overseas_addr}")],
+                    fallback_to_default: false,
+                    policy: UpstreamPolicy {
+                        dnssec_enabled: Some(true),
+                        ecs_enabled: Some(true),
+                        ecs_custom_ip: Some("1.2.3.0/24".to_string()),
+                        dns_rebinding_protection: Some(true),
+                        ..Default::default()
+                    },
+                },
+                SplitDnsRule {
+                    domain: "rebind.test".to_string(),
+                    domains_file: None,
+                    domains_url: None,
+                    upstreams: vec![format!("udp://{overseas_addr}")],
+                    fallback_to_default: false,
+                    policy: UpstreamPolicy {
+                        dnssec_enabled: Some(false),
+                        dns_rebinding_protection: Some(true),
+                        ..Default::default()
+                    },
+                },
+            ],
+            1000,
+            UpstreamStrategy::Failover,
+        )
+        .unwrap();
+
+    let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 12345);
+
+    // 1. Domestic: no ECS, no DO bit, private IP allowed because rebinding protection is off
+    let cn_resp = Message::from_vec(
+        &pipeline
+            .handle_packet(&build_query(1, "example.cn.", RecordType::A), client)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cn_resp.response_code, ResponseCode::NoError);
+    assert_eq!(cn_resp.answers[0].data.to_string(), "10.0.0.55");
+    assert!(!cn_saw_ecs.load(Ordering::Relaxed));
+    assert!(!cn_saw_do.load(Ordering::Relaxed));
+
+    // 2. Overseas: ECS sent, DO bit sent, and DNSSEC validation rejects unsigned response with SERVFAIL
+    let overseas_resp = Message::from_vec(
+        &pipeline
+            .handle_packet(&build_query(2, "www.overseas.test.", RecordType::A), client)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(overseas_saw_ecs.load(Ordering::Relaxed));
+    assert!(overseas_saw_do.load(Ordering::Relaxed));
+    assert_eq!(overseas_resp.response_code, ResponseCode::ServFail);
+
+    // 3. Rebind group: DNSSEC off, rebinding protection on -> blocks 127.0.0.2 with NXDOMAIN
+    let rebind_resp = Message::from_vec(
+        &pipeline
+            .handle_packet(&build_query(3, "a.rebind.test.", RecordType::A), client)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rebind_resp.response_code, ResponseCode::NXDomain);
+
+    // 3. Invalid policy validation should fail cleanly
+    assert!(
+        UpstreamPolicy {
+            upstream_timeout_ms: Some(0),
+            ..Default::default()
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        UpstreamPolicy {
+            ecs_ipv4_prefix: Some(33),
+            ..Default::default()
+        }
+        .validate()
+        .is_err()
+    );
 }

@@ -308,16 +308,39 @@ impl DnsPipeline {
         explicitly_allowed: bool,
         out: &mut Vec<u8>,
     ) -> bool {
-        let ecs_subnet = resolve_ecs_subnet(&self.ecs_config.load(), meta.client_addr.ip());
-        let (upstream, upstream_scope, is_local_route) =
-            self.resolve_upstream_for_query(policy, &meta.domain, meta.qtype);
+        let route = self.resolve_upstream_for_query(policy, &meta.domain, meta.qtype);
+        if let Some(up) = route.upstream_policy.as_deref() {
+            if up.dnssec_enabled == Some(true)
+                || (up.dns64_enabled == Some(true) && q.qtype == 28)
+                || (matches!(q.qtype, 64 | 65)
+                    && (up.svcb_strip_ech == Some(true) || up.svcb_strip_hints == Some(true)))
+                || (up.cf_cdn_enabled == Some(true) && matches!(q.qtype, 1 | 28 | 64 | 65))
+            {
+                return false;
+            }
+        }
+        let global_ecs = self.ecs_config.load();
+        let ecs_cfg = route
+            .upstream_policy
+            .as_deref()
+            .map(|p| p.resolve_ecs_config(&global_ecs));
+        let ecs_subnet =
+            resolve_ecs_subnet(ecs_cfg.as_ref().unwrap_or(&global_ecs), meta.client_addr.ip());
+        let upstream = route.pool;
+        let dns_rebinding_on = route
+            .upstream_policy
+            .as_deref()
+            .and_then(|p| p.dns_rebinding_protection)
+            .unwrap_or_else(|| {
+                !route.is_local_route && self.dns_rebinding_protection.load(Ordering::Relaxed)
+            });
         let cache_key = CacheKey {
             qname: q.qname_fqdn().to_string(),
             qtype: q.qtype,
             qclass: q.qclass,
             ecs_subnet,
             dnssec_do: false,
-            upstream_scope,
+            upstream_scope: route.cache_scope,
         };
 
         let cache = self.cache.load();
@@ -343,7 +366,7 @@ impl DnsPipeline {
             &entry,
             blocking_disabled,
             explicitly_allowed,
-            is_local_route,
+            dns_rebinding_on,
             block_mode,
             out,
         ) {
@@ -393,7 +416,7 @@ impl DnsPipeline {
         entry: &CachedEntry,
         blocking_disabled: bool,
         explicitly_allowed: bool,
-        is_local_route: bool,
+        dns_rebinding_on: bool,
         block_mode: BlockMode,
         out: &mut Vec<u8>,
     ) -> bool {
@@ -401,10 +424,7 @@ impl DnsPipeline {
             return false;
         }
 
-        if !is_local_route
-            && entry.has_rebinding_ip
-            && self.dns_rebinding_protection.load(Ordering::Relaxed)
-        {
+        if dns_rebinding_on && entry.has_rebinding_ip {
             let rcode = write_blocked_wire_response(
                 raw_query,
                 q,

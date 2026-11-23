@@ -1,7 +1,13 @@
 import { For, Show, createSignal } from "solid-js";
 import { t } from "../i18n";
 import type { SplitDnsRule } from "../types/SplitDnsRule";
+import type { UpstreamPolicy } from "../types/UpstreamPolicy";
 import { InfoTooltip } from "./InfoTooltip";
+import {
+  UpstreamPolicyEditor,
+  emptyUpstreamPolicy,
+  upstreamPolicyBadges,
+} from "./UpstreamPolicyEditor";
 
 type RuleSourceType = "domain" | "url" | "file";
 
@@ -27,6 +33,7 @@ function buildRule(
   targetRaw: string,
   upstreamsRaw: string,
   fallbackToDefault: boolean,
+  policy: UpstreamPolicy,
 ): SplitDnsRule | null {
   const target = targetRaw.trim();
   const upstreams = upstreamsRaw
@@ -42,6 +49,7 @@ function buildRule(
     domains_url: kind === "url" ? target : null,
     upstreams,
     fallback_to_default: fallbackToDefault,
+    policy,
   };
 }
 
@@ -52,18 +60,21 @@ export function SplitDnsList(props: SplitDnsListProps) {
   const [target, setTarget] = createSignal("");
   const [upstreams, setUpstreams] = createSignal("");
   const [fallback, setFallback] = createSignal(true);
+  const [policy, setPolicy] = createSignal<UpstreamPolicy>(emptyUpstreamPolicy());
 
   function openAddForm(
     presetKind: RuleSourceType = "domain",
     presetTarget = "",
     presetUpstreams = "",
     presetFallback = true,
+    presetPolicy: UpstreamPolicy = emptyUpstreamPolicy(),
   ) {
     setEditingIndex(null);
     setKind(presetKind);
     setTarget(presetTarget);
     setUpstreams(presetUpstreams);
     setFallback(presetFallback);
+    setPolicy(presetPolicy);
     setFormOpen(true);
   }
 
@@ -73,6 +84,7 @@ export function SplitDnsList(props: SplitDnsListProps) {
     setTarget(ruleTarget(rule));
     setUpstreams(rule.upstreams.join(", "));
     setFallback(rule.fallback_to_default);
+    setPolicy(rule.policy ? { ...rule.policy } : emptyUpstreamPolicy());
     setFormOpen(true);
   }
 
@@ -82,10 +94,11 @@ export function SplitDnsList(props: SplitDnsListProps) {
     setTarget("");
     setUpstreams("");
     setFallback(true);
+    setPolicy(emptyUpstreamPolicy());
   }
 
   function submitForm() {
-    const built = buildRule(kind(), target(), upstreams(), fallback());
+    const built = buildRule(kind(), target(), upstreams(), fallback(), policy());
     if (!built) return;
     const idx = editingIndex();
     if (idx === null) {
@@ -239,6 +252,8 @@ export function SplitDnsList(props: SplitDnsListProps) {
             </div>
           </div>
 
+          <UpstreamPolicyEditor policy={policy()} onChange={setPolicy} />
+
           <div class="flex flex-wrap items-center justify-between gap-2 pt-1">
             <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
               <input
@@ -317,6 +332,13 @@ export function SplitDnsList(props: SplitDnsListProps) {
                         {(up) => (
                           <span class="px-1.5 py-0.5 rounded bg-white dark:bg-[#111111] border border-[#eaeaea] dark:border-[#262626] font-mono text-[11px] text-[#52525b] dark:text-[#a1a1aa]">
                             {up}
+                          </span>
+                        )}
+                      </For>
+                      <For each={upstreamPolicyBadges(rule.policy)}>
+                        {(badge) => (
+                          <span class="px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700 dark:text-sky-400 font-mono text-[10px]">
+                            {badge}
                           </span>
                         )}
                       </For>

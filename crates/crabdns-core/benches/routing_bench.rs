@@ -42,6 +42,7 @@ fn bench_split_dns(c: &mut Criterion) {
             domains_url: None,
             upstreams: vec!["127.0.0.1:5353".to_string()],
             fallback_to_default: true,
+            policy: Default::default(),
         })
         .collect();
 

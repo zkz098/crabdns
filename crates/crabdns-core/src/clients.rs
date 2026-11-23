@@ -16,7 +16,7 @@ use ts_rs::TS;
 use tokio::sync::Semaphore;
 
 use crate::acl::IpNet;
-use crate::config::{BlockMode, UpstreamStrategy};
+use crate::config::{BlockMode, CompiledUpstreamPolicy, UpstreamPolicy, UpstreamStrategy};
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision, FilterEngine};
 use crate::filter_rules::FilterQueryContext;
@@ -54,6 +54,8 @@ pub struct ClientGroup {
     pub cname_cloaking_blocking: Option<bool>,
     #[serde(default)]
     pub safesearch_enabled: Option<bool>,
+    #[serde(default)]
+    pub upstream_policy: UpstreamPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -77,6 +79,8 @@ pub struct ClientProfile {
     pub block_mode: Option<BlockMode>,
     #[serde(default)]
     pub safesearch_enabled: Option<bool>,
+    #[serde(default)]
+    pub upstream_policy: UpstreamPolicy,
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -146,6 +150,8 @@ pub struct ResolvedClientPolicy {
     pub client_filter: Option<Arc<FilterEngine>>,
     pub group_filter: Option<Arc<FilterEngine>>,
     pub upstream_pool: Option<(String, Arc<UpstreamPool>)>,
+    pub upstream_policy: Arc<CompiledUpstreamPolicy>,
+    pub upstream_policy_scope: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -187,13 +193,20 @@ impl ClientRegistry {
                     &group.custom_rules,
                 ))
             });
+            let compiled_group_policy = CompiledUpstreamPolicy::compile(&group.upstream_policy)?;
             let upstream_pool = if group.upstreams.is_empty() {
                 None
             } else {
+                let effective_timeout = compiled_group_policy
+                    .upstream_timeout_ms
+                    .unwrap_or(timeout_ms);
+                let effective_strategy = compiled_group_policy
+                    .upstream_strategy
+                    .unwrap_or(strategy);
                 let pool = Arc::new(UpstreamPool::new_with_bootstrap(
                     &group.upstreams,
-                    timeout_ms,
-                    strategy,
+                    effective_timeout,
+                    effective_strategy,
                     bootstrap_dns,
                 )?);
                 Some((format!("group:{}", group.id), pool))
@@ -368,13 +381,34 @@ fn build_resolved_policy(
     });
     let group_filter = compiled_group.and_then(|cg| cg.filter.clone());
 
+    let merged_upstream_policy = match group_ref {
+        Some(g) => client.upstream_policy.merge_over(&g.upstream_policy),
+        None => client.upstream_policy.clone(),
+    };
+    let compiled_upstream_policy = Arc::new(CompiledUpstreamPolicy::compile(&merged_upstream_policy)?);
+    let upstream_policy_scope = if !merged_upstream_policy.is_empty() {
+        if !client.upstream_policy.is_empty() {
+            Some(format!("client:{}", client.id))
+        } else {
+            group_ref.map(|g| format!("group:{}", g.id))
+        }
+    } else {
+        None
+    };
+
     let upstream_pool = if client.upstreams.is_empty() {
         compiled_group.and_then(|cg| cg.upstream_pool.clone())
     } else {
+        let effective_timeout = compiled_upstream_policy
+            .upstream_timeout_ms
+            .unwrap_or(timeout_ms);
+        let effective_strategy = compiled_upstream_policy
+            .upstream_strategy
+            .unwrap_or(strategy);
         let pool = Arc::new(UpstreamPool::new_with_bootstrap(
             &client.upstreams,
-            timeout_ms,
-            strategy,
+            effective_timeout,
+            effective_strategy,
             bootstrap_dns,
         )?);
         Some((format!("client:{}", client.id), pool))
@@ -393,6 +427,8 @@ fn build_resolved_policy(
         client_filter,
         group_filter,
         upstream_pool,
+        upstream_policy: compiled_upstream_policy,
+        upstream_policy_scope,
         tags: client.tags.clone(),
     }))
 }
@@ -564,6 +600,7 @@ mod tests {
             block_mode: Some(BlockMode::NxDomain),
             cname_cloaking_blocking: Some(false),
             safesearch_enabled: None,
+            upstream_policy: Default::default(),
         }];
         let clients = vec![
             ClientProfile {
@@ -577,6 +614,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
+                upstream_policy: Default::default(),
                 tags: Vec::new(),
             },
             ClientProfile {
@@ -590,6 +628,7 @@ mod tests {
                 upstreams: vec!["udp://1.1.1.1:53".to_string()],
                 block_mode: Some(BlockMode::NoData),
                 safesearch_enabled: None,
+                upstream_policy: Default::default(),
                 tags: vec!["work".to_string()],
             },
         ];
@@ -652,6 +691,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
+                upstream_policy: Default::default(),
                 tags: Vec::new(),
             },
             ClientProfile {
@@ -665,6 +705,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
+                upstream_policy: Default::default(),
                 tags: Vec::new(),
             },
         ];

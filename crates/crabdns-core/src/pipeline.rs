@@ -16,7 +16,7 @@ use crate::clients::{
     ip_to_ptr_domain,
 };
 use crate::clock::monotonic_now_ms;
-use crate::config::{BlockMode, SplitDnsRule, UpstreamStrategy};
+use crate::config::{BlockMode, CompiledUpstreamPolicy, SplitDnsRule, UpstreamStrategy};
 use crate::cookies::DnsCookieEngine;
 use crate::device_names::{DhcpLeaseTable, MdnsNameResolver};
 use crate::dns64::Dns64Config;
@@ -32,7 +32,6 @@ use crate::safesearch::SafeSearchConfig;
 use crate::security::is_private_or_special_ip;
 use crate::singleflight::Singleflight;
 use crate::split_dns::SplitUpstreamRouter;
-use crate::svcb::SvcbSanitizeOptions;
 use crate::upstream::UpstreamPool;
 
 pub use crate::pipeline_types::{
@@ -604,13 +603,6 @@ impl DnsPipeline {
         self.rrl.update_config(cfg);
     }
 
-    pub(crate) fn svcb_sanitize_options(&self) -> SvcbSanitizeOptions {
-        SvcbSanitizeOptions {
-            strip_ech: self.svcb_strip_ech.load(Ordering::Relaxed),
-            strip_hints: self.svcb_strip_hints.load(Ordering::Relaxed),
-        }
-    }
-
     pub fn record_udp_dropped(&self) {
         self.counters
             .udp_dropped_inflight
@@ -785,19 +777,48 @@ impl DnsPipeline {
         policy: Option<&ResolvedClientPolicy>,
         domain: &str,
         qtype: RecordType,
-    ) -> (Arc<UpstreamPool>, Option<String>, bool) {
+    ) -> ResolvedUpstreamRoute {
         if let Some((scope, pool)) = policy.and_then(|p| p.upstream_pool.as_ref()) {
-            return (Arc::clone(pool), Some(scope.clone()), false);
+            return ResolvedUpstreamRoute {
+                pool: Arc::clone(pool),
+                cache_scope: Some(scope.clone()),
+                is_local_route: false,
+                upstream_policy: policy.map(|p| Arc::clone(&p.upstream_policy)),
+            };
         }
         if qtype == RecordType::PTR && is_private_ptr_domain(domain) {
             let ptr_router = self.private_ptr_router.load();
             if let Some(pool) = &ptr_router.pool {
-                return (Arc::clone(pool), None, true);
+                return ResolvedUpstreamRoute {
+                    pool: Arc::clone(pool),
+                    cache_scope: None,
+                    is_local_route: true,
+                    upstream_policy: policy.map(|p| Arc::clone(&p.upstream_policy)),
+                };
             }
         }
-        if let Some(pool) = self.split_router.load().resolve(domain) {
-            return (pool, None, true);
+        if let Some((pool, split_policy, split_scope)) =
+            self.split_router.load().resolve_with_policy(domain)
+        {
+            return ResolvedUpstreamRoute {
+                pool,
+                cache_scope: Some(split_scope),
+                is_local_route: true,
+                upstream_policy: Some(split_policy),
+            };
         }
-        (self.upstream.load_full(), None, false)
+        ResolvedUpstreamRoute {
+            pool: self.upstream.load_full(),
+            cache_scope: policy.and_then(|p| p.upstream_policy_scope.clone()),
+            is_local_route: false,
+            upstream_policy: policy.map(|p| Arc::clone(&p.upstream_policy)),
+        }
     }
+}
+
+pub(crate) struct ResolvedUpstreamRoute {
+    pub pool: Arc<UpstreamPool>,
+    pub cache_scope: Option<String>,
+    pub is_local_route: bool,
+    pub upstream_policy: Option<Arc<CompiledUpstreamPolicy>>,
 }

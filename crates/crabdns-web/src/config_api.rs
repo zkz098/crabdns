@@ -422,6 +422,7 @@ pub async fn update_config(
                 .filter(|u| !u.is_empty()),
             upstreams: clean_string_list(rule.upstreams),
             fallback_to_default: rule.fallback_to_default,
+            policy: rule.policy.normalized(),
         })
         .filter(|r| !r.domain.is_empty() || r.domains_file.is_some() || r.domains_url.is_some())
         .collect();

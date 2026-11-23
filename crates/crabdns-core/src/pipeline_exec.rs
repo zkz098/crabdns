@@ -39,6 +39,11 @@ pub(crate) struct PolicyFlags {
     pub dnssec_on: bool,
     pub client_wants_do: bool,
     pub client_cd: bool,
+    pub dns_rebinding_on: bool,
+    pub dns64_on: bool,
+    pub svcb_strip_ech: bool,
+    pub svcb_strip_hints: bool,
+    pub cf_cdn_on: bool,
 }
 
 enum ExchangeError {
@@ -171,16 +176,28 @@ impl DnsPipeline {
             return Ok(resp);
         }
 
-        let ecs_subnet = resolve_ecs_subnet(&self.ecs_config.load(), ctx.client_addr.ip());
-        let (upstream, upstream_scope, is_local_route) =
-            self.resolve_upstream_for_query(policy.as_deref(), &meta.domain, qtype);
+        let route = self.resolve_upstream_for_query(policy.as_deref(), &meta.domain, qtype);
+        let flags = self.apply_upstream_policy_flags(
+            flags,
+            route.upstream_policy.as_deref(),
+            route.is_local_route,
+        );
+        let global_ecs = self.ecs_config.load();
+        let ecs_cfg = route
+            .upstream_policy
+            .as_deref()
+            .map(|p| p.resolve_ecs_config(&global_ecs));
+        let ecs_subnet =
+            resolve_ecs_subnet(ecs_cfg.as_ref().unwrap_or(&global_ecs), ctx.client_addr.ip());
+        let upstream = route.pool;
+        let is_local_route = route.is_local_route;
         let cache_key = CacheKey {
             qname: qname.to_ascii_lowercase(),
             qtype: u16::from(qtype),
             qclass,
             ecs_subnet,
             dnssec_do: flags.dnssec_on && flags.client_wants_do,
-            upstream_scope,
+            upstream_scope: route.cache_scope,
         };
 
         if !(flags.dnssec_on && flags.client_cd)
@@ -280,7 +297,43 @@ impl DnsPipeline {
             dnssec_on: self.dnssec_enabled.load(Ordering::Relaxed),
             client_wants_do: has_dnssec_ok(request),
             client_cd: request.checking_disabled,
+            dns_rebinding_on: self.dns_rebinding_protection.load(Ordering::Relaxed),
+            dns64_on: self.dns64_enabled(),
+            svcb_strip_ech: self.svcb_strip_ech.load(Ordering::Relaxed),
+            svcb_strip_hints: self.svcb_strip_hints.load(Ordering::Relaxed),
+            cf_cdn_on: self.cf_cdn.is_enabled(),
         }
+    }
+
+    fn apply_upstream_policy_flags(
+        &self,
+        mut flags: PolicyFlags,
+        upstream_policy: Option<&crate::config::CompiledUpstreamPolicy>,
+        is_local_route: bool,
+    ) -> PolicyFlags {
+        if let Some(p) = upstream_policy {
+            if let Some(v) = p.dnssec_enabled {
+                flags.dnssec_on = v;
+            }
+            flags.dns_rebinding_on = p
+                .dns_rebinding_protection
+                .unwrap_or(!is_local_route && flags.dns_rebinding_on);
+            if let Some(v) = p.dns64_enabled {
+                flags.dns64_on = v;
+            }
+            if let Some(v) = p.svcb_strip_ech {
+                flags.svcb_strip_ech = v;
+            }
+            if let Some(v) = p.svcb_strip_hints {
+                flags.svcb_strip_hints = v;
+            }
+            if let Some(v) = p.cf_cdn_enabled {
+                flags.cf_cdn_on = v;
+            }
+        } else if is_local_route {
+            flags.dns_rebinding_on = false;
+        }
+        flags
     }
 
     fn check_pre_routing(&self, request: &Message, meta: &LogMeta) -> Result<Option<Vec<u8>>> {
@@ -495,6 +548,7 @@ impl DnsPipeline {
                 request,
                 meta,
                 upstream,
+                flags,
                 hit.wire_bytes,
                 parsed_hit,
                 QueryOutcome::Cached,

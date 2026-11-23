@@ -43,7 +43,10 @@ pub use clients::{
     ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ParsedClientIdentifier,
     ResolvedClientPolicy, ip_to_ptr_domain, validate_client_id, validate_client_identifier,
 };
-pub use config::{AcmeChallengeType, BlockMode, Config, SplitDnsRule, UpstreamStrategy};
+pub use config::{
+    AcmeChallengeType, BlockMode, CompiledUpstreamPolicy, Config, SplitDnsRule, UpstreamPolicy,
+    UpstreamStrategy,
+};
 pub use cookies::{CookieCheck, DnsCookieEngine};
 pub use device_names::{
     DEFAULT_DHCP_LEASES_PATH, DhcpLeaseTable, MdnsNameResolver, OPENWRT_DHCP_LEASES_PATH,

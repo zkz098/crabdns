@@ -374,6 +374,7 @@ fn merge_config_payload(current: &Config, mut payload: ConfigUpdatePayload) -> A
                     .filter(|u| !u.is_empty()),
                 upstreams: clean_string_list(r.upstreams),
                 fallback_to_default: r.fallback_to_default,
+                policy: r.policy.normalized(),
             })
             .filter(|r| !r.domain.is_empty() || r.domains_file.is_some() || r.domains_url.is_some())
             .collect();

@@ -133,6 +133,7 @@ fn test_clients_groups_persistence_and_selective_pruning() {
         block_mode: None,
         cname_cloaking_blocking: None,
         safesearch_enabled: None,
+        upstream_policy: Default::default(),
     }];
     let clients = vec![ClientProfile {
         id: "cli-1".to_string(),
@@ -145,6 +146,7 @@ fn test_clients_groups_persistence_and_selective_pruning() {
         upstreams: vec![],
         block_mode: None,
         safesearch_enabled: None,
+        upstream_policy: Default::default(),
         tags: vec!["tv".to_string()],
     }];
     storage.save_client_groups(&groups).expect("save groups");

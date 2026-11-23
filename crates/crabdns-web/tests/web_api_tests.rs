@@ -597,6 +597,7 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
             block_mode: None,
             cname_cloaking_blocking: None,
             safesearch_enabled: None,
+            upstream_policy: Default::default(),
         }])
         .expect("save groups");
     storage
@@ -611,6 +612,7 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
             upstreams: Vec::new(),
             block_mode: None,
             safesearch_enabled: None,
+            upstream_policy: Default::default(),
             tags: vec!["tablet".to_string()],
         }])
         .expect("save clients");

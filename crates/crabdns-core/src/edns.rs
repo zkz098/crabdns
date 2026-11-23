@@ -57,7 +57,7 @@ impl EcsConfig {
     }
 }
 
-fn parse_ecs_custom(raw: &str, default_v4: u8, default_v6: u8) -> Result<(IpAddr, u8)> {
+pub(crate) fn parse_ecs_custom(raw: &str, default_v4: u8, default_v6: u8) -> Result<(IpAddr, u8)> {
     if let Some((ip_str, prefix_str)) = raw.split_once('/') {
         let ip: IpAddr = ip_str
             .trim()
