@@ -203,6 +203,8 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.sni_client_id_hostnames = saved_cfg.sni_client_id_hostnames;
     config.private_ptr_enabled = saved_cfg.private_ptr_enabled;
     config.private_ptr_upstreams = saved_cfg.private_ptr_upstreams;
+    config.block_local_domains = saved_cfg.block_local_domains;
+    config.suppress_local_domain_logs = saved_cfg.suppress_local_domain_logs;
     config.ddr_enabled = saved_cfg.ddr_enabled;
     config.ddr_hostname = saved_cfg.ddr_hostname;
     config.dns_rebinding_protection = saved_cfg.dns_rebinding_protection;
@@ -345,6 +347,8 @@ fn configure_pipeline(
     )?;
     pipeline.set_dns_rebinding_protection(cfg.dns_rebinding_protection);
     pipeline.set_block_any_queries(cfg.block_any_queries);
+    pipeline.set_block_local_domains(cfg.block_local_domains);
+    pipeline.set_suppress_local_domain_logs(cfg.suppress_local_domain_logs);
     pipeline.set_safesearch(cfg.safesearch.clone());
     pipeline.reload_dns64(cfg.dns64_enabled, &cfg.dns64_prefixes)?;
     pipeline.set_svcb_sanitization(cfg.svcb_strip_ech, cfg.svcb_strip_hints);

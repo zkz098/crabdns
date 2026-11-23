@@ -68,6 +68,8 @@ pub struct ConfigResponse {
     pub mdns_enabled: bool,
     pub private_ptr_enabled: bool,
     pub private_ptr_upstreams: Vec<String>,
+    pub block_local_domains: bool,
+    pub suppress_local_domain_logs: bool,
     pub ddr_enabled: bool,
     pub ddr_hostname: Option<String>,
     pub dns_rebinding_protection: bool,
@@ -146,6 +148,8 @@ impl From<&Config> for ConfigResponse {
             mdns_enabled: cfg.mdns_enabled,
             private_ptr_enabled: cfg.private_ptr_enabled,
             private_ptr_upstreams: cfg.private_ptr_upstreams.clone(),
+            block_local_domains: cfg.block_local_domains,
+            suppress_local_domain_logs: cfg.suppress_local_domain_logs,
             ddr_enabled: cfg.ddr_enabled,
             ddr_hostname: cfg.ddr_hostname.clone(),
             dns_rebinding_protection: cfg.dns_rebinding_protection,
@@ -247,6 +251,10 @@ pub struct ConfigUpdatePayload {
     pub private_ptr_enabled: Option<bool>,
     #[serde(default)]
     pub private_ptr_upstreams: Option<Vec<String>>,
+    #[serde(default)]
+    pub block_local_domains: Option<bool>,
+    #[serde(default)]
+    pub suppress_local_domain_logs: Option<bool>,
     #[serde(default)]
     pub ddr_enabled: Option<bool>,
     #[serde(default)]
@@ -477,6 +485,12 @@ pub async fn update_config(
     let block_any_queries = payload
         .block_any_queries
         .unwrap_or(current.block_any_queries);
+    let block_local_domains = payload
+        .block_local_domains
+        .unwrap_or(current.block_local_domains);
+    let suppress_local_domain_logs = payload
+        .suppress_local_domain_logs
+        .unwrap_or(current.suppress_local_domain_logs);
     let trusted_proxies = clean_string_list(
         payload
             .trusted_proxies
@@ -674,6 +688,8 @@ pub async fn update_config(
     next.sni_client_id_hostnames = sni_client_id_hostnames;
     next.private_ptr_enabled = private_ptr_enabled;
     next.private_ptr_upstreams = private_ptr_upstreams;
+    next.block_local_domains = block_local_domains;
+    next.suppress_local_domain_logs = suppress_local_domain_logs;
     next.ddr_enabled = ddr_enabled;
     next.ddr_hostname = ddr_hostname.clone();
     next.dns_rebinding_protection = dns_rebinding_protection;
@@ -738,6 +754,8 @@ pub async fn update_config(
     pipe.set_mdns_enabled(mdns_enabled);
     pipe.set_dns_rebinding_protection(dns_rebinding_protection);
     pipe.set_block_any_queries(block_any_queries);
+    pipe.set_block_local_domains(block_local_domains);
+    pipe.set_suppress_local_domain_logs(suppress_local_domain_logs);
     pipe.set_rdns_enabled(rdns_enabled);
     pipe.set_safesearch(safesearch);
     let _ = pipe.reload_dns64(dns64_enabled, &dns64_prefixes);

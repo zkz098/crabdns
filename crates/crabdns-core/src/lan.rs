@@ -161,6 +161,15 @@ pub fn is_private_ptr_domain(clean_domain: &str) -> bool {
     parse_ptr_ip(clean_domain).is_some_and(is_private_or_special_ip)
 }
 
+/// Returns `true` if `clean_domain` is in the RFC 6762 `.local` mDNS reserved TLD.
+pub fn is_local_domain(clean_domain: &str) -> bool {
+    let trimmed = clean_domain.trim_end_matches('.');
+    trimmed.eq_ignore_ascii_case("local")
+        || trimmed
+            .rsplit_once('.')
+            .is_some_and(|(_, tld)| tld.eq_ignore_ascii_case("local"))
+}
+
 #[derive(Default)]
 pub struct PrivatePtrRouter {
     pub enabled: bool,
@@ -338,5 +347,17 @@ fd00::50 nas.local
         let resp = Message::from_vec(&wire).unwrap();
         assert_eq!(resp.answers.len(), 2);
         assert_eq!(resp.answers[0].record_type(), RecordType::SVCB);
+    }
+
+    #[test]
+    fn test_is_local_domain() {
+        assert!(is_local_domain("local"));
+        assert!(is_local_domain("Apple-Vision-Pro.local"));
+        assert!(is_local_domain("_lyra-mdns._udp.local"));
+        assert!(is_local_domain("_services._dns-sd._udp.LOCAL."));
+        assert!(!is_local_domain("localhost"));
+        assert!(!is_local_domain("local.example.com"));
+        assert!(!is_local_domain("example.com"));
+        assert!(!is_local_domain(""));
     }
 }

@@ -661,3 +661,90 @@ async fn test_per_group_upstream_policies_split_dns_and_client_group() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn test_block_local_domains_and_log_suppression() {
+    use crabdns_core::{HostsTable, QueryOutcome, SplitDnsRule, UdpFastOutcome};
+
+    // Mock upstream that always returns 1.2.3.4 (used for split_dns override check)
+    let split_upstream_addr = spawn_mock_udp(Ipv4Addr::new(10, 20, 30, 40), None).await;
+    // Unreachable/unused default upstream to verify .local never forwards when blocked locally
+    let unused_upstream_addr = spawn_mock_udp(Ipv4Addr::new(93, 184, 216, 34), None).await;
+
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, true));
+    let pool =
+        Arc::new(UpstreamPool::new(&[format!("udp://{unused_upstream_addr}")], 1000).unwrap());
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(32);
+    let pipeline = DnsPipeline::new(filter, cache, pool, Some(log_tx));
+    let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5353);
+
+    // Enable local domain blocking without log suppression
+    pipeline.set_block_local_domains(true);
+    pipeline.set_suppress_local_domain_logs(false);
+
+    // Fast path must defer .local queries to slow path when block_local_domains is enabled
+    let mdns_ptr_q = build_query(101, "_lyra-mdns._udp.local.", RecordType::PTR);
+    let mut fast_out = Vec::new();
+    assert_eq!(
+        pipeline.try_handle_udp_fast(&mdns_ptr_q, client, &mut fast_out),
+        UdpFastOutcome::NeedsAsync
+    );
+
+    let resp1 =
+        Message::from_vec(&pipeline.handle_packet(&mdns_ptr_q, client).await.unwrap()).unwrap();
+    assert_eq!(resp1.response_code, ResponseCode::NXDomain);
+    let ev1 = log_rx.try_recv().expect("expected blocked log event");
+    assert_eq!(ev1.outcome, QueryOutcome::Blocked);
+    assert_eq!(ev1.matched_rule.as_deref(), Some("lan:local-mdns"));
+    assert_eq!(ev1.domain, "_lyra-mdns._udp.local");
+
+    // Enable log suppression -> NXDOMAIN returned, no log emitted
+    pipeline.set_suppress_local_domain_logs(true);
+    let apple_q = build_query(102, "Apple-Vision-Pro.local.", RecordType::A);
+    let resp2 =
+        Message::from_vec(&pipeline.handle_packet(&apple_q, client).await.unwrap()).unwrap();
+    assert_eq!(resp2.response_code, ResponseCode::NXDomain);
+    assert!(
+        log_rx.try_recv().is_err(),
+        "expected no log event when suppress_local_domain_logs is enabled"
+    );
+
+    // Hosts entries for .local still resolve locally
+    pipeline.set_hosts_enabled(true);
+    pipeline.reload_hosts_table(HostsTable::parse("192.168.10.50 nas.local\n"));
+    let nas_q = build_query(103, "nas.local.", RecordType::A);
+    let nas_resp =
+        Message::from_vec(&pipeline.handle_packet(&nas_q, client).await.unwrap()).unwrap();
+    assert_eq!(nas_resp.response_code, ResponseCode::NoError);
+    assert!(matches!(
+        nas_resp.answers[0].data,
+        RData::A(A(ip)) if ip == Ipv4Addr::new(192, 168, 10, 50)
+    ));
+    let ev_hosts = log_rx.try_recv().expect("hosts lookup should still log");
+    assert_eq!(ev_hosts.outcome, QueryOutcome::Rewritten);
+
+    // Split DNS rules for .local still route to the configured local upstream
+    pipeline
+        .reload_split_dns(
+            &[SplitDnsRule {
+                domain: "*.corp.local".to_string(),
+                domains_file: None,
+                domains_url: None,
+                upstreams: vec![format!("udp://{split_upstream_addr}")],
+                fallback_to_default: false,
+                policy: crabdns_core::UpstreamPolicy::default(),
+            }],
+            1000,
+            crabdns_core::UpstreamStrategy::Failover,
+        )
+        .unwrap();
+    let corp_q = build_query(104, "app.corp.local.", RecordType::A);
+    let corp_resp =
+        Message::from_vec(&pipeline.handle_packet(&corp_q, client).await.unwrap()).unwrap();
+    assert_eq!(corp_resp.response_code, ResponseCode::NoError);
+    assert!(matches!(
+        corp_resp.answers[0].data,
+        RData::A(A(ip)) if ip == Ipv4Addr::new(10, 20, 30, 40)
+    ));
+}

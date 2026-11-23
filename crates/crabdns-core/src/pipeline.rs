@@ -72,6 +72,8 @@ pub struct DnsPipeline {
     pub(crate) mdns_resolver: Arc<MdnsNameResolver>,
     pub(crate) mdns_notify: Arc<Notify>,
     pub(crate) private_ptr_router: ArcSwap<PrivatePtrRouter>,
+    pub(crate) block_local_domains: AtomicBool,
+    pub(crate) suppress_local_domain_logs: AtomicBool,
     pub(crate) ddr_config: ArcSwap<DdrConfig>,
     pub(crate) dns_rebinding_protection: AtomicBool,
     pub(crate) block_any_queries: AtomicBool,
@@ -143,6 +145,8 @@ impl DnsPipeline {
             mdns_resolver: Arc::new(MdnsNameResolver::new()),
             mdns_notify: Arc::new(Notify::new()),
             private_ptr_router: ArcSwap::from_pointee(PrivatePtrRouter::default()),
+            block_local_domains: AtomicBool::new(false),
+            suppress_local_domain_logs: AtomicBool::new(false),
             ddr_config: ArcSwap::from_pointee(DdrConfig::default()),
             dns_rebinding_protection: AtomicBool::new(false),
             block_any_queries: AtomicBool::new(false),
@@ -560,6 +564,15 @@ impl DnsPipeline {
 
     pub fn set_block_any_queries(&self, enabled: bool) {
         self.block_any_queries.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_block_local_domains(&self, enabled: bool) {
+        self.block_local_domains.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_suppress_local_domain_logs(&self, enabled: bool) {
+        self.suppress_local_domain_logs
+            .store(enabled, Ordering::Relaxed);
     }
 
     pub fn set_safesearch(&self, config: SafeSearchConfig) {

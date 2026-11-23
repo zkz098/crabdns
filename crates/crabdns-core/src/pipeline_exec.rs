@@ -18,7 +18,9 @@ use crate::edns::{
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision};
 use crate::filter_rules::FilterQueryContext;
-use crate::lan::{build_ddr_response, build_hosts_response, is_ddr_query, is_private_ptr_domain};
+use crate::lan::{
+    build_ddr_response, build_hosts_response, is_ddr_query, is_local_domain, is_private_ptr_domain,
+};
 use crate::pipeline::{DnsPipeline, QueryContext, QueryOutcome, QueryProtocol};
 use crate::pipeline_cache::cache_upstream_response_msg;
 use crate::pipeline_types::LogMeta;
@@ -444,6 +446,40 @@ impl DnsPipeline {
             return Ok(Some(resp));
         }
 
+        if let Some(resp) = self.check_local_domain_block(request, meta)? {
+            return Ok(Some(resp));
+        }
+
+        Ok(None)
+    }
+
+    fn check_local_domain_block(
+        &self,
+        request: &Message,
+        meta: &LogMeta,
+    ) -> Result<Option<Vec<u8>>> {
+        if self.block_local_domains.load(Ordering::Relaxed)
+            && is_local_domain(&meta.domain)
+            && self
+                .split_router
+                .load()
+                .resolve_with_policy(&meta.domain)
+                .is_none()
+        {
+            let resp = build_error_response(request, ResponseCode::NXDomain)?;
+            if !self.suppress_local_domain_logs.load(Ordering::Relaxed) {
+                self.emit_log(
+                    meta,
+                    QueryOutcome::Blocked,
+                    Some("lan:local-mdns".to_string()),
+                    Some("lan".to_string()),
+                    None,
+                    "NXDOMAIN",
+                    Vec::new(),
+                );
+            }
+            return Ok(Some(resp));
+        }
         Ok(None)
     }
 

@@ -191,6 +191,8 @@ const en = {
   settingsHostsPathLabel: "Hosts File Path (default: /etc/hosts)",
   settingsPrivatePtrLabel: "Private Reverse PTR Handling",
   settingsPrivatePtrUpstreamsLabel: "Private PTR Upstreams (empty = NXDOMAIN locally)",
+  settingsBlockLocalDomainsLabel: "Block .local mDNS Domains Locally",
+  settingsSuppressLocalDomainLogsLabel: "Suppress .local Query Logs & Top Blocked",
   settingsDdrLabel: "DDR (_dns.resolver.arpa SVCB Discovery)",
   settingsDdrHostnameLabel: "DDR Public Hostname",
   settingsAuthEnableLabel: "Require login for Web UI & API",
@@ -605,6 +607,10 @@ const en = {
     "Handles reverse IP lookups (in-addr.arpa / ip6.arpa) for private LAN addresses locally or forwards them to private PTR upstreams.",
   tooltipPrivatePtrUpstreams:
     "Optional upstream DNS servers (e.g. your LAN router) for private reverse PTR lookups. If empty, private PTR queries return NXDOMAIN locally.",
+  tooltipBlockLocalDomains:
+    "Answers unmatched .local mDNS queries locally with NXDOMAIN (RFC 6762) instead of forwarding them to public upstreams, preventing SERVFAIL errors and upstream latency.",
+  tooltipSuppressLocalDomainLogs:
+    "Omits locally blocked .local queries from query logs and top-blocked domain statistics so LAN mDNS noise does not clutter the dashboard.",
   tooltipDdr:
     "Enables Discovery of Designated Resolvers (_dns.resolver.arpa SVCB, RFC 9462) so compatible clients auto-upgrade to encrypted DoT/DoH/DoQ.",
   tooltipDdrHostname:
@@ -802,6 +808,8 @@ const zhCN: Record<TranslationKey, string> = {
   settingsHostsPathLabel: "Hosts 文件路径（留空默认 /etc/hosts）",
   settingsPrivatePtrLabel: "启用私有网段反向 PTR 解析隔离",
   settingsPrivatePtrUpstreamsLabel: "私有 PTR 上游（每行一个，留空则本地返回 NXDOMAIN）",
+  settingsBlockLocalDomainsLabel: "本地拦截 .local mDNS 域名（返回 NXDOMAIN）",
+  settingsSuppressLocalDomainLogsLabel: "静默抑制 .local 日志与拦截排行统计",
   settingsDdrLabel: "启用 DDR（_dns.resolver.arpa SVCB 发现）",
   settingsDdrHostnameLabel: "DDR 公开域名（如 dns.example.com）",
   settingsAuthEnableLabel: "访问 Web UI 与 API 需要登录认证",
@@ -1206,6 +1214,10 @@ const zhCN: Record<TranslationKey, string> = {
     "处理内网私有 IP 的反向解析（in-addr.arpa / ip6.arpa），可本地直接拦截或转发给内网 PTR 上游。",
   tooltipPrivatePtrUpstreams:
     "可选，用于处理内网反向 PTR 查询的上游服务器（如局域网路由器）；留空则在本地直接返回 NXDOMAIN。",
+  tooltipBlockLocalDomains:
+    "对未命中 Hosts、DHCP 租约或分流规则的 .local 域名查询直接本地返回 NXDOMAIN（RFC 6762），不再转发至公网上游，避免产生 SERVFAIL 错误与延迟。",
+  tooltipSuppressLocalDomainLogs:
+    "开启本地拦截 .local 后，不在查询日志和“拦截域名排行”中记录这些请求，防止局域网设备高频 mDNS 探测刷屏。",
   tooltipDdr:
     "启用指定解析器发现（_dns.resolver.arpa SVCB，RFC 9462），使支持的客户端自动升级为加密的 DoT/DoH/DoQ。",
   tooltipDdrHostname: "在 DDR SVCB 响应中通告的公网 TLS 主机名，需与实际配置的 TLS 证书域名一致。",

@@ -124,6 +124,8 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         sni_client_id_hostnames: Some(cfg.sni_client_id_hostnames.clone()),
         private_ptr_enabled: Some(cfg.private_ptr_enabled),
         private_ptr_upstreams: Some(cfg.private_ptr_upstreams.clone()),
+        block_local_domains: Some(cfg.block_local_domains),
+        suppress_local_domain_logs: Some(cfg.suppress_local_domain_logs),
         ddr_enabled: Some(cfg.ddr_enabled),
         ddr_hostname: cfg.ddr_hostname.clone(),
         dns_rebinding_protection: Some(cfg.dns_rebinding_protection),
@@ -423,6 +425,12 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
     next.private_ptr_enabled = payload
         .private_ptr_enabled
         .unwrap_or(current.private_ptr_enabled);
+    next.block_local_domains = payload
+        .block_local_domains
+        .unwrap_or(current.block_local_domains);
+    next.suppress_local_domain_logs = payload
+        .suppress_local_domain_logs
+        .unwrap_or(current.suppress_local_domain_logs);
     if let Some(v) = payload.private_ptr_upstreams {
         next.private_ptr_upstreams = clean_string_list(v);
     }
@@ -571,6 +579,8 @@ pub(crate) fn apply_compiled_to_pipeline(
     pipe.set_mdns_enabled(next.mdns_enabled);
     pipe.set_dns_rebinding_protection(next.dns_rebinding_protection);
     pipe.set_block_any_queries(next.block_any_queries);
+    pipe.set_block_local_domains(next.block_local_domains);
+    pipe.set_suppress_local_domain_logs(next.suppress_local_domain_logs);
     pipe.set_rdns_enabled(next.rdns_enabled);
     pipe.set_safesearch(next.safesearch.clone());
     let _ = pipe.reload_dns64(next.dns64_enabled, &next.dns64_prefixes);

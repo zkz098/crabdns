@@ -13,7 +13,7 @@ use crate::config::BlockMode;
 use crate::edns::resolve_ecs_subnet;
 use crate::filter::{FilterAction, FilterDecision};
 use crate::filter_rules::FilterQueryContext;
-use crate::lan::{is_ddr_query, is_private_ptr_domain};
+use crate::lan::{is_ddr_query, is_local_domain, is_private_ptr_domain};
 use crate::pipeline::{DnsPipeline, QueryOutcome, QueryProtocol};
 use crate::pipeline_types::LogMeta;
 use crate::rrl::{RrlDecision, classify_response_category};
@@ -176,6 +176,9 @@ impl DnsPipeline {
                 .lookup_forward(clean, qtype, &self.dhcp_leases_domain.load())
                 .is_some()
         {
+            return true;
+        }
+        if self.block_local_domains.load(Ordering::Relaxed) && is_local_domain(clean) {
             return true;
         }
         false

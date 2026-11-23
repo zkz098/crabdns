@@ -99,6 +99,10 @@ interface SettingsViewProps {
   onPrivatePtrEnabledChange: (val: boolean) => void;
   privatePtrUpstreamsText: string;
   onPrivatePtrUpstreamsChange: (val: string) => void;
+  blockLocalDomains: boolean;
+  onBlockLocalDomainsChange: (val: boolean) => void;
+  suppressLocalDomainLogs: boolean;
+  onSuppressLocalDomainLogsChange: (val: boolean) => void;
   ddrEnabled: boolean;
   onDdrEnabledChange: (val: boolean) => void;
   ddrHostname: string;
@@ -719,6 +723,28 @@ export function SettingsView(props: SettingsViewProps) {
                     />
                     <span>{t("settingsPrivatePtrLabel")}</span>
                     <InfoTooltip text={t("tooltipPrivatePtr")} />
+                  </label>
+                  <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={props.blockLocalDomains}
+                      onChange={(e) => props.onBlockLocalDomainsChange(e.currentTarget.checked)}
+                      class="rounded border-[#eaeaea] dark:border-[#262626]"
+                    />
+                    <span>{t("settingsBlockLocalDomainsLabel")}</span>
+                    <InfoTooltip text={t("tooltipBlockLocalDomains")} />
+                  </label>
+                  <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={props.suppressLocalDomainLogs}
+                      onChange={(e) =>
+                        props.onSuppressLocalDomainLogsChange(e.currentTarget.checked)
+                      }
+                      class="rounded border-[#eaeaea] dark:border-[#262626]"
+                    />
+                    <span>{t("settingsSuppressLocalDomainLogsLabel")}</span>
+                    <InfoTooltip text={t("tooltipSuppressLocalDomainLogs")} align="right" />
                   </label>
                   <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
                     <input

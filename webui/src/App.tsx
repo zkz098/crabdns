@@ -108,6 +108,8 @@ export default function App() {
   const [sniClientIdHostnamesText, setSniClientIdHostnamesText] = createSignal("");
   const [privatePtrEnabled, setPrivatePtrEnabled] = createSignal(false);
   const [privatePtrUpstreamsText, setPrivatePtrUpstreamsText] = createSignal("");
+  const [blockLocalDomains, setBlockLocalDomains] = createSignal(false);
+  const [suppressLocalDomainLogs, setSuppressLocalDomainLogs] = createSignal(false);
   const [ddrEnabled, setDdrEnabled] = createSignal(false);
   const [ddrHostname, setDdrHostname] = createSignal("");
   const [dnsRebindingProtection, setDnsRebindingProtection] = createSignal(false);
@@ -709,6 +711,8 @@ export default function App() {
     setSniClientIdHostnamesText((data.sni_client_id_hostnames ?? []).join("\n"));
     setPrivatePtrEnabled(data.private_ptr_enabled);
     setPrivatePtrUpstreamsText((data.private_ptr_upstreams ?? []).join("\n"));
+    setBlockLocalDomains(data.block_local_domains ?? false);
+    setSuppressLocalDomainLogs(data.suppress_local_domain_logs ?? false);
     setDdrEnabled(data.ddr_enabled);
     setDdrHostname(data.ddr_hostname ?? "");
     setDnsRebindingProtection(data.dns_rebinding_protection);
@@ -1329,6 +1333,8 @@ export default function App() {
       sni_client_id_hostnames: parseLines(sniClientIdHostnamesText()),
       private_ptr_enabled: privatePtrEnabled(),
       private_ptr_upstreams: parseLines(privatePtrUpstreamsText()),
+      block_local_domains: blockLocalDomains(),
+      suppress_local_domain_logs: suppressLocalDomainLogs(),
       ddr_enabled: ddrEnabled(),
       ddr_hostname: ddrHostname().trim(),
       dns_rebinding_protection: dnsRebindingProtection(),
@@ -1686,6 +1692,10 @@ export default function App() {
                 onPrivatePtrEnabledChange={setPrivatePtrEnabled}
                 privatePtrUpstreamsText={privatePtrUpstreamsText()}
                 onPrivatePtrUpstreamsChange={setPrivatePtrUpstreamsText}
+                blockLocalDomains={blockLocalDomains()}
+                onBlockLocalDomainsChange={setBlockLocalDomains}
+                suppressLocalDomainLogs={suppressLocalDomainLogs()}
+                onSuppressLocalDomainLogsChange={setSuppressLocalDomainLogs}
                 ddrEnabled={ddrEnabled()}
                 onDdrEnabledChange={setDdrEnabled}
                 ddrHostname={ddrHostname()}

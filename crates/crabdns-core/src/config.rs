@@ -313,6 +313,10 @@ pub struct Config {
     #[serde(default)]
     pub private_ptr_upstreams: Vec<String>,
     #[serde(default)]
+    pub block_local_domains: bool,
+    #[serde(default)]
+    pub suppress_local_domain_logs: bool,
+    #[serde(default)]
     pub ddr_enabled: bool,
     #[serde(default)]
     pub ddr_hostname: Option<String>,
@@ -516,6 +520,8 @@ impl Default for Config {
             mdns_enabled: false,
             private_ptr_enabled: false,
             private_ptr_upstreams: Vec::new(),
+            block_local_domains: false,
+            suppress_local_domain_logs: false,
             ddr_enabled: false,
             ddr_hostname: None,
             dns_rebinding_protection: false,
