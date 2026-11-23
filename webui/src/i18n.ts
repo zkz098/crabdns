@@ -529,6 +529,10 @@ const en = {
   updateUpToDateMsg: "CrabDNS is already on the latest version",
   updateAvailableMsg: "New signed update available",
   updateAppliedMsg: "Binary replaced in place — restart service to take effect",
+  updateRestartBtn: "Restart Service",
+  updateRestartingBtn: "Restarting...",
+  updateRestartingMsg: "Service is restarting, waiting for reconnection...",
+  updateRestartedMsg: "Service restarted successfully",
 
   settingsAdvancedTitle: "Advanced Settings",
   settingsAdvancedSummary:
@@ -1131,6 +1135,10 @@ const zhCN: Record<TranslationKey, string> = {
   updateUpToDateMsg: "当前已是最新版本",
   updateAvailableMsg: "发现签名新版本",
   updateAppliedMsg: "二进制已原地替换，重启服务后生效",
+  updateRestartBtn: "重启服务",
+  updateRestartingBtn: "重启中...",
+  updateRestartingMsg: "服务正在重启，等待重新连接...",
+  updateRestartedMsg: "服务已成功重启",
 
   settingsAdvancedTitle: "高级设置",
   settingsAdvancedSummary:

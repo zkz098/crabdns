@@ -332,6 +332,13 @@ pub struct UpdateStatusResponse {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct RestartResponse {
+    pub restarting: bool,
+    pub message: String,
+}
+
 #[derive(Default)]
 struct UpdateSnapshot {
     pending: Option<AvailableUpdate>,
@@ -344,14 +351,17 @@ pub struct UpdateManager {
     busy: AtomicBool,
     snapshot: Mutex<UpdateSnapshot>,
     config_override: Mutex<Option<UpdateConfig>>,
+    restart_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl Default for UpdateManager {
     fn default() -> Self {
+        let (restart_tx, _) = tokio::sync::watch::channel(false);
         Self {
             busy: AtomicBool::new(false),
             snapshot: Mutex::new(UpdateSnapshot::default()),
             config_override: Mutex::new(None),
+            restart_tx,
         }
     }
 }
@@ -368,6 +378,15 @@ impl UpdateManager {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn subscribe_restart(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.restart_tx.subscribe()
+    }
+
+    pub fn trigger_restart(&self) {
+        let _ = self.restart_tx.send(true);
     }
 
     /// Override the [`UpdateConfig`] used by Web API handlers (useful for tests or custom update servers).
@@ -571,6 +590,18 @@ pub async fn apply_update(
     state.updater.record_apply_success();
     drop(busy_guard);
     Ok(Json(state.updater.status_snapshot()))
+}
+
+pub async fn restart_service(State(state): State<RouterState>) -> Json<RestartResponse> {
+    let updater = std::sync::Arc::clone(&state.updater);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        updater.trigger_restart();
+    });
+    Json(RestartResponse {
+        restarting: true,
+        message: "Service restart initiated".to_string(),
+    })
 }
 
 #[cfg(test)]

@@ -190,6 +190,7 @@ interface SettingsViewProps {
   updateIsError?: boolean;
   onCheckUpdate?: () => Promise<void> | void;
   onApplyUpdate?: () => Promise<void> | void;
+  onRestartService?: () => Promise<void> | void;
 }
 
 export function SettingsView(props: SettingsViewProps) {
@@ -1747,6 +1748,30 @@ export function SettingsView(props: SettingsViewProps) {
                   >
                     <span class="i-ri-sparkling-2-line text-sm" />
                     <span>{props.updateBusy ? t("updateApplyingBtn") : t("updateApplyBtn")}</span>
+                  </button>
+                </Show>
+
+                <Show when={props.onRestartService}>
+                  <button
+                    type="button"
+                    disabled={props.updateBusy || props.updateStatus?.busy}
+                    onClick={() => props.onRestartService?.()}
+                    class={`h-8 px-3 rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50 ${
+                      props.updateStatus?.restart_pending
+                        ? "bg-amber-600 hover:bg-amber-700 text-white border-0"
+                        : "bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626]"
+                    }`}
+                  >
+                    <span
+                      class={
+                        props.updateBusy
+                          ? "i-ri-loader-4-line animate-spin text-sm"
+                          : "i-ri-restart-line text-sm"
+                      }
+                    />
+                    <span>
+                      {props.updateBusy ? t("updateRestartingBtn") : t("updateRestartBtn")}
+                    </span>
                   </button>
                 </Show>
               </div>

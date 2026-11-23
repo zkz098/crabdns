@@ -127,11 +127,53 @@ async fn main() -> anyhow::Result<()> {
         config.listen_doh3 = Some(addr);
     }
 
-    let server = spawn_server(config).await?;
-    wait_for_shutdown_signal().await?;
-    tracing::info!("shutting down crabdns");
-    server.shutdown().await;
+    let mut server = spawn_server(config).await?;
+    let should_restart = tokio::select! {
+        res = wait_for_shutdown_signal() => {
+            res?;
+            false
+        }
+        () = server.wait_for_restart() => {
+            true
+        }
+    };
+    if should_restart {
+        tracing::info!("restarting crabdns service");
+        server.shutdown().await;
+        reexec_self()?;
+    } else {
+        tracing::info!("shutting down crabdns");
+        server.shutdown().await;
+    }
     Ok(())
+}
+
+fn resolve_current_exe_for_reexec() -> std::io::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    if let Some(s) = exe.to_str()
+        && let Some(stripped) = s.strip_suffix(" (deleted)")
+    {
+        return Ok(std::path::PathBuf::from(stripped));
+    }
+    Ok(exe)
+}
+
+#[cfg(unix)]
+fn reexec_self() -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = resolve_current_exe_for_reexec()?;
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let err = std::process::Command::new(&exe).args(args).exec();
+    Err(anyhow::anyhow!("failed to re-exec {}: {err}", exe.display()))
+}
+
+#[cfg(not(unix))]
+fn reexec_self() -> anyhow::Result<()> {
+    let exe = resolve_current_exe_for_reexec()?;
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    std::process::Command::new(&exe).args(args).spawn()?;
+    std::process::exit(0);
 }
 
 async fn run_cli_self_update(

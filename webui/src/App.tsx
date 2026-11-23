@@ -490,6 +490,49 @@ export default function App() {
     }
   }
 
+  async function restartService() {
+    setUpdateBusy(true);
+    setUpdateIsError(false);
+    setUpdateMessage(t("updateRestartingMsg"));
+    try {
+      const res = await fetch("/api/system/restart", { method: "POST" });
+      if (!res.ok) {
+        setUpdateIsError(true);
+        const errBody = await res.json().catch(() => null);
+        setUpdateMessage(errBody?.error ?? t("rulesFailed"));
+        setUpdateBusy(false);
+        return;
+      }
+      // Wait briefly for the process to shut down and re-exec, then poll /api/health
+      await new Promise((r) => setTimeout(r, 800));
+      let reconnected = false;
+      for (let attempt = 0; attempt < 30; attempt++) {
+        try {
+          const healthRes = await fetch("/api/health", { cache: "no-store" });
+          if (healthRes.ok) {
+            reconnected = true;
+            break;
+          }
+        } catch {
+          // still restarting
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (reconnected) {
+        await Promise.all([fetchUpdateStatus(), fetchConfig()]);
+        setUpdateMessage(t("updateRestartedMsg"));
+      } else {
+        setUpdateIsError(true);
+        setUpdateMessage(t("rulesNetworkError"));
+      }
+    } catch {
+      setUpdateIsError(true);
+      setUpdateMessage(t("rulesNetworkError"));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
   async function fetchRules() {
     try {
       const res = await fetch("/api/rules");
@@ -1735,6 +1778,7 @@ export default function App() {
                 updateIsError={updateIsError()}
                 onCheckUpdate={checkUpdate}
                 onApplyUpdate={applyUpdate}
+                onRestartService={restartService}
               />
             </Show>
           </main>

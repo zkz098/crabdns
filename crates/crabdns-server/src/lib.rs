@@ -45,6 +45,7 @@ pub struct RunningServer {
     pub storage: Arc<StorageEngine>,
     config: Arc<ArcSwap<Config>>,
     shutdown_tx: watch::Sender<bool>,
+    restart_rx: watch::Receiver<bool>,
     udp_tasks: Vec<JoinHandle<()>>,
     tcp_task: JoinHandle<()>,
     dot_task: Option<JoinHandle<()>>,
@@ -69,6 +70,17 @@ pub struct RunningServer {
 }
 
 impl RunningServer {
+    pub async fn wait_for_restart(&mut self) {
+        if *self.restart_rx.borrow_and_update() {
+            return;
+        }
+        while self.restart_rx.changed().await.is_ok() {
+            if *self.restart_rx.borrow() {
+                break;
+            }
+        }
+    }
+
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
 
@@ -371,6 +383,7 @@ struct WebAndTlsHandles {
     web_tls_addr: Option<SocketAddr>,
     web_tls_accept_task: Option<JoinHandle<()>>,
     web_tls_task: Option<JoinHandle<()>>,
+    restart_rx: watch::Receiver<bool>,
 }
 
 async fn start_dot_listener(
@@ -494,6 +507,8 @@ async fn start_web_and_tls(
     });
 
     let tls_reloader: Option<Arc<dyn TlsReloader>> = Some(Arc::clone(tls_manager) as _);
+    let updater = Arc::new(UpdateManager::new());
+    let restart_rx = updater.subscribe_restart();
     let app = build_router_with_managers(
         AppState {
             config: Arc::clone(config),
@@ -502,7 +517,7 @@ async fn start_web_and_tls(
             live_tx,
             tls_reloader,
         },
-        Arc::new(UpdateManager::new()),
+        updater,
         Arc::clone(acme_manager),
     );
 
@@ -565,6 +580,7 @@ async fn start_web_and_tls(
         web_tls_addr,
         web_tls_accept_task,
         web_tls_task,
+        restart_rx,
     })
 }
 
@@ -762,6 +778,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         storage,
         config,
         shutdown_tx,
+        restart_rx: web_tls.restart_rx,
         udp_tasks,
         tcp_task,
         dot_task: web_tls.dot_task,
