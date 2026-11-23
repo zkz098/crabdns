@@ -187,8 +187,10 @@ impl DnsPipeline {
             .upstream_policy
             .as_deref()
             .map(|p| p.resolve_ecs_config(&global_ecs));
-        let ecs_subnet =
-            resolve_ecs_subnet(ecs_cfg.as_ref().unwrap_or(&global_ecs), ctx.client_addr.ip());
+        let ecs_subnet = resolve_ecs_subnet(
+            ecs_cfg.as_ref().unwrap_or(&global_ecs),
+            ctx.client_addr.ip(),
+        );
         let upstream = route.pool;
         let is_local_route = route.is_local_route;
         let cache_key = CacheKey {

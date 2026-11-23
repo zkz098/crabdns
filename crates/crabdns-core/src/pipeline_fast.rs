@@ -324,8 +324,10 @@ impl DnsPipeline {
             .upstream_policy
             .as_deref()
             .map(|p| p.resolve_ecs_config(&global_ecs));
-        let ecs_subnet =
-            resolve_ecs_subnet(ecs_cfg.as_ref().unwrap_or(&global_ecs), meta.client_addr.ip());
+        let ecs_subnet = resolve_ecs_subnet(
+            ecs_cfg.as_ref().unwrap_or(&global_ecs),
+            meta.client_addr.ip(),
+        );
         let upstream = route.pool;
         let dns_rebinding_on = route
             .upstream_policy

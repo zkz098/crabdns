@@ -8,7 +8,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use crabdns_core::{
-    BlockMode, ClientGroup, ClientProfile, ClientRegistry, UpstreamPolicy, validate_client_identifier,
+    BlockMode, ClientGroup, ClientProfile, ClientRegistry, UpstreamPolicy,
+    validate_client_identifier,
 };
 use crabdns_storage::{ClientActivityStats, ClientProtocolCounts, TopItem};
 use serde::{Deserialize, Serialize};

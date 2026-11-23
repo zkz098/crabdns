@@ -165,7 +165,10 @@ fn reexec_self() -> anyhow::Result<()> {
     let exe = resolve_current_exe_for_reexec()?;
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let err = std::process::Command::new(&exe).args(args).exec();
-    Err(anyhow::anyhow!("failed to re-exec {}: {err}", exe.display()))
+    Err(anyhow::anyhow!(
+        "failed to re-exec {}: {err}",
+        exe.display()
+    ))
 }
 
 #[cfg(not(unix))]

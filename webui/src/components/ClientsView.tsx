@@ -142,9 +142,8 @@ export function ClientsView(props: ClientsViewProps) {
   const [groupSafeSearch, setGroupSafeSearch] = createSignal<TriState>("");
   const [groupUpstreams, setGroupUpstreams] = createSignal("");
   const [groupRules, setGroupRules] = createSignal("");
-  const [groupUpstreamPolicy, setGroupUpstreamPolicy] = createSignal<UpstreamPolicy>(
-    emptyUpstreamPolicy(),
-  );
+  const [groupUpstreamPolicy, setGroupUpstreamPolicy] =
+    createSignal<UpstreamPolicy>(emptyUpstreamPolicy());
 
   // Client profile form state
   const [clientFormOpen, setClientFormOpen] = createSignal(false);
@@ -158,9 +157,8 @@ export function ClientsView(props: ClientsViewProps) {
   const [clientSafeSearch, setClientSafeSearch] = createSignal<TriState>("");
   const [clientUpstreams, setClientUpstreams] = createSignal("");
   const [clientRules, setClientRules] = createSignal("");
-  const [clientUpstreamPolicy, setClientUpstreamPolicy] = createSignal<UpstreamPolicy>(
-    emptyUpstreamPolicy(),
-  );
+  const [clientUpstreamPolicy, setClientUpstreamPolicy] =
+    createSignal<UpstreamPolicy>(emptyUpstreamPolicy());
   const [clientTags, setClientTags] = createSignal("");
   const [discoveredSearch, setDiscoveredSearch] = createSignal("");
   const [discoveredSort, setDiscoveredSort] = createSignal("last_seen");

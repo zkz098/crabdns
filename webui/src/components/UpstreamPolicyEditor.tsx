@@ -7,41 +7,43 @@ export function emptyUpstreamPolicy(): UpstreamPolicy {
   return {};
 }
 
+function isSet<T>(v: T | null | undefined): v is T {
+  return v !== null && v !== undefined;
+}
+
 export function countPolicyOverrides(policy?: UpstreamPolicy | null): number {
   if (!policy) return 0;
   let count = 0;
-  if (policy.upstream_strategy != null) count++;
-  if (policy.upstream_timeout_ms != null) count++;
-  if (policy.dnssec_enabled != null) count++;
-  if (policy.ecs_enabled != null) count++;
+  if (isSet(policy.upstream_strategy)) count++;
+  if (isSet(policy.upstream_timeout_ms)) count++;
+  if (isSet(policy.dnssec_enabled)) count++;
+  if (isSet(policy.ecs_enabled)) count++;
   if (policy.ecs_custom_ip) count++;
-  if (policy.ecs_ipv4_prefix != null) count++;
-  if (policy.ecs_ipv6_prefix != null) count++;
-  if (policy.dns_rebinding_protection != null) count++;
-  if (policy.dns64_enabled != null) count++;
-  if (policy.svcb_strip_ech != null) count++;
-  if (policy.svcb_strip_hints != null) count++;
-  if (policy.cf_cdn_enabled != null) count++;
+  if (isSet(policy.ecs_ipv4_prefix)) count++;
+  if (isSet(policy.ecs_ipv6_prefix)) count++;
+  if (isSet(policy.dns_rebinding_protection)) count++;
+  if (isSet(policy.dns64_enabled)) count++;
+  if (isSet(policy.svcb_strip_ech)) count++;
+  if (isSet(policy.svcb_strip_hints)) count++;
+  if (isSet(policy.cf_cdn_enabled)) count++;
   return count;
 }
 
 export function upstreamPolicyBadges(policy?: UpstreamPolicy | null): string[] {
   if (!policy) return [];
   const badges: string[] = [];
-  if (policy.upstream_strategy != null) badges.push(`Strategy:${policy.upstream_strategy}`);
-  if (policy.upstream_timeout_ms != null) badges.push(`Timeout:${policy.upstream_timeout_ms}ms`);
-  if (policy.dnssec_enabled != null)
-    badges.push(`DNSSEC:${policy.dnssec_enabled ? "On" : "Off"}`);
-  if (policy.ecs_enabled != null) badges.push(`ECS:${policy.ecs_enabled ? "On" : "Off"}`);
+  if (isSet(policy.upstream_strategy)) badges.push(`Strategy:${policy.upstream_strategy}`);
+  if (isSet(policy.upstream_timeout_ms)) badges.push(`Timeout:${policy.upstream_timeout_ms}ms`);
+  if (isSet(policy.dnssec_enabled)) badges.push(`DNSSEC:${policy.dnssec_enabled ? "On" : "Off"}`);
+  if (isSet(policy.ecs_enabled)) badges.push(`ECS:${policy.ecs_enabled ? "On" : "Off"}`);
   if (policy.ecs_custom_ip) badges.push(`ECS-IP:${policy.ecs_custom_ip}`);
-  if (policy.dns_rebinding_protection != null)
+  if (isSet(policy.dns_rebinding_protection))
     badges.push(`Rebind:${policy.dns_rebinding_protection ? "On" : "Off"}`);
-  if (policy.dns64_enabled != null) badges.push(`DNS64:${policy.dns64_enabled ? "On" : "Off"}`);
-  if (policy.svcb_strip_ech != null)
-    badges.push(`NoECH:${policy.svcb_strip_ech ? "On" : "Off"}`);
-  if (policy.svcb_strip_hints != null)
+  if (isSet(policy.dns64_enabled)) badges.push(`DNS64:${policy.dns64_enabled ? "On" : "Off"}`);
+  if (isSet(policy.svcb_strip_ech)) badges.push(`NoECH:${policy.svcb_strip_ech ? "On" : "Off"}`);
+  if (isSet(policy.svcb_strip_hints))
     badges.push(`NoHints:${policy.svcb_strip_hints ? "On" : "Off"}`);
-  if (policy.cf_cdn_enabled != null) badges.push(`CF-CDN:${policy.cf_cdn_enabled ? "On" : "Off"}`);
+  if (isSet(policy.cf_cdn_enabled)) badges.push(`CF-CDN:${policy.cf_cdn_enabled ? "On" : "Off"}`);
   return badges;
 }
 
@@ -203,8 +205,7 @@ export function UpstreamPolicyEditor(props: UpstreamPolicyEditorProps) {
                   const raw = e.currentTarget.value.trim();
                   const parsed = raw === "" ? null : Number(raw);
                   update({
-                    ecs_ipv4_prefix:
-                      parsed !== null && Number.isFinite(parsed) ? parsed : null,
+                    ecs_ipv4_prefix: parsed !== null && Number.isFinite(parsed) ? parsed : null,
                   });
                 }}
                 class="w-full h-7 bg-white dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-md px-2 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"
@@ -224,8 +225,7 @@ export function UpstreamPolicyEditor(props: UpstreamPolicyEditorProps) {
                   const raw = e.currentTarget.value.trim();
                   const parsed = raw === "" ? null : Number(raw);
                   update({
-                    ecs_ipv6_prefix:
-                      parsed !== null && Number.isFinite(parsed) ? parsed : null,
+                    ecs_ipv6_prefix: parsed !== null && Number.isFinite(parsed) ? parsed : null,
                   });
                 }}
                 class="w-full h-7 bg-white dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-md px-2 font-mono text-xs text-[#171717] dark:text-[#ededed] outline-none"

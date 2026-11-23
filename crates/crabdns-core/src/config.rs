@@ -158,8 +158,12 @@ impl CompiledUpstreamPolicy {
         {
             Some(raw) => Some(crate::edns::parse_ecs_custom(
                 raw,
-                policy.ecs_ipv4_prefix.unwrap_or_else(default_ecs_ipv4_prefix),
-                policy.ecs_ipv6_prefix.unwrap_or_else(default_ecs_ipv6_prefix),
+                policy
+                    .ecs_ipv4_prefix
+                    .unwrap_or_else(default_ecs_ipv4_prefix),
+                policy
+                    .ecs_ipv6_prefix
+                    .unwrap_or_else(default_ecs_ipv6_prefix),
             )?),
             None => None,
         };

@@ -476,9 +476,9 @@ async fn test_acme_dns01_local_challenge_response() {
 
 #[tokio::test]
 async fn test_per_group_upstream_policies_split_dns_and_client_group() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use crabdns_core::{BlockMode, UpstreamPolicy};
     use hickory_proto::rr::rdata::opt::EdnsOption;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     async fn spawn_inspecting_upstream(
         reply_ip: Ipv4Addr,

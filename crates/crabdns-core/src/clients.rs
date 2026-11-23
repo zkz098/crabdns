@@ -200,9 +200,8 @@ impl ClientRegistry {
                 let effective_timeout = compiled_group_policy
                     .upstream_timeout_ms
                     .unwrap_or(timeout_ms);
-                let effective_strategy = compiled_group_policy
-                    .upstream_strategy
-                    .unwrap_or(strategy);
+                let effective_strategy =
+                    compiled_group_policy.upstream_strategy.unwrap_or(strategy);
                 let pool = Arc::new(UpstreamPool::new_with_bootstrap(
                     &group.upstreams,
                     effective_timeout,
@@ -385,7 +384,8 @@ fn build_resolved_policy(
         Some(g) => client.upstream_policy.merge_over(&g.upstream_policy),
         None => client.upstream_policy.clone(),
     };
-    let compiled_upstream_policy = Arc::new(CompiledUpstreamPolicy::compile(&merged_upstream_policy)?);
+    let compiled_upstream_policy =
+        Arc::new(CompiledUpstreamPolicy::compile(&merged_upstream_policy)?);
     let upstream_policy_scope = if !merged_upstream_policy.is_empty() {
         if !client.upstream_policy.is_empty() {
             Some(format!("client:{}", client.id))

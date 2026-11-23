@@ -511,9 +511,9 @@ fn rewrite_a_records(
     best_v4: Ipv4Addr,
     ttl: u32,
 ) -> bool {
-    let has_cf = records.iter().any(|rec| {
-        matches!(rec.data, RData::A(A(ip)) if cidrs.iter().any(|c| c.contains(ip)))
-    });
+    let has_cf = records
+        .iter()
+        .any(|rec| matches!(rec.data, RData::A(A(ip)) if cidrs.iter().any(|c| c.contains(ip))));
     if !has_cf {
         return false;
     }
@@ -544,9 +544,9 @@ fn rewrite_aaaa_records(
     best_v6: Ipv6Addr,
     ttl: u32,
 ) -> bool {
-    let has_cf = records.iter().any(|rec| {
-        matches!(rec.data, RData::AAAA(AAAA(ip)) if cidrs.iter().any(|c| c.contains(ip)))
-    });
+    let has_cf = records.iter().any(
+        |rec| matches!(rec.data, RData::AAAA(AAAA(ip)) if cidrs.iter().any(|c| c.contains(ip))),
+    );
     if !has_cf {
         return false;
     }
@@ -584,26 +584,34 @@ fn rewrite_svcb_inner(
     for (key, val) in &svcb.svc_params {
         match (key, val) {
             (SvcParamKey::Ipv4Hint, SvcParamValue::Ipv4Hint(hint))
-                if hint.0.iter().any(|a| v4_cidrs.iter().any(|c| c.contains(a.0))) =>
+                if hint
+                    .0
+                    .iter()
+                    .any(|a| v4_cidrs.iter().any(|c| c.contains(a.0))) =>
             {
                 changed = true;
                 if let Some(v4) = best_v4 {
                     next_params.push((
                         *key,
-                        SvcParamValue::Ipv4Hint(hickory_proto::rr::rdata::svcb::IpHint(vec![A(v4)])),
+                        SvcParamValue::Ipv4Hint(hickory_proto::rr::rdata::svcb::IpHint(vec![A(
+                            v4,
+                        )])),
                     ));
                 }
             }
             (SvcParamKey::Ipv6Hint, SvcParamValue::Ipv6Hint(hint))
-                if hint.0.iter().any(|a| v6_cidrs.iter().any(|c| c.contains(a.0))) =>
+                if hint
+                    .0
+                    .iter()
+                    .any(|a| v6_cidrs.iter().any(|c| c.contains(a.0))) =>
             {
                 changed = true;
                 if let Some(v6) = best_v6 {
                     next_params.push((
                         *key,
-                        SvcParamValue::Ipv6Hint(hickory_proto::rr::rdata::svcb::IpHint(vec![AAAA(
-                            v6,
-                        )])),
+                        SvcParamValue::Ipv6Hint(hickory_proto::rr::rdata::svcb::IpHint(vec![
+                            AAAA(v6),
+                        ])),
                     ));
                 }
             }
@@ -633,9 +641,7 @@ fn rewrite_svcb_hints(
     for rec in records.iter_mut() {
         match &rec.data {
             RData::SVCB(svcb) => {
-                if let Some(next) =
-                    rewrite_svcb_inner(svcb, v4_cidrs, v6_cidrs, best_v4, best_v6)
-                {
+                if let Some(next) = rewrite_svcb_inner(svcb, v4_cidrs, v6_cidrs, best_v4, best_v6) {
                     rec.data = RData::SVCB(next);
                     changed = true;
                 }
@@ -799,14 +805,12 @@ async fn screen_candidates(
 }
 
 async fn measure_throughput(ip: IpAddr, speedtest_url: &str) -> Result<f64, String> {
-    let parsed = reqwest::Url::parse(speedtest_url)
-        .map_err(|e| format!("invalid speedtest URL: {e}"))?;
+    let parsed =
+        reqwest::Url::parse(speedtest_url).map_err(|e| format!("invalid speedtest URL: {e}"))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| "speedtest URL has no host".to_string())?;
-    let port = parsed
-        .port_or_known_default()
-        .unwrap_or(443);
+    let port = parsed.port_or_known_default().unwrap_or(443);
 
     let client = reqwest::Client::builder()
         .resolve_to_addrs(host, &[SocketAddr::new(ip, port)])

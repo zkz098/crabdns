@@ -1347,8 +1347,7 @@ export default function App() {
         ipv6_enabled: cfCdnIpv6Enabled(),
         interval_secs: Number(cfCdnIntervalSecs()) || 1800,
         speedtest_url:
-          cfCdnSpeedtestUrl().trim() ||
-          "https://speed.cloudflare.com/__down?bytes=99999999",
+          cfCdnSpeedtestUrl().trim() || "https://speed.cloudflare.com/__down?bytes=99999999",
         concurrency: configData()?.cf_cdn?.concurrency ?? 50,
         top_n: configData()?.cf_cdn?.top_n ?? 3,
         samples_per_cidr: configData()?.cf_cdn?.samples_per_cidr ?? 3,

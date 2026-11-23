@@ -1111,14 +1111,11 @@ export function SettingsView(props: SettingsViewProps) {
                           {st().last_error}
                         </div>
                       </Show>
-                      <Show
-                        when={
-                          st().candidates_v4.length > 0 || st().candidates_v6.length > 0
-                        }
-                      >
+                      <Show when={st().candidates_v4.length > 0 || st().candidates_v6.length > 0}>
                         <details class="pt-1">
                           <summary class="cursor-pointer text-[11px] text-[#666666] dark:text-[#a1a1aa] hover:text-[#171717] dark:hover:text-[#ededed]">
-                            {t("settingsCfCdnCandidatesTitle")} (IPv4: {st().candidates_v4.length}, IPv6: {st().candidates_v6.length})
+                            {t("settingsCfCdnCandidatesTitle")} (IPv4: {st().candidates_v4.length},
+                            IPv6: {st().candidates_v6.length})
                           </summary>
                           <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono text-[11px]">
                             <For each={[...st().candidates_v4, ...st().candidates_v6]}>
