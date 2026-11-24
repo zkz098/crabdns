@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/zkz098/crabdns/main/scripts/install
     source: `# 1. Build Web UI assets
 cd webui && pnpm install && pnpm build && cd ..
 
-# 2. Run CrabDNS (DNS: 0.0.0.0:5353, Web UI: 127.0.0.1:3000)
+# 2. Run CrabDNS (DNS: 0.0.0.0:5354, Web UI: 127.0.0.1:3000)
 cargo run -p crabdns-server`,
   };
 

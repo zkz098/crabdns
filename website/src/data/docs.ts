@@ -62,7 +62,7 @@ export const docsContent: Record<Locale, DocPage[]> = {
           heading: "Build & Run from Source",
           body: [
             "CrabDNS embeds its SolidJS + UnoCSS WebUI directly into the Rust binary via rust-embed. Build the frontend assets once before compiling or running the server.",
-            "By default, CrabDNS listens for DNS queries on 0.0.0.0:5353 and serves the WebUI + DoH endpoint on 127.0.0.1:3000.",
+            "By default, CrabDNS listens for DNS queries on 0.0.0.0:5354 and serves the WebUI + DoH endpoint on 127.0.0.1:3000.",
           ],
           code: {
             lang: "bash",
@@ -148,7 +148,7 @@ curl -fsSL https://raw.githubusercontent.com/zkz098/crabdns/main/scripts/install
               ["--install-path <path>", "/usr/bin/crabdns", "Target binary path"],
               ["--config <path>", "/etc/crabdns/config.toml", "Config file path (preserved on upgrade)"],
               ["--data-dir <path>", "/var/lib/crabdns (Linux) / /etc/crabdns/data (OpenWrt)", "Fjall data & log directory"],
-              ["--dns-listen <addr>", "0.0.0.0:5353 (or :53 on takeover)", "Initial DNS listen address"],
+              ["--dns-listen <addr>", "0.0.0.0:5354 (or :53 on takeover)", "Initial DNS listen address"],
               ["--web-listen <addr>", "0.0.0.0:3000", "Initial WebUI listen address"],
               ["--openwrt-dnsmasq <mode>", "none", "OpenWrt dnsmasq mode: none | upstream | takeover"],
               ["--uninstall", "—", "Stop, disable, and remove binary & service"],
@@ -161,7 +161,7 @@ curl -fsSL https://raw.githubusercontent.com/zkz098/crabdns/main/scripts/install
           heading: "OpenWrt (procd & dnsmasq)",
           body: [
             "On OpenWrt, the script generates /etc/init.d/crabdns using procd with automatic respawn and nofile=65536 limits. Use --openwrt-dnsmasq to integrate with dnsmasq:",
-            "• none: Leaves dnsmasq untouched (CrabDNS listens on :5353). • upstream: Configures dnsmasq to forward all DNS queries to 127.0.0.1#5353 with noresolv=1. • takeover: Sets dnsmasq port=0 and binds CrabDNS directly to 0.0.0.0:53.",
+            "• none: Leaves dnsmasq untouched (CrabDNS listens on :5354). • upstream: Configures dnsmasq to forward all DNS queries to 127.0.0.1#5354 with noresolv=1. • takeover: Sets dnsmasq port=0 and binds CrabDNS directly to 0.0.0.0:53.",
           ],
           code: {
             lang: "sh",
@@ -201,7 +201,7 @@ curl -fsSL https://raw.githubusercontent.com/zkz098/crabdns/main/scripts/install
           ],
           code: {
             lang: "toml",
-            content: `listen_dns = "0.0.0.0:5353"
+            content: `listen_dns = "0.0.0.0:5354"
 listen_web = "127.0.0.1:3000"
 data_dir = "./data"
 log_retention_hours = 24
@@ -420,7 +420,7 @@ cargo +nightly fuzz run fuzz_dns_packet`,
           heading: "从源码构建并运行",
           body: [
             "CrabDNS 通过 rust-embed 将 SolidJS + UnoCSS WebUI 直接打包进纯 Rust 二进制文件中。在编译或运行服务端前，请先构建一次前端静态资源。",
-            "默认情况下，CrabDNS 在 0.0.0.0:5353 监听 DNS 请求，并在 127.0.0.1:3000 提供 WebUI 控制台与 DoH 接口。",
+            "默认情况下，CrabDNS 在 0.0.0.0:5354 监听 DNS 请求，并在 127.0.0.1:3000 提供 WebUI 控制台与 DoH 接口。",
           ],
           code: {
             lang: "bash",
@@ -506,7 +506,7 @@ curl -fsSL https://raw.githubusercontent.com/zkz098/crabdns/main/scripts/install
               ["--install-path <path>", "/usr/bin/crabdns", "二进制安装目标路径"],
               ["--config <path>", "/etc/crabdns/config.toml", "配置文件路径（升级时自动保留）"],
               ["--data-dir <path>", "Linux: /var/lib/crabdns · OpenWrt: /etc/crabdns/data", "Fjall 数据与日志存储目录"],
-              ["--dns-listen <addr>", "0.0.0.0:5353（takeover 模式为 :53）", "初始 DNS 监听地址"],
+              ["--dns-listen <addr>", "0.0.0.0:5354（takeover 模式为 :53）", "初始 DNS 监听地址"],
               ["--web-listen <addr>", "0.0.0.0:3000", "初始 WebUI 监听地址"],
               ["--openwrt-dnsmasq <mode>", "none", "OpenWrt dnsmasq 集成模式：none | upstream | takeover"],
               ["--uninstall", "—", "停止服务并移除二进制与服务文件"],
@@ -519,7 +519,7 @@ curl -fsSL https://raw.githubusercontent.com/zkz098/crabdns/main/scripts/install
           heading: "OpenWrt (procd 与 dnsmasq 集成)",
           body: [
             "在 OpenWrt 上，脚本会自动创建 /etc/init.d/crabdns（启用 procd 自动拉起与 nofile=65536 限制）。可通过 --openwrt-dnsmasq 控制与 dnsmasq 的配合方式：",
-            "• none：不修改 dnsmasq（CrabDNS 监听 :5353）。• upstream：将 dnsmasq 上游设为 127.0.0.1#5353 并开启 noresolv=1。• takeover：将 dnsmasq 端口设为 0，由 CrabDNS 直接接管 53 端口。",
+            "• none：不修改 dnsmasq（CrabDNS 监听 :5354）。• upstream：将 dnsmasq 上游设为 127.0.0.1#5354 并开启 noresolv=1。• takeover：将 dnsmasq 端口设为 0，由 CrabDNS 直接接管 53 端口。",
           ],
           code: {
             lang: "sh",
@@ -559,7 +559,7 @@ curl -fsSL https://raw.githubusercontent.com/zkz098/crabdns/main/scripts/install
           ],
           code: {
             lang: "toml",
-            content: `listen_dns = "0.0.0.0:5353"
+            content: `listen_dns = "0.0.0.0:5354"
 listen_web = "127.0.0.1:3000"
 data_dir = "./data"
 log_retention_hours = 24

@@ -33,7 +33,7 @@ Options:
   --install-path <path>      Target binary path (default: /usr/bin/crabdns)
   --config <path>            Config file path (default: /etc/crabdns/config.toml)
   --data-dir <path>          Data directory (default: /etc/crabdns/data on OpenWrt, /var/lib/crabdns on Linux)
-  --dns-listen <addr>        DNS listen address (default: 0.0.0.0:5353, or 0.0.0.0:53 with takeover)
+  --dns-listen <addr>        DNS listen address (default: 0.0.0.0:5354, or 0.0.0.0:53 with takeover)
   --web-listen <addr>        Web UI listen address (default: 0.0.0.0:3000)
   --profile <mode>           Initial config preset: default | home | smb (default: default)
   --takeover                 Take over port 53 automatically (OpenWrt dnsmasq or Linux systemd-resolved)
@@ -209,7 +209,7 @@ if [ -z "$DNS_LISTEN" ]; then
     if [ "$OPENWRT_DNSMASQ" = "takeover" ] || [ "$SYSTEMD_RESOLVED" = "takeover" ]; then
         DNS_LISTEN="0.0.0.0:53"
     else
-        DNS_LISTEN="0.0.0.0:5353"
+        DNS_LISTEN="0.0.0.0:5354"
     fi
 fi
 
@@ -389,7 +389,7 @@ check_port_53_conflict() {
         if [ -n "$conflict" ]; then
             log "WARNING: Port 53 appears to be in use:"
             printf '%s\n' "$conflict" >&2
-            err "Port 53 conflict detected. Re-run with --takeover (or --systemd-resolved takeover / --openwrt-dnsmasq takeover) or choose --dns-listen 0.0.0.0:5353."
+            err "Port 53 conflict detected. Re-run with --takeover (or --systemd-resolved takeover / --openwrt-dnsmasq takeover) or choose --dns-listen 0.0.0.0:5354."
         fi
     fi
 }

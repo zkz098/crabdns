@@ -373,7 +373,7 @@ pub struct Config {
 }
 
 fn default_listen_dns() -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5353)
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5354)
 }
 
 fn default_listen_web() -> SocketAddr {
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn test_default_and_toml_config() {
         let def = Config::default();
-        assert_eq!(def.listen_dns.port(), 5353);
+        assert_eq!(def.listen_dns.port(), 5354);
         assert_eq!(def.listen_web.port(), 3000);
         assert!(def.optimistic_cache);
 
