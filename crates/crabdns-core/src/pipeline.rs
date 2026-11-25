@@ -481,6 +481,15 @@ impl DnsPipeline {
         self.dnssec_enabled.store(enabled, Ordering::Relaxed);
     }
 
+    pub fn reload_dnssec_anchors(
+        &self,
+        trust_anchor_lines: &[String],
+        ntas: &[crate::dnssec_anchors::DnssecNta],
+    ) -> Result<()> {
+        self.dnssec_validator
+            .reload_anchors(trust_anchor_lines, ntas)
+    }
+
     pub fn set_hosts_enabled(&self, enabled: bool) {
         self.hosts_enabled.store(enabled, Ordering::Relaxed);
     }

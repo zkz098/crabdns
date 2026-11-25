@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crabdns_core::{
     ClientGroup, ClientProfile, Config, DnsRewriteEntry, PersistedCacheEntry, QueryEvent,
@@ -34,22 +34,25 @@ pub struct StorageEngine {
     sub_contents: Keyspace,
     dns_cache: Keyspace,
     seq: AtomicU64,
-    total_queries: AtomicU64,
-    blocked_queries: AtomicU64,
-    cached_queries: AtomicU64,
-    rewritten_queries: AtomicU64,
-    error_queries: AtomicU64,
-    domain_counts: BoundedCountMap,
-    blocked_counts: BoundedCountMap,
-    client_counts: BoundedCountMap,
-    client_stats: ClientStatsTracker,
-    hourly_buckets: std::sync::Mutex<HashMap<u64, TimeSeriesPoint>>,
+    pub(crate) total_queries: AtomicU64,
+    pub(crate) blocked_queries: AtomicU64,
+    pub(crate) cached_queries: AtomicU64,
+    pub(crate) rewritten_queries: AtomicU64,
+    pub(crate) error_queries: AtomicU64,
+    pub(crate) domain_counts: BoundedCountMap,
+    pub(crate) blocked_counts: BoundedCountMap,
+    pub(crate) client_counts: BoundedCountMap,
+    pub(crate) client_stats: ClientStatsTracker,
+    pub(crate) hourly_buckets: std::sync::Mutex<HashMap<u64, TimeSeriesPoint>>,
     sub_lock: Mutex<()>,
     client_lock: Mutex<()>,
     config_lock: Mutex<()>,
     rewrite_lock: Mutex<()>,
     pub(crate) log_batches_written: AtomicU64,
     pub(crate) log_batch_failures: AtomicU64,
+    pub(crate) log_batches_retried: AtomicU64,
+    pub(crate) log_batches_degraded_dropped: AtomicU64,
+    pub(crate) log_disk_degraded: AtomicBool,
     pub(crate) log_flush_total_us: AtomicU64,
     log_pruned_total: AtomicU64,
 }
@@ -112,6 +115,9 @@ impl StorageEngine {
             rewrite_lock: Mutex::new(()),
             log_batches_written: AtomicU64::new(0),
             log_batch_failures: AtomicU64::new(0),
+            log_batches_retried: AtomicU64::new(0),
+            log_batches_degraded_dropped: AtomicU64::new(0),
+            log_disk_degraded: AtomicBool::new(false),
             log_flush_total_us: AtomicU64::new(0),
             log_pruned_total: AtomicU64::new(0),
         })
@@ -121,6 +127,9 @@ impl StorageEngine {
         StorageRuntimeMetrics {
             log_batches_written: self.log_batches_written.load(Ordering::Relaxed),
             log_batch_failures: self.log_batch_failures.load(Ordering::Relaxed),
+            log_batches_retried: self.log_batches_retried.load(Ordering::Relaxed),
+            log_batches_degraded_dropped: self.log_batches_degraded_dropped.load(Ordering::Relaxed),
+            log_disk_degraded: self.log_disk_degraded.load(Ordering::Relaxed),
             log_flush_total_us: self.log_flush_total_us.load(Ordering::Relaxed),
             log_pruned_total: self.log_pruned_total.load(Ordering::Relaxed),
         }
@@ -129,15 +138,12 @@ impl StorageEngine {
     pub fn subscription_lock(&self) -> &Mutex<()> {
         &self.sub_lock
     }
-
     pub fn client_lock(&self) -> &Mutex<()> {
         &self.client_lock
     }
-
     pub fn config_lock(&self) -> &Mutex<()> {
         &self.config_lock
     }
-
     pub fn rewrite_lock(&self) -> &Mutex<()> {
         &self.rewrite_lock
     }
@@ -225,23 +231,16 @@ impl StorageEngine {
         batch.insert(&self.meta, KEY_TIMESERIES, ts_bytes);
         batch.commit()?;
 
-        self.total_queries.fetch_add(delta_total, Ordering::Relaxed);
-        self.blocked_queries
-            .fetch_add(delta_blocked, Ordering::Relaxed);
-        self.cached_queries
-            .fetch_add(delta_cached, Ordering::Relaxed);
-        self.rewritten_queries
-            .fetch_add(delta_rewritten, Ordering::Relaxed);
-        self.error_queries.fetch_add(delta_error, Ordering::Relaxed);
-
-        for event in events {
-            if event.outcome == QueryOutcome::Blocked {
-                self.blocked_counts.increment(&event.domain);
-            }
-            self.domain_counts.increment(&event.domain);
-            self.client_counts.increment(&event.client_ip);
-            self.client_stats.record(event);
-        }
+        self.apply_in_memory_stats_without_buckets(
+            events,
+            (
+                delta_total,
+                delta_blocked,
+                delta_cached,
+                delta_rewritten,
+                delta_error,
+            ),
+        );
         Ok(())
     }
 

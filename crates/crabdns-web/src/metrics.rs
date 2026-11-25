@@ -225,6 +225,7 @@ fn write_query_latency_histogram(out: &mut String, latency: &LatencyHistogramSna
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_runtime_metrics(
     out: &mut String,
     pipeline: &PipelineRuntimeMetrics,
@@ -286,6 +287,15 @@ fn write_runtime_metrics(
          # HELP crabdns_storage_log_batch_failures_total Total failed query log batch flushes.\n\
          # TYPE crabdns_storage_log_batch_failures_total counter\n\
          crabdns_storage_log_batch_failures_total {}\n\
+         # HELP crabdns_storage_log_batches_retried_total Total query log batch flush retries.\n\
+         # TYPE crabdns_storage_log_batches_retried_total counter\n\
+         crabdns_storage_log_batches_retried_total {}\n\
+         # HELP crabdns_storage_log_batches_degraded_dropped_total Total log batches kept in memory only during disk backoff.\n\
+         # TYPE crabdns_storage_log_batches_degraded_dropped_total counter\n\
+         crabdns_storage_log_batches_degraded_dropped_total {}\n\
+         # HELP crabdns_storage_log_disk_degraded Whether query log disk flushing is degraded (1=degraded, 0=healthy).\n\
+         # TYPE crabdns_storage_log_disk_degraded gauge\n\
+         crabdns_storage_log_disk_degraded {}\n\
          # HELP crabdns_storage_log_flush_duration_seconds_total Cumulative time spent flushing log batches.\n\
          # TYPE crabdns_storage_log_flush_duration_seconds_total counter\n\
          crabdns_storage_log_flush_duration_seconds_total {flush_secs:.6}\n\
@@ -323,6 +333,9 @@ fn write_runtime_metrics(
         pipeline.filter_last_reload_ms,
         storage.log_batches_written,
         storage.log_batch_failures,
+        storage.log_batches_retried,
+        storage.log_batches_degraded_dropped,
+        u8::from(storage.log_disk_degraded),
         storage.log_pruned_total,
     );
 }

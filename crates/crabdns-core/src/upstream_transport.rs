@@ -1,131 +1,21 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
 use quinn::crypto::rustls::QuicClientConfig;
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
-use ts_rs::TS;
 
 use crate::error::{CoreError, Result};
-
-pub(crate) const UNHEALTHY_FAILURE_THRESHOLD: u32 = 3;
-pub(crate) const UNHEALTHY_COOLDOWN_MS: u64 = 15_000;
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct UpstreamStatus {
-    pub endpoint: String,
-    pub healthy: bool,
-    pub consecutive_failures: u32,
-    #[ts(type = "number")]
-    pub ewma_latency_ms: u64,
-    #[ts(type = "number")]
-    pub total_requests: u64,
-    #[ts(type = "number")]
-    pub total_failures: u64,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct EndpointHealth {
-    pub(crate) consecutive_failures: AtomicU32,
-    pub(crate) unhealthy_until_ms: AtomicU64,
-    pub(crate) probe_inflight: AtomicBool,
-    pub(crate) ewma_latency_us: AtomicU64,
-    pub(crate) total_requests: AtomicU64,
-    pub(crate) total_failures: AtomicU64,
-}
-
-pub(crate) struct ProbeGuard<'a> {
-    pub(crate) health: &'a EndpointHealth,
-    pub(crate) defused: bool,
-}
-
-impl Drop for ProbeGuard<'_> {
-    fn drop(&mut self) {
-        if !self.defused {
-            self.health.probe_inflight.store(false, Ordering::Release);
-        }
-    }
-}
-
-impl EndpointHealth {
-    pub(crate) fn is_healthy(&self, now_ms: u64) -> bool {
-        let until = self.unhealthy_until_ms.load(Ordering::Relaxed);
-        until == 0 || now_ms >= until
-    }
-
-    pub(crate) fn try_select(&self, now_ms: u64) -> (bool, Option<ProbeGuard<'_>>) {
-        let until = self.unhealthy_until_ms.load(Ordering::Relaxed);
-        if until == 0 {
-            return (true, None);
-        }
-        if now_ms < until {
-            return (false, None);
-        }
-        if self
-            .probe_inflight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            return (
-                true,
-                Some(ProbeGuard {
-                    health: self,
-                    defused: false,
-                }),
-            );
-        }
-        (false, None)
-    }
-
-    pub(crate) fn record_success(&self, elapsed_us: u64) {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        self.unhealthy_until_ms.store(0, Ordering::Relaxed);
-        self.probe_inflight.store(false, Ordering::Release);
-
-        let prev = self.ewma_latency_us.load(Ordering::Relaxed);
-        let next = if prev == 0 {
-            elapsed_us.max(1)
-        } else {
-            (prev * 7 + elapsed_us.max(1)) / 8
-        };
-        self.ewma_latency_us.store(next, Ordering::Relaxed);
-    }
-
-    pub(crate) fn record_failure(&self, now_ms: u64) {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.total_failures.fetch_add(1, Ordering::Relaxed);
-        let fails = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        let was_open = self.unhealthy_until_ms.load(Ordering::Relaxed) != 0;
-        if was_open || fails >= UNHEALTHY_FAILURE_THRESHOLD {
-            self.unhealthy_until_ms.store(
-                now_ms.saturating_add(UNHEALTHY_COOLDOWN_MS),
-                Ordering::Relaxed,
-            );
-        }
-        self.probe_inflight.store(false, Ordering::Release);
-    }
-
-    pub(crate) fn snapshot(&self, label: String, now_ms: u64) -> UpstreamStatus {
-        UpstreamStatus {
-            endpoint: label,
-            healthy: self.is_healthy(now_ms),
-            consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
-            ewma_latency_ms: self.ewma_latency_us.load(Ordering::Relaxed) / 1000,
-            total_requests: self.total_requests.load(Ordering::Relaxed),
-            total_failures: self.total_failures.load(Ordering::Relaxed),
-        }
-    }
-}
+pub use crate::upstream_health::UpstreamStatus;
+pub(crate) use crate::upstream_health::{
+    EndpointHealth, ProbeGuard, is_upstream_error_rcode, wire_rcode,
+};
 
 pub(crate) fn parse_socket_addr(input: &str, default_port: u16) -> Result<SocketAddr> {
     if let Ok(addr) = input.parse::<SocketAddr>() {

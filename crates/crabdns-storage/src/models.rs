@@ -185,6 +185,9 @@ impl BoundedCountMap {
 pub struct StorageRuntimeMetrics {
     pub log_batches_written: u64,
     pub log_batch_failures: u64,
+    pub log_batches_retried: u64,
+    pub log_batches_degraded_dropped: u64,
+    pub log_disk_degraded: bool,
     pub log_flush_total_us: u64,
     pub log_pruned_total: u64,
 }

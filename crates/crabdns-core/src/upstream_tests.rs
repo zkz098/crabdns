@@ -1,5 +1,8 @@
 use super::*;
-use crate::upstream_transport::{UNHEALTHY_COOLDOWN_MS, UNHEALTHY_FAILURE_THRESHOLD};
+use crate::upstream_health::{
+    UNHEALTHY_BASE_COOLDOWN_MS, UNHEALTHY_FAILURE_THRESHOLD, UNHEALTHY_MAX_COOLDOWN_MS,
+    compute_backoff_cooldown_ms,
+};
 use std::sync::atomic::AtomicU32;
 
 #[test]
@@ -180,7 +183,9 @@ fn test_half_open_single_probe_prevents_thundering_herd() {
     assert!(guard_during.is_none());
 
     // At cooldown expiry, only one concurrent caller wins the half-open probe.
-    let half_open_at = start + UNHEALTHY_COOLDOWN_MS;
+    let half_open_at = health.unhealthy_until_ms.load(Ordering::Relaxed);
+    assert!(half_open_at >= start + (UNHEALTHY_BASE_COOLDOWN_MS * 4 / 5));
+    assert!(half_open_at <= start + (UNHEALTHY_BASE_COOLDOWN_MS * 6 / 5));
     let (ok1, guard1) = health.try_select(half_open_at);
     assert!(ok1);
     assert!(guard1.is_some());
@@ -195,10 +200,112 @@ fn test_half_open_single_probe_prevents_thundering_herd() {
     assert!(ok3);
     assert!(guard3.is_some());
 
-    // Completing a probe failure immediately re-arms cooldown.
+    // Completing a probe failure immediately re-arms cooldown with higher exponent.
     if let Some(mut g) = guard3 {
         g.defused = true;
     }
     health.record_failure(half_open_at + 10);
+    let second_until = health.unhealthy_until_ms.load(Ordering::Relaxed);
     assert!(!health.is_healthy(half_open_at + 11));
+    // Second backoff base is 2x UNHEALTHY_BASE_COOLDOWN_MS (10s ± 20%).
+    assert!(second_until >= half_open_at + 10 + (UNHEALTHY_BASE_COOLDOWN_MS * 2 * 4 / 5));
+    assert_eq!(health.backoff_exponent.load(Ordering::Relaxed), 2);
+
+    // Recovery resets backoff exponent.
+    health.record_success(2_000);
+    assert_eq!(health.backoff_exponent.load(Ordering::Relaxed), 0);
+    assert!(health.is_healthy(second_until));
+}
+
+#[test]
+fn test_exponential_backoff_bounds_and_cap() {
+    let c0 = compute_backoff_cooldown_ms(0, 42);
+    assert!((4_000..=6_000).contains(&c0), "c0={c0}");
+
+    let c1 = compute_backoff_cooldown_ms(1, 42);
+    assert!((8_000..=12_000).contains(&c1), "c1={c1}");
+
+    let c_max = compute_backoff_cooldown_ms(20, 99);
+    assert!(
+        (UNHEALTHY_MAX_COOLDOWN_MS * 4 / 5..=UNHEALTHY_MAX_COOLDOWN_MS).contains(&c_max),
+        "c_max={c_max}"
+    );
+}
+
+#[tokio::test]
+async fn test_servfail_failover_and_health_tracking() {
+    use hickory_proto::rr::Record;
+    use hickory_proto::rr::rdata::A;
+    use std::net::Ipv4Addr;
+
+    // Mock 1: always returns SERVFAIL.
+    let bad_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind bad");
+    let bad_addr = bad_sock.local_addr().expect("bad addr");
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 512];
+        while let Ok((len, peer)) = bad_sock.recv_from(&mut buf).await {
+            let req = Message::from_vec(&buf[..len]).expect("req");
+            let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+            resp.metadata.response_code = ResponseCode::ServFail;
+            if let Some(q) = req.queries.first() {
+                resp.add_query(q.clone());
+            }
+            let _ = bad_sock.send_to(&resp.to_vec().expect("enc"), peer).await;
+        }
+    });
+
+    // Mock 2: returns NOERROR with 1.2.3.4.
+    let good_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind good");
+    let good_addr = good_sock.local_addr().expect("good addr");
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 512];
+        while let Ok((len, peer)) = good_sock.recv_from(&mut buf).await {
+            let req = Message::from_vec(&buf[..len]).expect("req");
+            let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+            resp.metadata.response_code = ResponseCode::NoError;
+            if let Some(q) = req.queries.first() {
+                resp.add_query(q.clone());
+                resp.add_answer(Record::from_rdata(
+                    q.name.clone(),
+                    60,
+                    RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+                ));
+            }
+            let _ = good_sock.send_to(&resp.to_vec().expect("enc"), peer).await;
+        }
+    });
+
+    let mut q = Message::new(0x1337, MessageType::Query, OpCode::Query);
+    q.add_query(Query::query(
+        Name::from_ascii("example.test.").unwrap(),
+        RecordType::A,
+    ));
+    let wire = q.to_vec().unwrap();
+
+    // Failover skips SERVFAIL upstream and succeeds on healthy secondary.
+    let pool = UpstreamPool::new_with_strategy(
+        &[format!("udp://{bad_addr}"), format!("udp://{good_addr}")],
+        500,
+        UpstreamStrategy::Failover,
+    )
+    .expect("pool");
+    let (resp_wire, label) = pool.exchange(&wire).await.expect("failover ok");
+    let parsed = Message::from_vec(&resp_wire).expect("resp");
+    assert_eq!(parsed.response_code, ResponseCode::NoError);
+    assert_eq!(label, format!("udp://{good_addr}"));
+    let snap = pool.health_snapshot();
+    assert_eq!(snap[0].total_failures, 1);
+    assert_eq!(snap[0].ewma_latency_ms, 0);
+    assert_eq!(snap[1].total_failures, 0);
+
+    // When all upstreams return SERVFAIL, the SERVFAIL packet is still returned (and failures tracked).
+    let all_bad = UpstreamPool::new(&[format!("udp://{bad_addr}")], 500).expect("all_bad");
+    for _ in 0..UNHEALTHY_FAILURE_THRESHOLD {
+        let (resp_wire, _) = all_bad.exchange(&wire).await.expect("servfail returned");
+        assert_eq!(
+            Message::from_vec(&resp_wire).unwrap().response_code,
+            ResponseCode::ServFail
+        );
+    }
+    assert!(!all_bad.health_snapshot()[0].healthy);
 }

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::cf_cdn::CfCdnConfig;
+use crate::dnssec_anchors::DnssecNta;
 use crate::error::{CoreError, Result};
 use crate::safesearch::SafeSearchConfig;
 
@@ -244,6 +245,8 @@ pub struct Config {
     pub custom_rules: Vec<String>,
     #[serde(default = "default_log_retention_hours")]
     pub log_retention_hours: u64,
+    #[serde(default = "default_log_max_disk_mb")]
+    pub log_max_disk_mb: u64,
     #[serde(default)]
     pub block_mode: BlockMode,
     #[serde(default)]
@@ -294,6 +297,10 @@ pub struct Config {
     pub ecs_ipv6_prefix: u8,
     #[serde(default)]
     pub dnssec_enabled: bool,
+    #[serde(default)]
+    pub dnssec_trust_anchors: Vec<String>,
+    #[serde(default)]
+    pub dnssec_ntas: Vec<DnssecNta>,
     #[serde(default)]
     pub hosts_enabled: bool,
     #[serde(default)]
@@ -415,6 +422,10 @@ fn default_log_retention_hours() -> u64 {
     24
 }
 
+fn default_log_max_disk_mb() -> u64 {
+    256
+}
+
 fn default_web_username() -> String {
     "admin".to_string()
 }
@@ -486,6 +497,7 @@ impl Default for Config {
             upstream_timeout_ms: default_upstream_timeout_ms(),
             custom_rules: Vec::new(),
             log_retention_hours: default_log_retention_hours(),
+            log_max_disk_mb: default_log_max_disk_mb(),
             block_mode: BlockMode::default(),
             allow_cidrs: Vec::new(),
             deny_cidrs: Vec::new(),
@@ -511,6 +523,8 @@ impl Default for Config {
             ecs_ipv4_prefix: default_ecs_ipv4_prefix(),
             ecs_ipv6_prefix: default_ecs_ipv6_prefix(),
             dnssec_enabled: false,
+            dnssec_trust_anchors: Vec::new(),
+            dnssec_ntas: Vec::new(),
             hosts_enabled: false,
             hosts_path: None,
             dhcp_leases_enabled: false,

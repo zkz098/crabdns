@@ -101,6 +101,7 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         cache_persist_enabled: Some(cfg.cache_persist_enabled),
         upstream_timeout_ms: cfg.upstream_timeout_ms,
         log_retention_hours: cfg.log_retention_hours,
+        log_max_disk_mb: Some(cfg.log_max_disk_mb),
         block_mode: Some(cfg.block_mode),
         allow_cidrs: Some(cfg.allow_cidrs.clone()),
         deny_cidrs: Some(cfg.deny_cidrs.clone()),
@@ -114,6 +115,8 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         ecs_ipv4_prefix: Some(cfg.ecs_ipv4_prefix),
         ecs_ipv6_prefix: Some(cfg.ecs_ipv6_prefix),
         dnssec_enabled: Some(cfg.dnssec_enabled),
+        dnssec_trust_anchors: Some(cfg.dnssec_trust_anchors.clone()),
+        dnssec_ntas: Some(cfg.dnssec_ntas.clone()),
         hosts_enabled: Some(cfg.hosts_enabled),
         hosts_path: cfg.hosts_path.clone(),
         dhcp_leases_enabled: Some(cfg.dhcp_leases_enabled),
@@ -385,6 +388,7 @@ fn merge_config_payload(current: &Config, mut payload: ConfigUpdatePayload) -> A
     Ok(next)
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpdatePayload) {
     next.cname_cloaking_blocking = payload
         .cname_cloaking_blocking
@@ -398,6 +402,17 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
     next.ecs_ipv4_prefix = payload.ecs_ipv4_prefix.unwrap_or(current.ecs_ipv4_prefix);
     next.ecs_ipv6_prefix = payload.ecs_ipv6_prefix.unwrap_or(current.ecs_ipv6_prefix);
     next.dnssec_enabled = payload.dnssec_enabled.unwrap_or(current.dnssec_enabled);
+    if let Some(mb) = payload.log_max_disk_mb
+        && mb > 0
+    {
+        next.log_max_disk_mb = mb;
+    }
+    if let Some(anchors) = payload.dnssec_trust_anchors {
+        next.dnssec_trust_anchors = clean_string_list(anchors);
+    }
+    if let Some(ntas) = payload.dnssec_ntas {
+        next.dnssec_ntas = ntas;
+    }
     next.hosts_enabled = payload.hosts_enabled.unwrap_or(current.hosts_enabled);
     next.hosts_path = merge_opt_string(payload.hosts_path, current.hosts_path.as_deref());
     next.dhcp_leases_enabled = payload
@@ -570,6 +585,7 @@ pub(crate) fn apply_compiled_to_pipeline(
     pipe.set_block_mode(next.block_mode);
     pipe.set_cname_cloaking(next.cname_cloaking_blocking);
     pipe.set_dnssec_enabled(next.dnssec_enabled);
+    let _ = pipe.reload_dnssec_anchors(&next.dnssec_trust_anchors, &next.dnssec_ntas);
     pipe.set_hosts_enabled(next.hosts_enabled);
     pipe.set_dhcp_leases_enabled(next.dhcp_leases_enabled);
     pipe.set_dhcp_leases_forward(

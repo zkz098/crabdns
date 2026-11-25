@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwap;
 use foldhash::fast::RandomState;
 use hickory_proto::dnssec::rdata::{DNSKEY, DNSSECRData, DS, RRSIG};
 use hickory_proto::dnssec::{TrustAnchors, Verifier};
@@ -9,6 +10,7 @@ use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use moka::sync::Cache;
 
+use crate::dnssec_anchors::{DnssecNta, NtaList, parse_trust_anchors};
 use crate::error::{CoreError, Result};
 use crate::singleflight::{FlightRole, Singleflight, wait_follower};
 use crate::upstream::{UpstreamPool, next_tx_id};
@@ -39,7 +41,8 @@ pub enum ValidationOutcome {
 }
 
 pub struct DnssecValidator {
-    trust_anchors: TrustAnchors,
+    trust_anchors: ArcSwap<TrustAnchors>,
+    ntas: ArcSwap<NtaList>,
     zone_cache: Cache<String, ZoneCacheEntry, RandomState>,
     zone_inflight: Arc<Singleflight<String, Option<Vec<DNSKEY>>>>,
     unsynced_clock_warned: AtomicBool,
@@ -58,11 +61,27 @@ impl DnssecValidator {
             .time_to_live(ZONE_CACHE_TTL)
             .build_with_hasher(RandomState::default());
         Self {
-            trust_anchors,
+            trust_anchors: ArcSwap::from_pointee(trust_anchors),
+            ntas: ArcSwap::from_pointee(NtaList::default()),
             zone_cache,
             zone_inflight: Arc::new(Singleflight::new()),
             unsynced_clock_warned: AtomicBool::new(false),
         }
+    }
+
+    /// Atomically reloads root trust anchors and RFC 7646 Negative Trust Anchors,
+    /// invalidating cached zone keys so changes take effect immediately.
+    pub fn reload_anchors(&self, trust_anchor_lines: &[String], ntas: &[DnssecNta]) -> Result<()> {
+        let parsed_anchors = parse_trust_anchors(trust_anchor_lines)?;
+        let compiled_ntas = NtaList::compile(ntas)?;
+        self.trust_anchors.store(Arc::new(parsed_anchors));
+        self.ntas.store(Arc::new(compiled_ntas));
+        self.zone_cache.invalidate_all();
+        Ok(())
+    }
+
+    pub fn is_nta_covered(&self, domain: &str, now_unix_secs: i64) -> bool {
+        self.ntas.load().is_covered(domain, now_unix_secs)
     }
 
     fn get_cached_zone(&self, zone: &str) -> Option<ZoneState> {
@@ -116,7 +135,10 @@ impl DnssecValidator {
         }
 
         let now_secs = (raw_unix_secs & 0xFFFF_FFFF) as u32;
-        let outcome = self.validate_message(&msg, upstream, now_secs).await;
+        let now_unix_i64 = i64::try_from(raw_unix_secs).unwrap_or(i64::MAX);
+        let outcome = self
+            .validate_message_at(&msg, upstream, now_secs, now_unix_i64)
+            .await;
 
         match outcome {
             ValidationOutcome::Bogus => Err(CoreError::Protocol(
@@ -147,7 +169,27 @@ impl DnssecValidator {
         upstream: &UpstreamPool,
         now_secs: u32,
     ) -> ValidationOutcome {
+        self.validate_message_at(msg, upstream, now_secs, i64::from(now_secs))
+            .await
+    }
+
+    async fn validate_message_at(
+        &self,
+        msg: &Message,
+        upstream: &UpstreamPool,
+        now_secs: u32,
+        now_unix_secs: i64,
+    ) -> ValidationOutcome {
         if msg.response_code == ResponseCode::ServFail {
+            return ValidationOutcome::Insecure;
+        }
+
+        // RFC 7646: bypass DNSSEC validation for zones covered by an active NTA.
+        let ntas = self.ntas.load();
+        if !ntas.is_empty()
+            && let Some(q) = msg.queries.first()
+            && ntas.is_covered(&q.name().to_ascii(), now_unix_secs)
+        {
             return ValidationOutcome::Insecure;
         }
 
@@ -325,9 +367,10 @@ impl DnssecValidator {
             return Err(CoreError::Protocol("missing root DNSKEY".to_string()));
         }
 
+        let anchors = self.trust_anchors.load();
         let trusted_ksks: Vec<DNSKEY> = keys
             .iter()
-            .filter(|k| self.trust_anchors.contains(k.public_key()))
+            .filter(|k| anchors.contains(k.public_key()))
             .cloned()
             .collect();
         if trusted_ksks.is_empty() {
@@ -699,5 +742,45 @@ mod tests {
             &[dnskey],
             1_500_000_000,
         ));
+    }
+
+    #[tokio::test]
+    async fn test_nta_bypasses_validation_until_expiry() {
+        let validator = DnssecValidator::default();
+        validator
+            .reload_anchors(
+                &[],
+                &[DnssecNta {
+                    domain: "broken.example".to_string(),
+                    expires_at_unix_secs: Some(1_900_000_000),
+                    reason: "signing outage".to_string(),
+                }],
+            )
+            .expect("reload nta");
+
+        let mut msg = Message::new(0x1234, MessageType::Response, OpCode::Query);
+        let qname = Name::from_ascii("www.broken.example.").unwrap();
+        msg.add_query(Query::query(qname.clone(), RecordType::A));
+        msg.add_answer(Record::from_rdata(
+            qname,
+            60,
+            RData::A(A(Ipv4Addr::new(93, 184, 216, 34))),
+        ));
+
+        // Dead upstream ensures validation would fail (Bogus) if NTA did not short-circuit.
+        let dead_upstream = UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 50).unwrap();
+        assert_eq!(
+            validator
+                .validate_message_at(&msg, &dead_upstream, 1_800_000_000, 1_800_000_000)
+                .await,
+            ValidationOutcome::Insecure
+        );
+        // Once expired, NTA no longer bypasses and dead upstream yields Bogus.
+        assert_eq!(
+            validator
+                .validate_message_at(&msg, &dead_upstream, 1_950_000_000, 1_950_000_000)
+                .await,
+            ValidationOutcome::Bogus
+        );
     }
 }

@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 
 use crate::tls::TlsManager;
 
-const MAX_LOGS_DISK_BYTES: u64 = 256 * 1024 * 1024;
+const BYTES_PER_MIB: u64 = 1024 * 1024;
 
 fn current_unix_ms() -> u64 {
     u64::try_from(
@@ -57,11 +57,13 @@ pub fn spawn_log_prune_task(
                     }
                 }
                 _ = interval.tick() => {
-                    let retention_hours = config.load().log_retention_hours;
+                    let cfg_now = config.load();
+                    let retention_hours = cfg_now.log_retention_hours;
+                    let max_disk_bytes = cfg_now.log_max_disk_mb.max(1).saturating_mul(BYTES_PER_MIB);
                     let st = Arc::clone(&storage);
                     match tokio::task::spawn_blocking(move || {
                         let expired = prune_logs_once(&st, retention_hours)?;
-                        let oversized = st.prune_oversized_logs(MAX_LOGS_DISK_BYTES)?;
+                        let oversized = st.prune_oversized_logs(max_disk_bytes)?;
                         Ok::<usize, anyhow::Error>(expired + oversized)
                     })
                     .await

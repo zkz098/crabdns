@@ -176,6 +176,7 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.cache_persist_enabled = saved_cfg.cache_persist_enabled;
     config.upstream_timeout_ms = saved_cfg.upstream_timeout_ms;
     config.log_retention_hours = saved_cfg.log_retention_hours;
+    config.log_max_disk_mb = saved_cfg.log_max_disk_mb;
     config.block_mode = saved_cfg.block_mode;
     config.allow_cidrs = saved_cfg.allow_cidrs;
     config.deny_cidrs = saved_cfg.deny_cidrs;
@@ -193,6 +194,8 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.ecs_ipv4_prefix = saved_cfg.ecs_ipv4_prefix;
     config.ecs_ipv6_prefix = saved_cfg.ecs_ipv6_prefix;
     config.dnssec_enabled = saved_cfg.dnssec_enabled;
+    config.dnssec_trust_anchors = saved_cfg.dnssec_trust_anchors;
+    config.dnssec_ntas = saved_cfg.dnssec_ntas;
     config.hosts_enabled = saved_cfg.hosts_enabled;
     config.hosts_path = saved_cfg.hosts_path;
     config.dhcp_leases_enabled = saved_cfg.dhcp_leases_enabled;
@@ -318,6 +321,9 @@ fn configure_pipeline(
         cfg.ecs_ipv6_prefix,
     )?;
     pipeline.set_dnssec_enabled(cfg.dnssec_enabled);
+    if let Err(err) = pipeline.reload_dnssec_anchors(&cfg.dnssec_trust_anchors, &cfg.dnssec_ntas) {
+        tracing::warn!(error = %err, "failed to load configured DNSSEC trust anchors/NTAs; using defaults");
+    }
     pipeline.set_hosts_enabled(cfg.hosts_enabled);
     if cfg.hosts_enabled {
         let resolved_hosts = cfg.hosts_path.as_deref().unwrap_or("/etc/hosts");

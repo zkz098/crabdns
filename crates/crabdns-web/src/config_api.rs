@@ -7,8 +7,9 @@ use axum::http::StatusCode;
 use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
     AccessController, AcmeChallengeType, BlockMode, CfCdnConfig, ClientRegistry, Config, DdrConfig,
-    DhcpLeaseTable, Dns64Config, EcsConfig, HostsTable, PrivatePtrRouter, SafeSearchConfig,
-    SplitDnsRule, SplitUpstreamRouter, UpstreamPool, UpstreamStrategy,
+    DhcpLeaseTable, Dns64Config, DnssecNta, EcsConfig, HostsTable, PrivatePtrRouter,
+    SafeSearchConfig, SplitDnsRule, SplitUpstreamRouter, UpstreamPool, UpstreamStrategy,
+    dnssec_anchors::{normalize_nta_entries, parse_trust_anchors},
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -44,6 +45,8 @@ pub struct ConfigResponse {
     pub upstream_timeout_ms: u64,
     #[ts(type = "number")]
     pub log_retention_hours: u64,
+    #[ts(type = "number")]
+    pub log_max_disk_mb: u64,
     pub block_mode: BlockMode,
     pub allow_cidrs: Vec<String>,
     pub deny_cidrs: Vec<String>,
@@ -59,6 +62,8 @@ pub struct ConfigResponse {
     pub ecs_ipv4_prefix: u8,
     pub ecs_ipv6_prefix: u8,
     pub dnssec_enabled: bool,
+    pub dnssec_trust_anchors: Vec<String>,
+    pub dnssec_ntas: Vec<DnssecNta>,
     pub hosts_enabled: bool,
     pub hosts_path: Option<String>,
     pub dhcp_leases_enabled: bool,
@@ -124,6 +129,7 @@ impl From<&Config> for ConfigResponse {
             cache_persist_enabled: cfg.cache_persist_enabled,
             upstream_timeout_ms: cfg.upstream_timeout_ms,
             log_retention_hours: cfg.log_retention_hours,
+            log_max_disk_mb: cfg.log_max_disk_mb,
             block_mode: cfg.block_mode,
             allow_cidrs: cfg.allow_cidrs.clone(),
             deny_cidrs: cfg.deny_cidrs.clone(),
@@ -139,6 +145,8 @@ impl From<&Config> for ConfigResponse {
             ecs_ipv4_prefix: cfg.ecs_ipv4_prefix,
             ecs_ipv6_prefix: cfg.ecs_ipv6_prefix,
             dnssec_enabled: cfg.dnssec_enabled,
+            dnssec_trust_anchors: cfg.dnssec_trust_anchors.clone(),
+            dnssec_ntas: cfg.dnssec_ntas.clone(),
             hosts_enabled: cfg.hosts_enabled,
             hosts_path: cfg.hosts_path.clone(),
             dhcp_leases_enabled: cfg.dhcp_leases_enabled,
@@ -206,6 +214,9 @@ pub struct ConfigUpdatePayload {
     #[ts(type = "number")]
     pub log_retention_hours: u64,
     #[serde(default)]
+    #[ts(type = "number | null")]
+    pub log_max_disk_mb: Option<u64>,
+    #[serde(default)]
     pub block_mode: Option<BlockMode>,
     #[serde(default)]
     pub allow_cidrs: Option<Vec<String>>,
@@ -231,6 +242,10 @@ pub struct ConfigUpdatePayload {
     pub ecs_ipv6_prefix: Option<u8>,
     #[serde(default)]
     pub dnssec_enabled: Option<bool>,
+    #[serde(default)]
+    pub dnssec_trust_anchors: Option<Vec<String>>,
+    #[serde(default)]
+    pub dnssec_ntas: Option<Vec<DnssecNta>>,
     #[serde(default)]
     pub hosts_enabled: Option<bool>,
     #[serde(default)]
@@ -446,6 +461,21 @@ pub async fn update_config(
     let ecs_ipv4_prefix = payload.ecs_ipv4_prefix.unwrap_or(current.ecs_ipv4_prefix);
     let ecs_ipv6_prefix = payload.ecs_ipv6_prefix.unwrap_or(current.ecs_ipv6_prefix);
     let dnssec_enabled = payload.dnssec_enabled.unwrap_or(current.dnssec_enabled);
+    let dnssec_trust_anchors = clean_string_list(
+        payload
+            .dnssec_trust_anchors
+            .unwrap_or_else(|| current.dnssec_trust_anchors.clone()),
+    );
+    let dnssec_ntas = normalize_nta_entries(
+        &payload
+            .dnssec_ntas
+            .unwrap_or_else(|| current.dnssec_ntas.clone()),
+    )
+    .map_err(|err| bad_request(err.to_string()))?;
+    let log_max_disk_mb = payload.log_max_disk_mb.unwrap_or(current.log_max_disk_mb);
+    if log_max_disk_mb == 0 {
+        return Err(bad_request("log_max_disk_mb must be > 0"));
+    }
     let hosts_enabled = payload.hosts_enabled.unwrap_or(current.hosts_enabled);
     let hosts_path = merge_opt_string(payload.hosts_path, current.hosts_path.as_deref());
     let dhcp_leases_enabled = payload
@@ -557,6 +587,7 @@ pub async fn update_config(
         .unwrap_or(current.cache_persist_enabled);
 
     // Phase 1: Validate and build all runtime objects without mutating live state.
+    parse_trust_anchors(&dnssec_trust_anchors).map_err(|err| bad_request(err.to_string()))?;
     Dns64Config::compile(dns64_enabled, &dns64_prefixes)
         .map_err(|err| bad_request(err.to_string()))?;
     if let Err(err) = parse_cidr_list(&trusted_proxies) {
@@ -665,6 +696,7 @@ pub async fn update_config(
     next.cache_persist_enabled = cache_persist_enabled;
     next.upstream_timeout_ms = payload.upstream_timeout_ms;
     next.log_retention_hours = payload.log_retention_hours;
+    next.log_max_disk_mb = log_max_disk_mb;
     next.block_mode = block_mode;
     next.allow_cidrs = allow_cidrs;
     next.deny_cidrs = deny_cidrs;
@@ -678,6 +710,8 @@ pub async fn update_config(
     next.ecs_ipv4_prefix = ecs_ipv4_prefix;
     next.ecs_ipv6_prefix = ecs_ipv6_prefix;
     next.dnssec_enabled = dnssec_enabled;
+    next.dnssec_trust_anchors = dnssec_trust_anchors.clone();
+    next.dnssec_ntas = dnssec_ntas.clone();
     next.hosts_enabled = hosts_enabled;
     next.hosts_path = hosts_path;
     next.dhcp_leases_enabled = dhcp_leases_enabled;
@@ -748,6 +782,7 @@ pub async fn update_config(
     pipe.set_block_mode(block_mode);
     pipe.set_cname_cloaking(cname_cloaking_blocking);
     pipe.set_dnssec_enabled(dnssec_enabled);
+    let _ = pipe.reload_dnssec_anchors(&dnssec_trust_anchors, &dnssec_ntas);
     pipe.set_hosts_enabled(hosts_enabled);
     pipe.set_dhcp_leases_enabled(dhcp_leases_enabled);
     pipe.set_dhcp_leases_forward(dhcp_leases_forward_enabled, dhcp_leases_domain);

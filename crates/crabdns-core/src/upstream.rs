@@ -22,8 +22,8 @@ use crate::upstream_transport::{
     ConnPool, EndpointHealth, H3Session, ProbeGuard, UdpSocketPool, build_doq_client_config,
     build_h3_client_config, exchange_doh, exchange_doq_addrs, exchange_dot_addrs,
     exchange_h3_addrs, exchange_tcp, exchange_tcp_pooled, exchange_udp, is_udp_truncated,
-    parse_h3_url, parse_socket_addr, try_exchange_doq_pooled, try_exchange_dot_pooled,
-    try_exchange_h3_pooled,
+    is_upstream_error_rcode, parse_h3_url, parse_socket_addr, try_exchange_doq_pooled,
+    try_exchange_dot_pooled, try_exchange_h3_pooled, wire_rcode,
 };
 pub(crate) use crate::upstream_transport::{read_tcp_framed, send_tcp_framed, split_host_port};
 
@@ -369,6 +369,12 @@ async fn query_bootstrap_record(
     Ok((ips, min_ttl))
 }
 
+enum EndpointAttempt {
+    Ok((Vec<u8>, String)),
+    ErrorResponse((Vec<u8>, String)),
+    TransportErr(CoreError),
+}
+
 pub struct UpstreamPool {
     endpoints: Vec<UpstreamEndpoint>,
     health: Vec<EndpointHealth>,
@@ -553,11 +559,20 @@ impl UpstreamPool {
         query_wire: &[u8],
     ) -> Result<(Vec<u8>, String)> {
         let mut last_err = CoreError::Upstream("no upstream endpoints configured".to_string());
+        let mut fallback_err_resp: Option<(Vec<u8>, String)> = None;
         for (idx, guard) in candidates {
             match self.try_endpoint(idx, query_wire, guard).await {
-                Ok(ok) => return Ok(ok),
-                Err(err) => last_err = err,
+                EndpointAttempt::Ok(ok) => return Ok(ok),
+                EndpointAttempt::ErrorResponse(resp) => {
+                    if fallback_err_resp.is_none() {
+                        fallback_err_resp = Some(resp);
+                    }
+                }
+                EndpointAttempt::TransportErr(err) => last_err = err,
             }
+        }
+        if let Some(resp) = fallback_err_resp {
+            return Ok(resp);
         }
         Err(last_err)
     }
@@ -567,13 +582,45 @@ impl UpstreamPool {
         candidates: Vec<(usize, Option<ProbeGuard<'_>>)>,
         query_wire: &[u8],
     ) -> Result<(Vec<u8>, String)> {
+        let fallback_err_resp: std::sync::Mutex<Option<(Vec<u8>, String)>> =
+            std::sync::Mutex::new(None);
+        let fallback_ref = &fallback_err_resp;
         let futs: Vec<_> = candidates
             .into_iter()
-            .map(|(idx, guard)| Box::pin(self.try_endpoint(idx, query_wire, guard)))
+            .map(|(idx, guard)| {
+                Box::pin(async move {
+                    match self.try_endpoint(idx, query_wire, guard).await {
+                        EndpointAttempt::Ok(ok) => Ok(ok),
+                        EndpointAttempt::ErrorResponse(resp) => {
+                            let label = resp.1.clone();
+                            let rcode = wire_rcode(&resp.0);
+                            let mut slot = fallback_ref
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if slot.is_none() {
+                                *slot = Some(resp);
+                            }
+                            Err(CoreError::Upstream(format!(
+                                "upstream {label} returned error rcode {rcode}"
+                            )))
+                        }
+                        EndpointAttempt::TransportErr(err) => Err(err),
+                    }
+                })
+            })
             .collect();
         match select_ok(futs).await {
             Ok((res, _remaining)) => Ok(res),
-            Err(err) => Err(err),
+            Err(err) => {
+                if let Some(resp) = fallback_err_resp
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    return Ok(resp);
+                }
+                Err(err)
+            }
         }
     }
 
@@ -582,7 +629,7 @@ impl UpstreamPool {
         idx: usize,
         query_wire: &[u8],
         mut probe_guard: Option<ProbeGuard<'_>>,
-    ) -> Result<(Vec<u8>, String)> {
+    ) -> EndpointAttempt {
         let endpoint = &self.endpoints[idx];
         let health = &self.health[idx];
         let label = endpoint_label(endpoint);
@@ -591,12 +638,22 @@ impl UpstreamPool {
         match tokio::time::timeout(self.timeout, self.exchange_one(idx, endpoint, query_wire)).await
         {
             Ok(Ok(resp)) => {
-                let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 if let Some(ref mut g) = probe_guard {
                     g.defused = true;
                 }
+                if is_upstream_error_rcode(&resp) {
+                    let rcode = wire_rcode(&resp);
+                    tracing::warn!(
+                        upstream = %label,
+                        rcode,
+                        "upstream returned server error RCODE; marking unhealthy candidate"
+                    );
+                    health.record_error_response(monotonic_now_ms());
+                    return EndpointAttempt::ErrorResponse((resp, label));
+                }
+                let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 health.record_success(elapsed_us);
-                Ok((resp, label))
+                EndpointAttempt::Ok((resp, label))
             }
             Ok(Err(err)) => {
                 tracing::warn!(upstream = %label, error = %err, "upstream query failed");
@@ -604,7 +661,7 @@ impl UpstreamPool {
                     g.defused = true;
                 }
                 health.record_failure(monotonic_now_ms());
-                Err(err)
+                EndpointAttempt::TransportErr(err)
             }
             Err(_) => {
                 tracing::warn!(upstream = %label, "upstream query timed out");
@@ -612,7 +669,9 @@ impl UpstreamPool {
                     g.defused = true;
                 }
                 health.record_failure(monotonic_now_ms());
-                Err(CoreError::Upstream(format!("upstream {label} timed out")))
+                EndpointAttempt::TransportErr(CoreError::Upstream(format!(
+                    "upstream {label} timed out"
+                )))
             }
         }
     }
