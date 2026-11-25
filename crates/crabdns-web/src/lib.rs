@@ -26,6 +26,7 @@ pub mod clients_api;
 pub mod config_api;
 pub mod config_history_api;
 pub mod controls;
+pub mod diagnostics_api;
 pub mod doh;
 pub mod metrics;
 pub mod proxy;
@@ -251,6 +252,10 @@ pub fn build_router_with_managers(
         .route("/api/update/check", post(update_api::check_update))
         .route("/api/update/apply", post(update_api::apply_update))
         .route("/api/system/restart", post(update_api::restart_service))
+        .route(
+            "/api/system/diagnostics",
+            post(diagnostics_api::run_system_diagnostics),
+        )
         .route("/api/cf-cdn/status", get(controls::get_cf_cdn_status))
         .route("/api/cf-cdn/test", post(controls::trigger_cf_cdn_test));
 
