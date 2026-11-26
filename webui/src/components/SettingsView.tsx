@@ -18,6 +18,13 @@ import { SetupGuideCard } from "./SetupGuideCard";
 import { SplitDnsList } from "./SplitDnsList";
 import { UpstreamList } from "./UpstreamList";
 import type { SplitDnsRule } from "../types/SplitDnsRule";
+import type { UpdateAction } from "./types";
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
 
 interface SettingsViewProps {
   configData: ConfigResponse | null;
@@ -189,7 +196,7 @@ interface SettingsViewProps {
   onRefreshHistory?: () => Promise<void> | void;
   onRollbackConfig?: (id: string) => Promise<void> | void;
   updateStatus?: UpdateStatusResponse | null;
-  updateBusy?: boolean;
+  updateAction?: UpdateAction;
   updateMessage?: string;
   updateIsError?: boolean;
   onCheckUpdate?: () => Promise<void> | void;
@@ -199,6 +206,35 @@ interface SettingsViewProps {
 
 export function SettingsView(props: SettingsViewProps) {
   const [advancedOpen, setAdvancedOpen] = createSignal(false);
+
+  const updatePhase = () => props.updateStatus?.phase ?? "idle";
+  const isCheckingUpdate = () =>
+    props.updateAction === "check" || (props.updateAction === null && updatePhase() === "checking");
+  const isApplyingUpdate = () =>
+    props.updateAction === "apply" ||
+    updatePhase() === "downloading" ||
+    updatePhase() === "installing";
+  const isRestartingService = () => props.updateAction === "restart";
+  const isUpdateBusy = () =>
+    (props.updateAction ?? null) !== null || Boolean(props.updateStatus?.busy);
+
+  const updateTotalBytes = () =>
+    props.updateStatus?.total_bytes ?? props.updateStatus?.asset_size ?? null;
+  const updateDownloadedBytes = () => props.updateStatus?.downloaded_bytes ?? 0;
+  const updateProgressPercent = (): number | null => {
+    if (updatePhase() === "installing") return 100;
+    const total = updateTotalBytes();
+    if (total !== null && total > 0) {
+      return Math.min(100, Math.round((updateDownloadedBytes() / total) * 100));
+    }
+    return null;
+  };
+  const updatePhaseLabel = () => {
+    const phase = updatePhase();
+    if (phase === "installing") return t("updatePhaseInstalling");
+    if (phase === "downloading") return t("updatePhaseDownloading");
+    return t("updatePhasePreparing");
+  };
 
   return (
     <div class="animate-view-enter rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-4 sm:p-6 space-y-6">
@@ -1741,18 +1777,18 @@ export function SettingsView(props: SettingsViewProps) {
                 <Show when={props.onCheckUpdate}>
                   <button
                     type="button"
-                    disabled={props.updateBusy || props.updateStatus?.busy}
+                    disabled={isUpdateBusy()}
                     onClick={() => props.onCheckUpdate?.()}
                     class="h-8 px-3 rounded-lg text-xs font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#171717] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
                   >
                     <span
                       class={
-                        props.updateBusy
+                        isCheckingUpdate()
                           ? "i-ri-loader-4-line animate-spin text-sm"
                           : "i-ri-refresh-line text-sm"
                       }
                     />
-                    <span>{props.updateBusy ? t("updateCheckingBtn") : t("updateCheckBtn")}</span>
+                    <span>{isCheckingUpdate() ? t("updateCheckingBtn") : t("updateCheckBtn")}</span>
                   </button>
                 </Show>
 
@@ -1765,19 +1801,25 @@ export function SettingsView(props: SettingsViewProps) {
                 >
                   <button
                     type="button"
-                    disabled={props.updateBusy || props.updateStatus?.busy}
+                    disabled={isUpdateBusy()}
                     onClick={() => props.onApplyUpdate?.()}
                     class="h-8 px-3 rounded-lg text-xs font-medium bg-[#171717] hover:bg-[#383838] dark:bg-[#ededed] dark:hover:bg-[#d4d4d8] text-white dark:text-[#0a0a0a] flex items-center gap-1.5 cursor-pointer border-0 transition-colors disabled:opacity-50"
                   >
-                    <span class="i-ri-sparkling-2-line text-sm" />
-                    <span>{props.updateBusy ? t("updateApplyingBtn") : t("updateApplyBtn")}</span>
+                    <span
+                      class={
+                        isApplyingUpdate()
+                          ? "i-ri-loader-4-line animate-spin text-sm"
+                          : "i-ri-sparkling-2-line text-sm"
+                      }
+                    />
+                    <span>{isApplyingUpdate() ? t("updateApplyingBtn") : t("updateApplyBtn")}</span>
                   </button>
                 </Show>
 
                 <Show when={props.onRestartService}>
                   <button
                     type="button"
-                    disabled={props.updateBusy || props.updateStatus?.busy}
+                    disabled={isUpdateBusy()}
                     onClick={() => props.onRestartService?.()}
                     class={`h-8 px-3 rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50 ${
                       props.updateStatus?.restart_pending
@@ -1787,18 +1829,69 @@ export function SettingsView(props: SettingsViewProps) {
                   >
                     <span
                       class={
-                        props.updateBusy
+                        isRestartingService()
                           ? "i-ri-loader-4-line animate-spin text-sm"
                           : "i-ri-restart-line text-sm"
                       }
                     />
                     <span>
-                      {props.updateBusy ? t("updateRestartingBtn") : t("updateRestartBtn")}
+                      {isRestartingService() ? t("updateRestartingBtn") : t("updateRestartBtn")}
                     </span>
                   </button>
                 </Show>
               </div>
             </div>
+
+            <Show when={isApplyingUpdate()}>
+              <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3 space-y-2">
+                <div class="flex items-center justify-between gap-2 text-xs">
+                  <span class="flex items-center gap-1.5 font-medium text-[#171717] dark:text-[#ededed]">
+                    <span class="i-ri-loader-4-line animate-spin text-sm shrink-0" />
+                    <span>{updatePhaseLabel()}</span>
+                  </span>
+                  <span class="font-mono text-[11px] text-[#666666] dark:text-[#a1a1aa] tabular-nums shrink-0">
+                    {(() => {
+                      const total = updateTotalBytes();
+                      const done = updateDownloadedBytes();
+                      const pct = updateProgressPercent();
+                      if (total !== null && total > 0 && pct !== null) {
+                        return `${formatBytes(done)} / ${formatBytes(total)} (${pct}%)`;
+                      }
+                      if (done > 0) {
+                        return formatBytes(done);
+                      }
+                      if (pct !== null) {
+                        return `${pct}%`;
+                      }
+                      return "";
+                    })()}
+                  </span>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={updateProgressPercent() ?? undefined}
+                  class="h-2 w-full rounded-full overflow-hidden bg-[#eaeaea] dark:bg-[#262626]"
+                >
+                  <Show
+                    when={updateProgressPercent() !== null}
+                    fallback={
+                      <div class="h-full w-1/3 rounded-full bg-emerald-500 animate-pulse" />
+                    }
+                  >
+                    <div
+                      class={`h-full rounded-full transition-all duration-200 ease-out ${
+                        updatePhase() === "installing"
+                          ? "bg-emerald-500 animate-pulse"
+                          : "bg-[#171717] dark:bg-[#ededed]"
+                      }`}
+                      style={{ width: `${updateProgressPercent()}%` }}
+                    />
+                  </Show>
+                </div>
+              </div>
+            </Show>
 
             <Show when={props.updateMessage}>
               <div

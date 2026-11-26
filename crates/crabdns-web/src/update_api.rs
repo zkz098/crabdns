@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::Json;
 use axum::extract::State;
@@ -265,6 +265,23 @@ pub async fn download_and_install_update<F>(
 where
     F: FnMut(u64, Option<u64>),
 {
+    download_and_install_update_with_stage(client, data_dir, update, cfg, on_progress, || {}).await
+}
+
+/// Stream-download an [`AvailableUpdate`], verify `BLAKE3 + SHA-512 + size` in flight,
+/// invoke `on_installing` right before replacing the executable, and install the update.
+pub async fn download_and_install_update_with_stage<F, G>(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    update: &AvailableUpdate,
+    cfg: &UpdateConfig,
+    on_progress: F,
+    on_installing: G,
+) -> Result<(), String>
+where
+    F: FnMut(u64, Option<u64>),
+    G: FnOnce(),
+{
     let staging = data_dir.join(UPDATE_STAGING_DIR);
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)
@@ -275,6 +292,8 @@ where
         .download_and_verify(&update.inner, &staging, on_progress)
         .await
         .map_err(|e| format!("download or cryptographic verification failed: {e}"))?;
+
+    on_installing();
 
     let extract_dir = staging.join(format!("extracted-{}", update.version));
     let install_res = match &cfg.install_target {
@@ -316,6 +335,17 @@ fn install_to_custom_path(
 
 // ── Web API State & Handlers ─────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum UpdatePhase {
+    #[default]
+    Idle,
+    Checking,
+    Downloading,
+    Installing,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct UpdateStatusResponse {
@@ -327,6 +357,11 @@ pub struct UpdateStatusResponse {
     #[ts(type = "number | null")]
     pub asset_size: Option<u64>,
     pub busy: bool,
+    pub phase: UpdatePhase,
+    #[ts(type = "number")]
+    pub downloaded_bytes: u64,
+    #[ts(type = "number | null")]
+    pub total_bytes: Option<u64>,
     pub restart_pending: bool,
     pub last_checked_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
@@ -342,6 +377,7 @@ pub struct RestartResponse {
 #[derive(Default)]
 struct UpdateSnapshot {
     pending: Option<AvailableUpdate>,
+    phase: UpdatePhase,
     restart_pending: bool,
     last_checked_at: Option<DateTime<Utc>>,
     last_error: Option<String>,
@@ -349,6 +385,8 @@ struct UpdateSnapshot {
 
 pub struct UpdateManager {
     busy: AtomicBool,
+    downloaded_bytes: AtomicU64,
+    total_bytes: AtomicU64,
     snapshot: Mutex<UpdateSnapshot>,
     config_override: Mutex<Option<UpdateConfig>>,
     restart_tx: tokio::sync::watch::Sender<bool>,
@@ -359,6 +397,8 @@ impl Default for UpdateManager {
         let (restart_tx, _) = tokio::sync::watch::channel(false);
         Self {
             busy: AtomicBool::new(false),
+            downloaded_bytes: AtomicU64::new(0),
+            total_bytes: AtomicU64::new(0),
             snapshot: Mutex::new(UpdateSnapshot::default()),
             config_override: Mutex::new(None),
             restart_tx,
@@ -366,11 +406,12 @@ impl Default for UpdateManager {
     }
 }
 
-struct BusyGuard<'a>(&'a AtomicBool);
+struct BusyGuard<'a>(&'a UpdateManager);
 
 impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.reset_progress();
+        self.0.busy.store(false, Ordering::SeqCst);
     }
 }
 
@@ -414,8 +455,55 @@ impl UpdateManager {
         if self.busy.swap(true, Ordering::SeqCst) {
             None
         } else {
-            Some(BusyGuard(&self.busy))
+            Some(BusyGuard(self))
         }
+    }
+
+    fn reset_progress(&self) {
+        self.downloaded_bytes.store(0, Ordering::Relaxed);
+        self.total_bytes.store(0, Ordering::Relaxed);
+        let mut snap = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snap.phase = UpdatePhase::Idle;
+    }
+
+    fn set_phase(&self, phase: UpdatePhase) {
+        let mut snap = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snap.phase = phase;
+    }
+
+    fn begin_download(&self, expected_total: u64) {
+        self.downloaded_bytes.store(0, Ordering::Relaxed);
+        self.total_bytes.store(expected_total, Ordering::Relaxed);
+        let mut snap = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snap.phase = UpdatePhase::Downloading;
+    }
+
+    fn update_download_progress(&self, downloaded: u64, total: Option<u64>) {
+        self.downloaded_bytes.store(downloaded, Ordering::Relaxed);
+        if let Some(t) = total.filter(|&v| v > 0) {
+            self.total_bytes.store(t, Ordering::Relaxed);
+        }
+    }
+
+    fn begin_install(&self) {
+        let total = self.total_bytes.load(Ordering::Relaxed);
+        if total > 0 {
+            self.downloaded_bytes.store(total, Ordering::Relaxed);
+        }
+        let mut snap = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snap.phase = UpdatePhase::Installing;
     }
 
     fn record_check_success(&self, pending: Option<AvailableUpdate>) {
@@ -460,6 +548,8 @@ impl UpdateManager {
     #[must_use]
     pub fn status_snapshot(&self) -> UpdateStatusResponse {
         let busy = self.busy.load(Ordering::SeqCst);
+        let downloaded_bytes = self.downloaded_bytes.load(Ordering::Relaxed);
+        let total_raw = self.total_bytes.load(Ordering::Relaxed);
         let snap = self
             .snapshot
             .lock()
@@ -472,6 +562,9 @@ impl UpdateManager {
             asset_url: snap.pending.as_ref().map(|u| u.asset_url.clone()),
             asset_size: snap.pending.as_ref().map(|u| u.asset_size),
             busy,
+            phase: snap.phase,
+            downloaded_bytes,
+            total_bytes: (total_raw > 0).then_some(total_raw),
             restart_pending: snap.restart_pending,
             last_checked_at: snap.last_checked_at,
             last_error: snap.last_error.clone(),
@@ -496,6 +589,7 @@ pub async fn check_update(
             ),
         ));
     };
+    state.updater.set_phase(UpdatePhase::Checking);
 
     let cfg = state.updater.effective_config().map_err(|err| {
         (
@@ -545,6 +639,7 @@ pub async fn apply_update(
     let update = if let Some(u) = state.updater.cached_pending() {
         u
     } else {
+        state.updater.set_phase(UpdatePhase::Checking);
         match check_for_update_with_config(&state.http_client_private, &data_dir, &cfg).await {
             Ok(Some(u)) => {
                 state.updater.record_check_success(Some(u.clone()));
@@ -567,12 +662,18 @@ pub async fn apply_update(
         }
     };
 
-    if let Err(err) = download_and_install_update(
+    state.updater.begin_download(update.asset_size);
+    if let Err(err) = download_and_install_update_with_stage(
         &state.http_client_private,
         &data_dir,
         &update,
         &cfg,
-        |_, _| {},
+        |done, total| {
+            state.updater.update_download_progress(done, total);
+        },
+        || {
+            state.updater.begin_install();
+        },
     )
     .await
     {
@@ -790,5 +891,44 @@ mod tests {
             err.to_lowercase().contains("epoch") || err.to_lowercase().contains("rollback"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn update_manager_tracks_progress_and_resets_on_drop() {
+        let mgr = UpdateManager::new();
+        let initial = mgr.status_snapshot();
+        assert!(!initial.busy);
+        assert_eq!(initial.phase, UpdatePhase::Idle);
+        assert_eq!(initial.downloaded_bytes, 0);
+        assert_eq!(initial.total_bytes, None);
+
+        {
+            let _guard = mgr.try_acquire_busy().expect("acquire busy");
+            assert!(mgr.try_acquire_busy().is_none());
+
+            mgr.set_phase(UpdatePhase::Checking);
+            let checking = mgr.status_snapshot();
+            assert!(checking.busy);
+            assert_eq!(checking.phase, UpdatePhase::Checking);
+
+            mgr.begin_download(1024);
+            mgr.update_download_progress(512, Some(1024));
+            let downloading = mgr.status_snapshot();
+            assert_eq!(downloading.phase, UpdatePhase::Downloading);
+            assert_eq!(downloading.downloaded_bytes, 512);
+            assert_eq!(downloading.total_bytes, Some(1024));
+
+            mgr.begin_install();
+            let installing = mgr.status_snapshot();
+            assert_eq!(installing.phase, UpdatePhase::Installing);
+            assert_eq!(installing.downloaded_bytes, 1024);
+            assert_eq!(installing.total_bytes, Some(1024));
+        }
+
+        let after_drop = mgr.status_snapshot();
+        assert!(!after_drop.busy);
+        assert_eq!(after_drop.phase, UpdatePhase::Idle);
+        assert_eq!(after_drop.downloaded_bytes, 0);
+        assert_eq!(after_drop.total_bytes, None);
     }
 }

@@ -550,6 +550,9 @@ const en = {
   updateRestartingBtn: "Restarting...",
   updateRestartingMsg: "Service is restarting, waiting for reconnection...",
   updateRestartedMsg: "Service restarted successfully",
+  updatePhasePreparing: "Preparing update...",
+  updatePhaseDownloading: "Downloading & verifying update...",
+  updatePhaseInstalling: "Extracting & replacing binary...",
 
   settingsAdvancedTitle: "Advanced Settings",
   settingsAdvancedSummary:
@@ -1177,6 +1180,9 @@ const zhCN: Record<TranslationKey, string> = {
   updateRestartingBtn: "重启中...",
   updateRestartingMsg: "服务正在重启，等待重新连接...",
   updateRestartedMsg: "服务已成功重启",
+  updatePhasePreparing: "正在准备更新...",
+  updatePhaseDownloading: "正在下载并校验更新包...",
+  updatePhaseInstalling: "正在解压并替换二进制...",
 
   settingsAdvancedTitle: "高级设置",
   settingsAdvancedSummary:

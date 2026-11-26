@@ -1,4 +1,4 @@
-import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { ClientsView } from "./components/ClientsView";
 import { DashboardView } from "./components/DashboardView";
 import { Header } from "./components/Header";
@@ -9,7 +9,7 @@ import { RewritesView } from "./components/RewritesView";
 import { RulesView } from "./components/RulesView";
 import { SettingsView } from "./components/SettingsView";
 import { SetupWizardView } from "./components/SetupWizardView";
-import type { TabKey } from "./components/types";
+import type { TabKey, UpdateAction } from "./components/types";
 import { t } from "./i18n";
 import type { AcmeChallengeType } from "./types/AcmeChallengeType";
 import type { AcmeStatusResponse } from "./types/AcmeStatusResponse";
@@ -175,7 +175,7 @@ export default function App() {
   const [backupIsError, setBackupIsError] = createSignal(false);
   const [backupBusy, setBackupBusy] = createSignal(false);
   const [updateStatus, setUpdateStatus] = createSignal<UpdateStatusResponse | null>(null);
-  const [updateBusy, setUpdateBusy] = createSignal(false);
+  const [updateAction, setUpdateAction] = createSignal<UpdateAction>(null);
   const [updateMessage, setUpdateMessage] = createSignal("");
   const [updateIsError, setUpdateIsError] = createSignal(false);
 
@@ -430,7 +430,7 @@ export default function App() {
 
   async function fetchUpdateStatus() {
     try {
-      const res = await fetch("/api/update/status");
+      const res = await fetch("/api/update/status", { cache: "no-store" });
       if (res.ok) {
         setUpdateStatus(await res.json());
       }
@@ -439,8 +439,28 @@ export default function App() {
     }
   }
 
+  const shouldPollUpdateProgress = createMemo(
+    () => updateAction() === "apply" || Boolean(updateStatus()?.busy),
+  );
+
+  createEffect(() => {
+    if (!shouldPollUpdateProgress()) return;
+    let inFlight = false;
+    const timer = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fetchUpdateStatus();
+      } finally {
+        inFlight = false;
+      }
+    }, 250);
+    onCleanup(() => clearInterval(timer));
+  });
+
   async function checkUpdate() {
-    setUpdateBusy(true);
+    if (updateAction() !== null || updateStatus()?.busy) return;
+    setUpdateAction("check");
     setUpdateIsError(false);
     setUpdateMessage("");
     try {
@@ -464,12 +484,13 @@ export default function App() {
       setUpdateIsError(true);
       setUpdateMessage(t("rulesNetworkError"));
     } finally {
-      setUpdateBusy(false);
+      setUpdateAction(null);
     }
   }
 
   async function applyUpdate() {
-    setUpdateBusy(true);
+    if (updateAction() !== null || updateStatus()?.busy) return;
+    setUpdateAction("apply");
     setUpdateIsError(false);
     setUpdateMessage("");
     try {
@@ -488,12 +509,13 @@ export default function App() {
       setUpdateIsError(true);
       setUpdateMessage(t("rulesNetworkError"));
     } finally {
-      setUpdateBusy(false);
+      setUpdateAction(null);
     }
   }
 
   async function restartService() {
-    setUpdateBusy(true);
+    if (updateAction() !== null || updateStatus()?.busy) return;
+    setUpdateAction("restart");
     setUpdateIsError(false);
     setUpdateMessage(t("updateRestartingMsg"));
     try {
@@ -502,7 +524,6 @@ export default function App() {
         setUpdateIsError(true);
         const errBody = await res.json().catch(() => null);
         setUpdateMessage(errBody?.error ?? t("rulesFailed"));
-        setUpdateBusy(false);
         return;
       }
       // Wait briefly for the process to shut down and re-exec, then poll /api/health
@@ -531,7 +552,7 @@ export default function App() {
       setUpdateIsError(true);
       setUpdateMessage(t("rulesNetworkError"));
     } finally {
-      setUpdateBusy(false);
+      setUpdateAction(null);
     }
   }
 
@@ -1785,7 +1806,7 @@ export default function App() {
                 onRefreshHistory={fetchConfigHistory}
                 onRollbackConfig={rollbackConfigSnapshot}
                 updateStatus={updateStatus()}
-                updateBusy={updateBusy()}
+                updateAction={updateAction()}
                 updateMessage={updateMessage()}
                 updateIsError={updateIsError()}
                 onCheckUpdate={checkUpdate}
