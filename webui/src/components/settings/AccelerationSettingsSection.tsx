@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { t } from "../../i18n";
 import { InfoTooltip } from "../InfoTooltip";
 import { SplitDnsList } from "../SplitDnsList";
+import { UpstreamGroupsCard } from "../UpstreamGroupsCard";
 import {
   MONO_INPUT_CLASS,
   NUMBER_INPUT_CLASS,
@@ -328,11 +329,21 @@ export function AccelerationSettingsSection(props: SettingsViewProps) {
         </div>
       </SettingsCard>
 
+      {/* Named Upstream Groups */}
+      <section class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-4 sm:p-5">
+        <UpstreamGroupsCard groups={props.upstreamGroups} onChange={props.onUpstreamGroupsChange} />
+      </section>
+
       {/* Split DNS Rules (SplitDnsList provides its own header) */}
       <section class="rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-4 sm:p-5">
         <SplitDnsList
           rules={props.splitDnsRules}
           onChange={props.onSplitDnsChange}
+          upstreamGroups={props.upstreamGroups}
+          matchMode={props.splitDnsMatchMode}
+          onMatchModeChange={props.onSplitDnsMatchModeChange}
+          splitBeforeClientUpstreams={props.splitDnsBeforeClientUpstreams}
+          onSplitBeforeClientUpstreamsChange={props.onSplitDnsBeforeClientUpstreamsChange}
           refreshing={props.refreshingSplitDns}
           onRefresh={props.onRefreshSplitDns}
         />

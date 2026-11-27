@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use crabdns_core::{Config, DnsPipeline, SplitUpstreamRouter};
+use crabdns_core::{Config, DnsPipeline, SplitUpstreamRouter, UpstreamGroupRegistry};
 use crabdns_storage::StorageEngine;
 
 use crate::RouterState;
@@ -12,8 +12,29 @@ use crate::subscriptions::{
     ApiError, build_subscription_http_client, fetch_subscription_text_with_policy,
 };
 
-/// Downloads all unique `domains_url` entries from `config.split_dns`, persists them in
-/// storage, and atomically reloads the pipeline's `SplitUpstreamRouter`.
+fn collect_split_dns_urls(config: &Config) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+    for rule in &config.split_dns {
+        for candidate in [
+            rule.domains_url.as_deref(),
+            rule.response_ip
+                .as_ref()
+                .and_then(|r| r.expected_ip_url.as_deref()),
+        ] {
+            if let Some(url) = candidate.map(str::trim).filter(|u| !u.is_empty())
+                && seen.insert(url.to_string())
+            {
+                urls.push(url.to_string());
+            }
+        }
+    }
+    urls
+}
+
+/// Downloads all unique `domains_url` and `response_ip.expected_ip_url` entries from
+/// `config.split_dns`, persists them in storage, and atomically reloads the pipeline's
+/// `SplitUpstreamRouter`.
 pub async fn refresh_split_dns_subscriptions_job(
     client: &reqwest::Client,
     config: &Config,
@@ -21,19 +42,7 @@ pub async fn refresh_split_dns_subscriptions_job(
     pipeline: &Arc<DnsPipeline>,
     allow_private: bool,
 ) -> Result<usize, String> {
-    let mut urls = Vec::new();
-    let mut seen = HashSet::new();
-    for rule in &config.split_dns {
-        if let Some(url) = rule
-            .domains_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|u| !u.is_empty())
-            && seen.insert(url.to_string())
-        {
-            urls.push(url.to_string());
-        }
-    }
+    let urls = collect_split_dns_urls(config);
     if urls.is_empty() {
         return Ok(0);
     }
@@ -59,19 +68,30 @@ pub async fn refresh_split_dns_subscriptions_job(
     if updated > 0 {
         let cfg_clone = config.clone();
         let st = Arc::clone(storage);
-        let router = tokio::task::spawn_blocking(move || {
-            SplitUpstreamRouter::new_with_resolver(
+        let (groups, router) = tokio::task::spawn_blocking(move || {
+            let groups = UpstreamGroupRegistry::compile(
+                &cfg_clone.upstream_groups,
+                cfg_clone.upstream_timeout_ms,
+                cfg_clone.upstream_strategy,
+                &cfg_clone.bootstrap_dns,
+            )?;
+            let router = SplitUpstreamRouter::new_full(
                 &cfg_clone.split_dns,
+                &groups,
+                cfg_clone.split_dns_match_mode,
                 cfg_clone.upstream_timeout_ms,
                 cfg_clone.upstream_strategy,
                 &cfg_clone.bootstrap_dns,
                 |url| st.load_split_dns_list(url).ok().flatten(),
-            )
+            )?;
+            Ok::<_, crabdns_core::CoreError>((groups, router))
         })
         .await
         .map_err(|err| err.to_string())?
         .map_err(|err| err.to_string())?;
+        pipeline.swap_upstream_groups(groups);
         pipeline.swap_split_dns(router);
+        pipeline.cache().flush();
     }
 
     Ok(updated)
@@ -96,20 +116,14 @@ pub async fn refresh_split_dns(
 }
 
 pub(crate) fn maybe_spawn_split_dns_sync(state: &RouterState, cfg: &Config) {
-    let needs_sync = cfg.split_dns.iter().any(|rule| {
-        rule.domains_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|u| !u.is_empty())
-            .is_some_and(|u| {
-                state
-                    .app
-                    .storage
-                    .load_split_dns_list(u)
-                    .ok()
-                    .flatten()
-                    .is_none()
-            })
+    let needs_sync = collect_split_dns_urls(cfg).into_iter().any(|u| {
+        state
+            .app
+            .storage
+            .load_split_dns_list(&u)
+            .ok()
+            .flatten()
+            .is_none()
     });
     if !needs_sync {
         return;

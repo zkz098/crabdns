@@ -15,6 +15,7 @@ pub mod error;
 pub mod filter;
 pub mod filter_rules;
 mod filter_trie;
+pub mod ip_set;
 pub mod lan;
 pub mod neighbor;
 pub mod pipeline;
@@ -28,12 +29,16 @@ pub mod safesearch;
 pub mod security;
 pub mod singleflight;
 pub mod split_dns;
+pub mod split_dns_config;
+mod split_dns_exec;
 mod split_dns_trie;
 pub mod svcb;
 pub mod upstream;
+pub mod upstream_groups;
 mod upstream_health;
 pub mod upstream_probe;
 mod upstream_probe_wire;
+mod upstream_proxy;
 mod upstream_transport;
 mod wire;
 mod wire_fast;
@@ -46,8 +51,8 @@ pub use clients::{
     ResolvedClientPolicy, ip_to_ptr_domain, validate_client_id, validate_client_identifier,
 };
 pub use config::{
-    AcmeChallengeType, BlockMode, CompiledUpstreamPolicy, Config, SplitDnsRule, UpstreamPolicy,
-    UpstreamStrategy,
+    AcmeChallengeType, BlockMode, CompiledUpstreamPolicy, Config, ResponseIpRule,
+    SplitDnsMatchMode, SplitDnsRule, UpstreamGroup, UpstreamPolicy, UpstreamStrategy,
 };
 pub use cookies::{CookieCheck, DnsCookieEngine};
 pub use device_names::{
@@ -75,5 +80,6 @@ pub use safesearch::SafeSearchConfig;
 pub use split_dns::SplitUpstreamRouter;
 pub use svcb::SvcbSanitizeOptions;
 pub use upstream::{UpstreamPool, UpstreamStatus};
+pub use upstream_groups::UpstreamGroupRegistry;
 pub use upstream_probe::{UpstreamCapabilities, UpstreamProtocol, probe_upstreams};
 pub use wire::build_raw_formerr;

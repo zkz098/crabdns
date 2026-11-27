@@ -8,7 +8,8 @@ use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
     AccessController, AcmeChallengeType, BlockMode, CfCdnConfig, ClientRegistry, Config, DdrConfig,
     DhcpLeaseTable, Dns64Config, DnssecNta, EcsConfig, HostsTable, PrivatePtrRouter,
-    SafeSearchConfig, SplitDnsRule, SplitUpstreamRouter, UpstreamPool, UpstreamStrategy,
+    SafeSearchConfig, SplitDnsMatchMode, SplitDnsRule, SplitUpstreamRouter, UpstreamGroup,
+    UpstreamGroupRegistry, UpstreamPool, UpstreamStrategy,
     dnssec_anchors::{normalize_nta_entries, parse_trust_anchors},
 };
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,9 @@ pub struct ConfigResponse {
     pub web_auth_enabled: bool,
     pub web_username: String,
     pub split_dns: Vec<SplitDnsRule>,
+    pub upstream_groups: Vec<UpstreamGroup>,
+    pub split_dns_match_mode: SplitDnsMatchMode,
+    pub split_dns_before_client_upstreams: bool,
     pub cname_cloaking_blocking: bool,
     pub doh_enabled: bool,
     pub allow_private_subscriptions: bool,
@@ -137,6 +141,9 @@ impl From<&Config> for ConfigResponse {
             web_auth_enabled: cfg.web_auth_enabled,
             web_username: cfg.web_username.clone(),
             split_dns: cfg.split_dns.clone(),
+            upstream_groups: cfg.upstream_groups.clone(),
+            split_dns_match_mode: cfg.split_dns_match_mode,
+            split_dns_before_client_upstreams: cfg.split_dns_before_client_upstreams,
             cname_cloaking_blocking: cfg.cname_cloaking_blocking,
             doh_enabled: cfg.doh_enabled,
             allow_private_subscriptions: cfg.allow_private_subscriptions,
@@ -226,6 +233,12 @@ pub struct ConfigUpdatePayload {
     pub rate_limit_qps: Option<u32>,
     #[serde(default)]
     pub split_dns: Option<Vec<SplitDnsRule>>,
+    #[serde(default)]
+    pub upstream_groups: Option<Vec<UpstreamGroup>>,
+    #[serde(default)]
+    pub split_dns_match_mode: Option<SplitDnsMatchMode>,
+    #[serde(default)]
+    pub split_dns_before_client_upstreams: Option<bool>,
     #[serde(default)]
     pub cname_cloaking_blocking: Option<bool>,
     #[serde(default)]
@@ -433,22 +446,22 @@ pub async fn update_config(
         .split_dns
         .unwrap_or_else(|| current.split_dns.clone())
         .into_iter()
-        .map(|rule| SplitDnsRule {
-            domain: rule.domain.trim().to_string(),
-            domains_file: rule
-                .domains_file
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty()),
-            domains_url: rule
-                .domains_url
-                .map(|u| u.trim().to_string())
-                .filter(|u| !u.is_empty()),
-            upstreams: clean_string_list(rule.upstreams),
-            fallback_to_default: rule.fallback_to_default,
-            policy: rule.policy.normalized(),
-        })
-        .filter(|r| !r.domain.is_empty() || r.domains_file.is_some() || r.domains_url.is_some())
+        .map(SplitDnsRule::normalized)
+        .filter(SplitDnsRule::has_target)
         .collect();
+    let upstream_groups: Vec<UpstreamGroup> = payload
+        .upstream_groups
+        .unwrap_or_else(|| current.upstream_groups.clone())
+        .into_iter()
+        .map(UpstreamGroup::normalized)
+        .filter(|g| !g.name.is_empty())
+        .collect();
+    let split_dns_match_mode = payload
+        .split_dns_match_mode
+        .unwrap_or(current.split_dns_match_mode);
+    let split_dns_before_client_upstreams = payload
+        .split_dns_before_client_upstreams
+        .unwrap_or(current.split_dns_before_client_upstreams);
     let cname_cloaking_blocking = payload
         .cname_cloaking_blocking
         .unwrap_or(current.cname_cloaking_blocking);
@@ -609,8 +622,17 @@ pub async fn update_config(
         &bootstrap_dns,
     )
     .map_err(|err| bad_request(err.to_string()))?;
-    let next_split_dns = SplitUpstreamRouter::new_with_resolver(
+    let next_upstream_groups = UpstreamGroupRegistry::compile(
+        &upstream_groups,
+        payload.upstream_timeout_ms,
+        strategy,
+        &bootstrap_dns,
+    )
+    .map_err(|err| bad_request(err.to_string()))?;
+    let next_split_dns = SplitUpstreamRouter::new_full(
         &split_dns,
+        &next_upstream_groups,
+        split_dns_match_mode,
         payload.upstream_timeout_ms,
         strategy,
         &bootstrap_dns,
@@ -628,6 +650,7 @@ pub async fn update_config(
 
     let next_clients = compile_clients_for_config(
         &state,
+        &next_upstream_groups,
         payload.upstream_timeout_ms,
         strategy,
         &bootstrap_dns,
@@ -702,6 +725,9 @@ pub async fn update_config(
     next.deny_cidrs = deny_cidrs;
     next.rate_limit_qps = rate_limit_qps;
     next.split_dns = split_dns;
+    next.upstream_groups = upstream_groups;
+    next.split_dns_match_mode = split_dns_match_mode;
+    next.split_dns_before_client_upstreams = split_dns_before_client_upstreams;
     next.cname_cloaking_blocking = cname_cloaking_blocking;
     next.doh_enabled = doh_enabled;
     next.allow_private_subscriptions = allow_private_subscriptions;
@@ -770,6 +796,8 @@ pub async fn update_config(
     pipe.swap_acl(next_acl);
     pipe.swap_ecs(next_ecs);
     pipe.swap_upstream(next_upstream);
+    pipe.swap_upstream_groups(next_upstream_groups);
+    pipe.set_split_dns_before_client_upstreams(split_dns_before_client_upstreams);
     pipe.swap_split_dns(next_split_dns);
     pipe.swap_private_ptr(next_private_ptr);
     pipe.swap_clients(next_clients);
@@ -817,6 +845,11 @@ pub async fn update_config(
             .or(Some(current.listen_web.port())),
     });
 
+    let split_dns_changed = current.split_dns != next.split_dns
+        || current.upstream_groups != next.upstream_groups
+        || current.split_dns_match_mode != next.split_dns_match_mode
+        || current.split_dns_before_client_upstreams != next.split_dns_before_client_upstreams;
+
     let cache_changed = current.cache_size != payload.cache_size
         || current.optimistic_cache != payload.optimistic_cache
         || current.cache_min_ttl_secs != cache_min_ttl_secs
@@ -830,6 +863,8 @@ pub async fn update_config(
             cache_max_ttl_secs,
             cache_prefetch_enabled,
         );
+    } else if split_dns_changed {
+        state.app.pipeline.cache().flush();
     }
 
     crate::split_dns_sync::maybe_spawn_split_dns_sync(&state, &next);
@@ -840,6 +875,7 @@ pub async fn update_config(
 
 async fn compile_clients_for_config(
     state: &RouterState,
+    upstream_groups: &UpstreamGroupRegistry,
     timeout_ms: u64,
     strategy: UpstreamStrategy,
     bootstrap_dns: &[String],
@@ -855,6 +891,13 @@ async fn compile_clients_for_config(
     .map_err(internal_error)?
     .map_err(internal_error)?;
 
-    ClientRegistry::compile(&clients, &groups, timeout_ms, strategy, bootstrap_dns)
-        .map_err(|err| bad_request(err.to_string()))
+    ClientRegistry::compile_with_groups(
+        &clients,
+        &groups,
+        upstream_groups,
+        timeout_ms,
+        strategy,
+        bootstrap_dns,
+    )
+    .map_err(|err| bad_request(err.to_string()))
 }

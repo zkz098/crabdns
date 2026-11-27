@@ -13,9 +13,79 @@ use tokio_rustls::rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 
 use crate::error::{CoreError, Result};
 pub use crate::upstream_health::UpstreamStatus;
-pub(crate) use crate::upstream_health::{
-    EndpointHealth, ProbeGuard, is_upstream_error_rcode, wire_rcode,
-};
+
+#[derive(Debug, Clone)]
+pub enum UpstreamEndpoint {
+    Udp(SocketAddr),
+    Tcp(SocketAddr),
+    Dot {
+        addr: String,
+        server_name: String,
+    },
+    Doh {
+        url: String,
+    },
+    Doq {
+        addr: String,
+        server_name: String,
+    },
+    Doh3 {
+        url: String,
+        host: String,
+        port: u16,
+    },
+}
+
+impl UpstreamEndpoint {
+    pub fn parse(raw: &str) -> Result<Self> {
+        let trimmed = raw.trim();
+        if let Some(rest) = trimmed.strip_prefix("udp://") {
+            let addr = parse_socket_addr(rest, 53)?;
+            return Ok(Self::Udp(addr));
+        }
+        if let Some(rest) = trimmed.strip_prefix("tcp://") {
+            let addr = parse_socket_addr(rest, 53)?;
+            return Ok(Self::Tcp(addr));
+        }
+        if let Some(rest) = trimmed.strip_prefix("tls://") {
+            let (host, port) = split_host_port(rest, 853);
+            return Ok(Self::Dot {
+                addr: format!("{host}:{port}"),
+                server_name: host,
+            });
+        }
+        if let Some(rest) = trimmed.strip_prefix("quic://") {
+            let (host, port) = split_host_port(rest, 853);
+            return Ok(Self::Doq {
+                addr: format!("{host}:{port}"),
+                server_name: host,
+            });
+        }
+        if let Some(rest) = trimmed.strip_prefix("h3://") {
+            let (url, host, port) = parse_h3_url(rest)?;
+            return Ok(Self::Doh3 { url, host, port });
+        }
+        if trimmed.starts_with("https://") {
+            return Ok(Self::Doh {
+                url: trimmed.to_string(),
+            });
+        }
+
+        let addr = parse_socket_addr(trimmed, 53)?;
+        Ok(Self::Udp(addr))
+    }
+}
+
+pub(crate) fn endpoint_label(endpoint: &UpstreamEndpoint) -> String {
+    match endpoint {
+        UpstreamEndpoint::Udp(addr) => format!("udp://{addr}"),
+        UpstreamEndpoint::Tcp(addr) => format!("tcp://{addr}"),
+        UpstreamEndpoint::Dot { addr, .. } => format!("tls://{addr}"),
+        UpstreamEndpoint::Doh { url } => url.clone(),
+        UpstreamEndpoint::Doq { addr, .. } => format!("quic://{addr}"),
+        UpstreamEndpoint::Doh3 { url, .. } => url.replacen("https://", "h3://", 1),
+    }
+}
 
 pub(crate) fn parse_socket_addr(input: &str, default_port: u16) -> Result<SocketAddr> {
     if let Ok(addr) = input.parse::<SocketAddr>() {
@@ -122,7 +192,7 @@ impl<S> Default for ConnPool<S> {
 }
 
 impl<S> ConnPool<S> {
-    fn pop_fresh(&self) -> Option<S> {
+    pub(crate) fn pop_fresh(&self) -> Option<S> {
         let mut guard = self
             .conns
             .lock()
@@ -135,7 +205,7 @@ impl<S> ConnPool<S> {
         None
     }
 
-    fn put(&self, stream: S) {
+    pub(crate) fn put(&self, stream: S) {
         let mut guard = self
             .conns
             .lock()
@@ -150,7 +220,7 @@ impl<S> ConnPool<S> {
     }
 }
 
-fn tx_id_matches(query: &[u8], resp: &[u8]) -> bool {
+pub(crate) fn tx_id_matches(query: &[u8], resp: &[u8]) -> bool {
     query.len() >= 2 && resp.len() >= 2 && query[0..2] == resp[0..2]
 }
 
@@ -588,7 +658,7 @@ async fn exchange_h3_one(
     Ok(resp)
 }
 
-async fn tcp_roundtrip<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+pub(crate) async fn tcp_roundtrip<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     stream: &mut S,
     query_wire: &[u8],
 ) -> Result<Vec<u8>> {

@@ -149,10 +149,7 @@ fn event_matches_search(event: &QueryEvent, needle: &str) -> bool {
 }
 
 fn event_matches_client(event: &QueryEvent, client_needle: &str) -> bool {
-    event
-        .client_ip
-        .to_ascii_lowercase()
-        .contains(client_needle)
+    event.client_ip.to_ascii_lowercase().contains(client_needle)
         || event
             .client_name
             .as_deref()

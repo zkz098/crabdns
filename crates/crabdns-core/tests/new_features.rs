@@ -60,11 +60,9 @@ async fn test_split_dns_routing() {
         .reload_split_dns(
             &[SplitDnsRule {
                 domain: "corp.local".to_string(),
-                domains_file: None,
-                domains_url: None,
                 upstreams: vec![format!("udp://{corp_upstream}")],
                 fallback_to_default: true,
-                policy: Default::default(),
+                ..Default::default()
             }],
             1000,
             UpstreamStrategy::Failover,
@@ -563,8 +561,6 @@ async fn test_per_group_upstream_policies_split_dns_and_client_group() {
             &[
                 SplitDnsRule {
                     domain: "cn".to_string(),
-                    domains_file: None,
-                    domains_url: None,
                     upstreams: vec![format!("udp://{cn_addr}")],
                     fallback_to_default: false,
                     policy: UpstreamPolicy {
@@ -573,11 +569,10 @@ async fn test_per_group_upstream_policies_split_dns_and_client_group() {
                         dns_rebinding_protection: Some(false),
                         ..Default::default()
                     },
+                    ..Default::default()
                 },
                 SplitDnsRule {
                     domain: "overseas.test".to_string(),
-                    domains_file: None,
-                    domains_url: None,
                     upstreams: vec![format!("udp://{overseas_addr}")],
                     fallback_to_default: false,
                     policy: UpstreamPolicy {
@@ -587,11 +582,10 @@ async fn test_per_group_upstream_policies_split_dns_and_client_group() {
                         dns_rebinding_protection: Some(true),
                         ..Default::default()
                     },
+                    ..Default::default()
                 },
                 SplitDnsRule {
                     domain: "rebind.test".to_string(),
-                    domains_file: None,
-                    domains_url: None,
                     upstreams: vec![format!("udp://{overseas_addr}")],
                     fallback_to_default: false,
                     policy: UpstreamPolicy {
@@ -599,6 +593,7 @@ async fn test_per_group_upstream_policies_split_dns_and_client_group() {
                         dns_rebinding_protection: Some(true),
                         ..Default::default()
                     },
+                    ..Default::default()
                 },
             ],
             1000,
@@ -729,11 +724,9 @@ async fn test_block_local_domains_and_log_suppression() {
         .reload_split_dns(
             &[SplitDnsRule {
                 domain: "*.corp.local".to_string(),
-                domains_file: None,
-                domains_url: None,
                 upstreams: vec![format!("udp://{split_upstream_addr}")],
                 fallback_to_default: false,
-                policy: crabdns_core::UpstreamPolicy::default(),
+                ..Default::default()
             }],
             1000,
             crabdns_core::UpstreamStrategy::Failover,

@@ -12,11 +12,10 @@ use crate::acl::AccessController;
 use crate::cache::{CacheKey, DnsCache};
 use crate::cf_cdn::{CfCdnConfig, CfCdnManager};
 use crate::clients::{
-    ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ResolvedClientPolicy,
-    ip_to_ptr_domain,
+    ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ip_to_ptr_domain,
 };
 use crate::clock::monotonic_now_ms;
-use crate::config::{BlockMode, CompiledUpstreamPolicy, SplitDnsRule, UpstreamStrategy};
+use crate::config::{BlockMode, SplitDnsMatchMode, SplitDnsRule, UpstreamGroup, UpstreamStrategy};
 use crate::cookies::DnsCookieEngine;
 use crate::device_names::{DhcpLeaseTable, MdnsNameResolver};
 use crate::dns64::Dns64Config;
@@ -25,7 +24,7 @@ use crate::edns::{DEFAULT_MAX_UDP_PAYLOAD, EcsConfig};
 use crate::error::Result;
 use crate::filter::{FilterDecision, FilterEngine};
 use crate::filter_rules::FilterQueryContext;
-use crate::lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter, is_private_ptr_domain};
+use crate::lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter};
 use crate::neighbor::NeighborTable;
 use crate::rrl::{ResponseRateLimiter, RrlConfig};
 use crate::safesearch::SafeSearchConfig;
@@ -33,6 +32,7 @@ use crate::security::is_private_or_special_ip;
 use crate::singleflight::Singleflight;
 use crate::split_dns::SplitUpstreamRouter;
 use crate::upstream::UpstreamPool;
+use crate::upstream_groups::UpstreamGroupRegistry;
 
 pub use crate::pipeline_types::{
     LatencyHistogramSnapshot, PipelineRuntimeMetrics, QueryContext, QueryEvent, QueryOutcome,
@@ -46,7 +46,9 @@ pub struct DnsPipeline {
     pub(crate) filter: Arc<FilterEngine>,
     pub(crate) cache: ArcSwap<DnsCache>,
     pub(crate) upstream: ArcSwap<UpstreamPool>,
+    pub(crate) upstream_groups: ArcSwap<UpstreamGroupRegistry>,
     pub(crate) split_router: ArcSwap<SplitUpstreamRouter>,
+    pub(crate) split_dns_before_client_upstreams: AtomicBool,
     pub(crate) acl: ArcSwap<AccessController>,
     pub(crate) clients: ArcSwap<ClientRegistry>,
     pub(crate) name_resolver: Arc<ClientNameResolver>,
@@ -119,7 +121,9 @@ impl DnsPipeline {
             filter,
             cache: ArcSwap::from(cache),
             upstream: ArcSwap::from(upstream),
+            upstream_groups: ArcSwap::from_pointee(UpstreamGroupRegistry::empty()),
             split_router: ArcSwap::from_pointee(SplitUpstreamRouter::empty()),
+            split_dns_before_client_upstreams: AtomicBool::new(false),
             acl: ArcSwap::from_pointee(default_acl),
             clients: ArcSwap::from_pointee(ClientRegistry::empty()),
             name_resolver: Arc::new(ClientNameResolver::new()),
@@ -207,7 +211,15 @@ impl DnsPipeline {
         strategy: UpstreamStrategy,
         bootstrap_dns: &[String],
     ) -> Result<()> {
-        let next = ClientRegistry::compile(clients, groups, timeout_ms, strategy, bootstrap_dns)?;
+        let up_groups = self.upstream_groups.load();
+        let next = ClientRegistry::compile_with_groups(
+            clients,
+            groups,
+            &up_groups,
+            timeout_ms,
+            strategy,
+            bootstrap_dns,
+        )?;
         self.swap_clients(next);
         Ok(())
     }
@@ -439,14 +451,61 @@ impl DnsPipeline {
         bootstrap_dns: &[String],
         resolve_url: F,
     ) -> Result<()> {
-        self.swap_split_dns(SplitUpstreamRouter::new_with_resolver(
+        let up_groups = self.upstream_groups.load();
+        self.swap_split_dns(SplitUpstreamRouter::new_full(
             rules,
+            &up_groups,
+            SplitDnsMatchMode::SpecificityFirst,
             timeout_ms,
             strategy,
             bootstrap_dns,
             resolve_url,
         )?);
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reload_split_dns_full<F: Fn(&str) -> Option<String>>(
+        &self,
+        upstream_groups: &[UpstreamGroup],
+        rules: &[SplitDnsRule],
+        match_mode: SplitDnsMatchMode,
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+        bootstrap_dns: &[String],
+        resolve_url: F,
+    ) -> Result<()> {
+        let compiled_groups =
+            UpstreamGroupRegistry::compile(upstream_groups, timeout_ms, strategy, bootstrap_dns)?;
+        let router = SplitUpstreamRouter::new_full(
+            rules,
+            &compiled_groups,
+            match_mode,
+            timeout_ms,
+            strategy,
+            bootstrap_dns,
+            resolve_url,
+        )?;
+        self.swap_upstream_groups(compiled_groups);
+        self.swap_split_dns(router);
+        Ok(())
+    }
+
+    pub fn swap_upstream_groups(&self, groups: UpstreamGroupRegistry) {
+        self.upstream_groups.store(Arc::new(groups));
+    }
+
+    pub fn upstream_groups(&self) -> Arc<UpstreamGroupRegistry> {
+        self.upstream_groups.load_full()
+    }
+
+    pub fn split_router(&self) -> Arc<SplitUpstreamRouter> {
+        self.split_router.load_full()
+    }
+
+    pub fn set_split_dns_before_client_upstreams(&self, enabled: bool) {
+        self.split_dns_before_client_upstreams
+            .store(enabled, Ordering::Relaxed);
     }
 
     pub fn swap_split_dns(&self, router: SplitUpstreamRouter) {
@@ -793,54 +852,4 @@ impl DnsPipeline {
     pub(crate) fn is_blocking_paused(&self) -> bool {
         self.blocking_status().0
     }
-
-    pub(crate) fn resolve_upstream_for_query(
-        &self,
-        policy: Option<&ResolvedClientPolicy>,
-        domain: &str,
-        qtype: RecordType,
-    ) -> ResolvedUpstreamRoute {
-        if let Some((scope, pool)) = policy.and_then(|p| p.upstream_pool.as_ref()) {
-            return ResolvedUpstreamRoute {
-                pool: Arc::clone(pool),
-                cache_scope: Some(scope.clone()),
-                is_local_route: false,
-                upstream_policy: policy.map(|p| Arc::clone(&p.upstream_policy)),
-            };
-        }
-        if qtype == RecordType::PTR && is_private_ptr_domain(domain) {
-            let ptr_router = self.private_ptr_router.load();
-            if let Some(pool) = &ptr_router.pool {
-                return ResolvedUpstreamRoute {
-                    pool: Arc::clone(pool),
-                    cache_scope: None,
-                    is_local_route: true,
-                    upstream_policy: policy.map(|p| Arc::clone(&p.upstream_policy)),
-                };
-            }
-        }
-        if let Some((pool, split_policy, split_scope)) =
-            self.split_router.load().resolve_with_policy(domain)
-        {
-            return ResolvedUpstreamRoute {
-                pool,
-                cache_scope: Some(split_scope),
-                is_local_route: true,
-                upstream_policy: Some(split_policy),
-            };
-        }
-        ResolvedUpstreamRoute {
-            pool: self.upstream.load_full(),
-            cache_scope: policy.and_then(|p| p.upstream_policy_scope.clone()),
-            is_local_route: false,
-            upstream_policy: policy.map(|p| Arc::clone(&p.upstream_policy)),
-        }
-    }
-}
-
-pub(crate) struct ResolvedUpstreamRoute {
-    pub pool: Arc<UpstreamPool>,
-    pub cache_scope: Option<String>,
-    pub is_local_route: bool,
-    pub upstream_policy: Option<Arc<CompiledUpstreamPolicy>>,
 }

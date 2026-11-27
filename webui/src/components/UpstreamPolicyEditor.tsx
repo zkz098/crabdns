@@ -40,6 +40,7 @@ export function countPolicyOverrides(policy?: UpstreamPolicy | null): number {
   if (isSet(policy.svcb_strip_ech)) count++;
   if (isSet(policy.svcb_strip_hints)) count++;
   if (isSet(policy.cf_cdn_enabled)) count++;
+  if (isSet(policy.disable_ipv6)) count++;
   return count;
 }
 
@@ -58,6 +59,7 @@ export function upstreamPolicyBadges(policy?: UpstreamPolicy | null): string[] {
   if (isSet(policy.svcb_strip_hints))
     badges.push(`NoHints:${policy.svcb_strip_hints ? "On" : "Off"}`);
   if (isSet(policy.cf_cdn_enabled)) badges.push(`CF-CDN:${policy.cf_cdn_enabled ? "On" : "Off"}`);
+  if (isSet(policy.disable_ipv6)) badges.push(`NoIPv6:${policy.disable_ipv6 ? "On" : "Off"}`);
   return badges;
 }
 
@@ -144,6 +146,9 @@ export function UpstreamPolicyEditor(props: UpstreamPolicyEditorProps) {
             )}
             {triSelect(t("upstreamPolicyCfCdn"), props.policy.cf_cdn_enabled, (v) =>
               update({ cf_cdn_enabled: v }),
+            )}
+            {triSelect(t("upstreamPolicyDisableIpv6"), props.policy.disable_ipv6, (v) =>
+              update({ disable_ipv6: v }),
             )}
             <div>
               <label class="block text-[11px] text-[#666666] dark:text-[#a1a1aa] mb-1">

@@ -1457,7 +1457,12 @@ async fn test_ws_events_subscriptions_and_log_filtering() {
     assert_eq!(recv_ws_json(&mut ws).await["type"], "subscribed");
     let mut initial_types = Vec::new();
     for _ in 0..4 {
-        initial_types.push(recv_ws_json(&mut ws).await["type"].as_str().unwrap().to_string());
+        initial_types.push(
+            recv_ws_json(&mut ws).await["type"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
     }
     assert_eq!(initial_types, vec!["stats", "blocking", "update", "cf_cdn"]);
 
@@ -1596,4 +1601,122 @@ async fn test_ws_events_cf_cdn_and_update_push() {
         }
     }
     assert!(saw_error, "expected update push with last_error");
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn test_split_dns_groups_and_cache_invalidation_via_config_api() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
+    let cfg = Config::default();
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, true));
+    let upstream =
+        Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 200).expect("pool"));
+    let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+    let (live_tx, _) = broadcast::channel(16);
+
+    let app = build_router(AppState {
+        config,
+        pipeline: Arc::clone(&pipeline),
+        storage,
+        live_tx,
+        tls_reloader: None,
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // Seed an entry in cache to verify split_dns config update invalidates cache
+    let cache_key = crabdns_core::cache::CacheKey {
+        qname: "example.com.".to_string(),
+        qtype: 1,
+        qclass: 1,
+        ecs_subnet: None,
+        dnssec_do: false,
+        upstream_scope: None,
+    };
+    pipeline
+        .cache()
+        .insert(cache_key.clone(), vec![0_u8; 12], 60);
+    assert!(pipeline.cache().get(&cache_key, 1).is_some());
+
+    let payload = serde_json::json!({
+        "upstreams": ["udp://1.1.1.1:53"],
+        "cache_size": 64,
+        "optimistic_cache": true,
+        "upstream_timeout_ms": 1000,
+        "log_retention_hours": 24,
+        "upstream_groups": [
+            {
+                "name": "cn_dns",
+                "upstreams": ["udp://223.5.5.5:53"],
+                "fallback_groups": [],
+                "proxy_url": null,
+                "policy": { "disable_ipv6": true }
+            }
+        ],
+        "split_dns_match_mode": "config_order",
+        "split_dns_before_client_upstreams": true,
+        "split_dns": [
+            {
+                "name": "CN Rule",
+                "enabled": true,
+                "domain": "cn",
+                "domains_file": null,
+                "domains_url": null,
+                "exclude_domains": ["gov.cn"],
+                "qtypes": ["A", "AAAA"],
+                "client_cidrs": [],
+                "client_groups": [],
+                "client_tags": [],
+                "protocols": [],
+                "upstreams": ["@cn_dns"],
+                "fallback_upstreams": [],
+                "fallback_to_default": true,
+                "fallback_on_nxdomain": false,
+                "is_local": false,
+                "policy": {},
+                "response_ip": {
+                    "expected_cidrs": ["1.0.1.0/24"],
+                    "invert": false,
+                    "fallback_upstreams": ["udp://8.8.8.8:53"],
+                    "fallback_delay_ms": 100,
+                    "match_cname_domains": [],
+                    "fallback_on_empty": true
+                }
+            }
+        ]
+    });
+
+    let put_res = client
+        .put(format!("{base}/api/config"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&payload).expect("json"))
+        .send()
+        .await
+        .expect("put config");
+    assert_eq!(put_res.status(), StatusCode::OK);
+    let raw_bytes = put_res.bytes().await.expect("response bytes");
+    let body: serde_json::Value = serde_json::from_slice(&raw_bytes).expect("parse response");
+    assert_eq!(body["split_dns_match_mode"], "config_order");
+    assert_eq!(body["split_dns_before_client_upstreams"], true);
+    assert_eq!(body["upstream_groups"][0]["name"], "cn_dns");
+    assert_eq!(body["split_dns"][0]["name"], "CN Rule");
+    assert_eq!(
+        body["split_dns"][0]["response_ip"]["fallback_delay_ms"],
+        100
+    );
+
+    // Cache must be flushed when split_dns / upstream_groups change
+    assert!(pipeline.cache().get(&cache_key, 1).is_none());
+    assert!(pipeline.split_router().resolve("qq.cn").is_some());
+    assert!(pipeline.split_router().resolve("gov.cn").is_none());
 }

@@ -22,6 +22,7 @@ use crate::filter::{FilterAction, FilterDecision, FilterEngine};
 use crate::filter_rules::FilterQueryContext;
 use crate::neighbor::normalize_mac;
 use crate::upstream::{UpstreamPool, next_tx_id};
+use crate::upstream_groups::UpstreamGroupRegistry;
 
 const RDNS_CACHE_CAPACITY: u64 = 4096;
 const RDNS_CACHE_TTL: Duration = Duration::from_mins(15);
@@ -159,6 +160,7 @@ struct CompiledGroup<'a> {
     group: &'a ClientGroup,
     filter: Option<Arc<FilterEngine>>,
     upstream_pool: Option<(String, Arc<UpstreamPool>)>,
+    upstream_policy: UpstreamPolicy,
 }
 
 type FastMap<K, V> = HashMap<K, V, RandomState>;
@@ -183,6 +185,24 @@ impl ClientRegistry {
         strategy: UpstreamStrategy,
         bootstrap_dns: &[String],
     ) -> Result<Self> {
+        Self::compile_with_groups(
+            clients,
+            groups,
+            &UpstreamGroupRegistry::empty(),
+            timeout_ms,
+            strategy,
+            bootstrap_dns,
+        )
+    }
+
+    pub fn compile_with_groups(
+        clients: &[ClientProfile],
+        groups: &[ClientGroup],
+        upstream_groups: &UpstreamGroupRegistry,
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+        bootstrap_dns: &[String],
+    ) -> Result<Self> {
         let mut compiled_groups: FastMap<&str, CompiledGroup<'_>> =
             HashMap::with_hasher(RandomState::default());
 
@@ -197,18 +217,14 @@ impl ClientRegistry {
             let upstream_pool = if group.upstreams.is_empty() {
                 None
             } else {
-                let effective_timeout = compiled_group_policy
-                    .upstream_timeout_ms
-                    .unwrap_or(timeout_ms);
-                let effective_strategy =
-                    compiled_group_policy.upstream_strategy.unwrap_or(strategy);
-                let pool = Arc::new(UpstreamPool::new_with_bootstrap(
+                let resolved = upstream_groups.resolve_specs_pool(
                     &group.upstreams,
-                    effective_timeout,
-                    effective_strategy,
+                    &compiled_group_policy,
+                    timeout_ms,
+                    strategy,
                     bootstrap_dns,
-                )?);
-                Some((format!("group:{}", group.id), pool))
+                )?;
+                Some((format!("group:{}", group.id), resolved.pool))
             };
             compiled_groups.insert(
                 group.id.as_str(),
@@ -216,6 +232,7 @@ impl ClientRegistry {
                     group,
                     filter,
                     upstream_pool,
+                    upstream_policy: group.upstream_policy.clone(),
                 },
             );
         }
@@ -232,8 +249,14 @@ impl ClientRegistry {
                 None => None,
             };
 
-            let policy =
-                build_resolved_policy(client, compiled_group, timeout_ms, strategy, bootstrap_dns)?;
+            let policy = build_resolved_policy(
+                client,
+                compiled_group,
+                upstream_groups,
+                timeout_ms,
+                strategy,
+                bootstrap_dns,
+            )?;
 
             for raw_ident in &client.identifiers {
                 match validate_client_identifier(raw_ident)? {
@@ -353,6 +376,7 @@ impl ClientRegistry {
 fn build_resolved_policy(
     client: &ClientProfile,
     compiled_group: Option<&CompiledGroup<'_>>,
+    upstream_groups: &UpstreamGroupRegistry,
     timeout_ms: u64,
     strategy: UpstreamStrategy,
     bootstrap_dns: &[String],
@@ -380,39 +404,38 @@ fn build_resolved_policy(
     });
     let group_filter = compiled_group.and_then(|cg| cg.filter.clone());
 
-    let merged_upstream_policy = match group_ref {
-        Some(g) => client.upstream_policy.merge_over(&g.upstream_policy),
+    let merged_upstream_policy = match compiled_group {
+        Some(cg) => client.upstream_policy.merge_over(&cg.upstream_policy),
         None => client.upstream_policy.clone(),
     };
-    let compiled_upstream_policy =
-        Arc::new(CompiledUpstreamPolicy::compile(&merged_upstream_policy)?);
-    let upstream_policy_scope = if !merged_upstream_policy.is_empty() {
-        if !client.upstream_policy.is_empty() {
-            Some(format!("client:{}", client.id))
-        } else {
-            group_ref.map(|g| format!("group:{}", g.id))
-        }
-    } else {
-        None
-    };
+    let compiled_policy_only = CompiledUpstreamPolicy::compile(&merged_upstream_policy)?;
 
-    let upstream_pool = if client.upstreams.is_empty() {
-        compiled_group.and_then(|cg| cg.upstream_pool.clone())
-    } else {
-        let effective_timeout = compiled_upstream_policy
-            .upstream_timeout_ms
-            .unwrap_or(timeout_ms);
-        let effective_strategy = compiled_upstream_policy
-            .upstream_strategy
-            .unwrap_or(strategy);
-        let pool = Arc::new(UpstreamPool::new_with_bootstrap(
-            &client.upstreams,
-            effective_timeout,
-            effective_strategy,
-            bootstrap_dns,
-        )?);
-        Some((format!("client:{}", client.id), pool))
-    };
+    let (upstream_pool, final_compiled_policy, upstream_policy_scope) =
+        if client.upstreams.is_empty() {
+            let pool_opt = compiled_group.and_then(|cg| cg.upstream_pool.clone());
+            let policy_scope = if merged_upstream_policy.is_empty() {
+                None
+            } else if client.upstream_policy.is_empty() {
+                group_ref.map(|g| format!("group:{}", g.id))
+            } else {
+                Some(format!("client:{}", client.id))
+            };
+            (pool_opt, Arc::new(compiled_policy_only), policy_scope)
+        } else {
+            let resolved = upstream_groups.resolve_specs_pool(
+                &client.upstreams,
+                &compiled_policy_only,
+                timeout_ms,
+                strategy,
+                bootstrap_dns,
+            )?;
+            let scope = Some(format!("client:{}", client.id));
+            (
+                Some((format!("client:{}", client.id), resolved.pool)),
+                resolved.policy,
+                scope,
+            )
+        };
 
     Ok(Arc::new(ResolvedClientPolicy {
         profile_id: client.id.clone(),
@@ -427,7 +450,7 @@ fn build_resolved_policy(
         client_filter,
         group_filter,
         upstream_pool,
-        upstream_policy: compiled_upstream_policy,
+        upstream_policy: final_compiled_policy,
         upstream_policy_scope,
         tags: client.tags.clone(),
     }))

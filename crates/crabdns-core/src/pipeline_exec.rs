@@ -12,7 +12,7 @@ use crate::clients::{ClientRegistry, ResolvedClientPolicy};
 use crate::config::BlockMode;
 use crate::cookies::CookieCheck;
 use crate::edns::{
-    EDE_BLOCKED, EDE_DNSSEC_BOGUS, EDE_NO_REACHABLE_AUTHORITY, EDE_PROHIBITED,
+    EDE_BLOCKED, EDE_DNSSEC_BOGUS, EDE_NO_REACHABLE_AUTHORITY, EDE_PROHIBITED, EcsConfig,
     apply_ecs_to_message, has_dnssec_ok, resolve_ecs_subnet, set_dnssec_ok,
 };
 use crate::error::{CoreError, Result};
@@ -26,6 +26,7 @@ use crate::pipeline_cache::cache_upstream_response_msg;
 use crate::pipeline_types::LogMeta;
 use crate::security::{build_rfc8482_any_response, contains_rebinding_ip_msg};
 use crate::singleflight::{FlightGuard, FlightReceiver, FlightRole, wait_follower};
+use crate::split_dns_exec::ResolvedUpstreamRoute;
 use crate::upstream::UpstreamPool;
 use crate::wire::{
     build_blocked_response, build_error_response, build_rewrite_response, extract_answer_summaries,
@@ -46,9 +47,10 @@ pub(crate) struct PolicyFlags {
     pub svcb_strip_ech: bool,
     pub svcb_strip_hints: bool,
     pub cf_cdn_on: bool,
+    pub disable_ipv6: bool,
 }
 
-enum ExchangeError {
+pub(crate) enum ExchangeError {
     DnssecBogus(String),
     UpstreamFailed(String),
 }
@@ -136,7 +138,7 @@ impl DnsPipeline {
         Ok(self.finalize_protocol_response(&request, &ctx, &meta, cookie_check, resp))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn handle_packet_inner(
         &self,
         raw_query: &[u8],
@@ -178,12 +180,32 @@ impl DnsPipeline {
             return Ok(resp);
         }
 
-        let route = self.resolve_upstream_for_query(policy.as_deref(), &meta.domain, qtype);
+        let route = self.resolve_upstream_for_query(
+            Some(ctx.client_addr.ip()),
+            Some(ctx.protocol),
+            policy.as_deref(),
+            &meta.domain,
+            qtype,
+        );
+        let base_flags = flags;
         let flags = self.apply_upstream_policy_flags(
-            flags,
+            base_flags,
             route.upstream_policy.as_deref(),
             route.is_local_route,
         );
+        if flags.disable_ipv6 && qtype == RecordType::AAAA {
+            let resp = build_error_response(request, ResponseCode::NoError)?;
+            self.emit_log(
+                meta,
+                QueryOutcome::Rewritten,
+                Some("policy:disable-ipv6".to_string()),
+                Some("policy".to_string()),
+                None,
+                "NOERROR",
+                Vec::new(),
+            );
+            return Ok(resp);
+        }
         let global_ecs = self.ecs_config.load();
         let ecs_cfg = route
             .upstream_policy
@@ -193,15 +215,13 @@ impl DnsPipeline {
             ecs_cfg.as_ref().unwrap_or(&global_ecs),
             ctx.client_addr.ip(),
         );
-        let upstream = route.pool;
-        let is_local_route = route.is_local_route;
         let cache_key = CacheKey {
             qname: qname.to_ascii_lowercase(),
             qtype: u16::from(qtype),
             qclass,
             ecs_subnet,
             dnssec_do: flags.dnssec_on && flags.client_wants_do,
-            upstream_scope: route.cache_scope,
+            upstream_scope: route.cache_scope.clone(),
         };
 
         if !(flags.dnssec_on && flags.client_cd)
@@ -211,7 +231,7 @@ impl DnsPipeline {
                     raw_query,
                     meta,
                     policy.as_deref(),
-                    &upstream,
+                    &route.pool,
                     &cache_key,
                     &decision,
                     flags,
@@ -225,14 +245,16 @@ impl DnsPipeline {
             Self::build_upstream_query(request, raw_query, ecs_subnet, flags.dnssec_on);
         self.forward_with_singleflight(
             request,
+            raw_query,
             &upstream_query,
             meta,
             policy.as_deref(),
-            &upstream,
-            is_local_route,
+            &route,
             cache_key,
             &decision,
+            base_flags,
             flags,
+            &global_ecs,
         )
         .await
     }
@@ -306,10 +328,11 @@ impl DnsPipeline {
             svcb_strip_ech: self.svcb_strip_ech.load(Ordering::Relaxed),
             svcb_strip_hints: self.svcb_strip_hints.load(Ordering::Relaxed),
             cf_cdn_on: self.cf_cdn.is_enabled(),
+            disable_ipv6: false,
         }
     }
 
-    fn apply_upstream_policy_flags(
+    pub(crate) fn apply_upstream_policy_flags(
         &self,
         mut flags: PolicyFlags,
         upstream_policy: Option<&crate::config::CompiledUpstreamPolicy>,
@@ -333,6 +356,9 @@ impl DnsPipeline {
             }
             if let Some(v) = p.cf_cdn_enabled {
                 flags.cf_cdn_on = v;
+            }
+            if let Some(v) = p.disable_ipv6 {
+                flags.disable_ipv6 = v;
             }
         } else if is_local_route {
             flags.dns_rebinding_on = false;
@@ -641,7 +667,7 @@ impl DnsPipeline {
         msg.to_vec().unwrap_or_else(|_| raw_query.to_vec())
     }
 
-    async fn exchange_and_validate(
+    pub(crate) async fn exchange_and_validate(
         &self,
         upstream: &UpstreamPool,
         upstream_query: &[u8],
@@ -682,16 +708,18 @@ impl DnsPipeline {
     async fn forward_with_singleflight(
         &self,
         request: &Message,
+        raw_query: &[u8],
         upstream_query: &[u8],
         meta: &LogMeta,
         policy: Option<&ResolvedClientPolicy>,
-        upstream: &Arc<UpstreamPool>,
-        is_local_route: bool,
+        route: &ResolvedUpstreamRoute,
         cache_key: CacheKey,
         decision: &FilterDecision,
+        base_flags: PolicyFlags,
         flags: PolicyFlags,
+        global_ecs: &EcsConfig,
     ) -> Result<Vec<u8>> {
-        let query_budget = upstream.query_budget();
+        let query_budget = route.query_budget();
         let (resp_bytes, upstream_label, parsed_msg) =
             match self.inflight.acquire(cache_key.clone()) {
                 FlightRole::Leader(guard) => {
@@ -699,13 +727,15 @@ impl DnsPipeline {
                         .run_singleflight_leader(
                             guard,
                             request,
+                            raw_query,
                             upstream_query,
                             meta,
                             policy,
-                            upstream,
-                            is_local_route,
+                            route,
                             cache_key,
+                            base_flags,
                             flags,
+                            global_ecs,
                             query_budget,
                         )
                         .await
@@ -729,8 +759,8 @@ impl DnsPipeline {
             request,
             meta,
             policy,
-            upstream,
-            is_local_route,
+            &route.pool,
+            route.is_local_route,
             decision,
             flags,
             resp_bytes,
@@ -745,18 +775,29 @@ impl DnsPipeline {
         &self,
         guard: FlightGuard<CacheKey, (Vec<u8>, String)>,
         request: &Message,
+        raw_query: &[u8],
         upstream_query: &[u8],
         meta: &LogMeta,
         policy: Option<&ResolvedClientPolicy>,
-        upstream: &Arc<UpstreamPool>,
-        is_local_route: bool,
+        route: &ResolvedUpstreamRoute,
         cache_key: CacheKey,
+        base_flags: PolicyFlags,
         flags: PolicyFlags,
+        global_ecs: &EcsConfig,
         query_budget: Duration,
     ) -> std::result::Result<(Vec<u8>, String, Option<Message>), Result<Vec<u8>>> {
         let exchange_res = match tokio::time::timeout(
             query_budget,
-            self.exchange_and_validate(upstream, upstream_query, &meta.domain, flags),
+            self.execute_route_exchange(
+                route,
+                request,
+                raw_query,
+                upstream_query,
+                meta,
+                base_flags,
+                flags,
+                global_ecs,
+            ),
         )
         .await
         {
@@ -769,8 +810,9 @@ impl DnsPipeline {
         match exchange_res {
             Ok((resp_bytes, upstream_label)) => {
                 let parsed = Message::from_vec(&resp_bytes).ok();
-                let rebinding_hit = !is_local_route
-                    && self.dns_rebinding_protection.load(Ordering::Relaxed)
+                let rebinding_hit = !flags.blocking_disabled
+                    && !flags.explicitly_allowed
+                    && flags.dns_rebinding_on
                     && parsed.as_ref().is_some_and(contains_rebinding_ip_msg);
                 let cname_hit = if !flags.blocking_disabled
                     && !flags.explicitly_allowed

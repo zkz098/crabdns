@@ -9,8 +9,8 @@ use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
     AccessController, ClientGroup, ClientProfile, ClientRegistry, Config, DdrConfig,
     DhcpLeaseTable, DnsRewriteEntry, EcsConfig, FilterEngine, HostsTable, PrivatePtrRouter,
-    SplitDnsRule, SplitUpstreamRouter, UpstreamPool, validate_client_identifier,
-    validate_dns_rewrite,
+    SplitDnsRule, SplitUpstreamRouter, UpstreamGroup, UpstreamGroupRegistry, UpstreamPool,
+    validate_client_identifier, validate_dns_rewrite,
 };
 use crabdns_storage::FilterSubscription;
 use serde::{Deserialize, Serialize};
@@ -107,6 +107,9 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         deny_cidrs: Some(cfg.deny_cidrs.clone()),
         rate_limit_qps: Some(cfg.rate_limit_qps),
         split_dns: Some(cfg.split_dns.clone()),
+        upstream_groups: Some(cfg.upstream_groups.clone()),
+        split_dns_match_mode: Some(cfg.split_dns_match_mode),
+        split_dns_before_client_upstreams: Some(cfg.split_dns_before_client_upstreams),
         cname_cloaking_blocking: Some(cfg.cname_cloaking_blocking),
         doh_enabled: Some(cfg.doh_enabled),
         allow_private_subscriptions: Some(cfg.allow_private_subscriptions),
@@ -367,22 +370,22 @@ fn merge_config_payload(current: &Config, mut payload: ConfigUpdatePayload) -> A
     if let Some(rules) = payload.split_dns.take() {
         next.split_dns = rules
             .into_iter()
-            .map(|r| SplitDnsRule {
-                domain: r.domain.trim().to_string(),
-                domains_file: r
-                    .domains_file
-                    .map(|p| p.trim().to_string())
-                    .filter(|p| !p.is_empty()),
-                domains_url: r
-                    .domains_url
-                    .map(|u| u.trim().to_string())
-                    .filter(|u| !u.is_empty()),
-                upstreams: clean_string_list(r.upstreams),
-                fallback_to_default: r.fallback_to_default,
-                policy: r.policy.normalized(),
-            })
-            .filter(|r| !r.domain.is_empty() || r.domains_file.is_some() || r.domains_url.is_some())
+            .map(SplitDnsRule::normalized)
+            .filter(SplitDnsRule::has_target)
             .collect();
+    }
+    if let Some(groups) = payload.upstream_groups.take() {
+        next.upstream_groups = groups
+            .into_iter()
+            .map(UpstreamGroup::normalized)
+            .filter(|g| !g.name.is_empty())
+            .collect();
+    }
+    if let Some(mode) = payload.split_dns_match_mode {
+        next.split_dns_match_mode = mode;
+    }
+    if let Some(before) = payload.split_dns_before_client_upstreams {
+        next.split_dns_before_client_upstreams = before;
     }
     apply_optional_flags(&mut next, current, payload);
     Ok(next)
@@ -498,6 +501,7 @@ pub(crate) struct CompiledRuntime {
     acl: AccessController,
     ecs: EcsConfig,
     upstream: UpstreamPool,
+    upstream_groups: UpstreamGroupRegistry,
     split_dns: SplitUpstreamRouter,
     private_ptr: PrivatePtrRouter,
     clients: ClientRegistry,
@@ -527,8 +531,17 @@ pub(crate) fn compile_runtime_components(
         &next.bootstrap_dns,
     )
     .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let split_dns = SplitUpstreamRouter::new_with_resolver(
+    let upstream_groups = UpstreamGroupRegistry::compile(
+        &next.upstream_groups,
+        next.upstream_timeout_ms,
+        next.upstream_strategy,
+        &next.bootstrap_dns,
+    )
+    .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let split_dns = SplitUpstreamRouter::new_full(
         &next.split_dns,
+        &upstream_groups,
+        next.split_dns_match_mode,
         next.upstream_timeout_ms,
         next.upstream_strategy,
         &next.bootstrap_dns,
@@ -543,9 +556,10 @@ pub(crate) fn compile_runtime_components(
         &next.bootstrap_dns,
     )
     .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let clients = ClientRegistry::compile(
+    let clients = ClientRegistry::compile_with_groups(
         clients,
         groups,
+        &upstream_groups,
         next.upstream_timeout_ms,
         next.upstream_strategy,
         &next.bootstrap_dns,
@@ -555,6 +569,7 @@ pub(crate) fn compile_runtime_components(
         acl,
         ecs,
         upstream,
+        upstream_groups,
         split_dns,
         private_ptr,
         clients,
@@ -573,6 +588,8 @@ pub(crate) fn apply_compiled_to_pipeline(
     pipe.swap_acl(compiled.acl);
     pipe.swap_ecs(compiled.ecs);
     pipe.swap_upstream(compiled.upstream);
+    pipe.swap_upstream_groups(compiled.upstream_groups);
+    pipe.set_split_dns_before_client_upstreams(next.split_dns_before_client_upstreams);
     pipe.swap_split_dns(compiled.split_dns);
     pipe.swap_private_ptr(compiled.private_ptr);
     pipe.swap_clients(compiled.clients);

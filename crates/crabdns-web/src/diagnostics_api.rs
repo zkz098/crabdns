@@ -65,7 +65,12 @@ pub async fn run_system_diagnostics(
     let drops_item = check_udp_inflight_drops(&state);
     let upstream_item = check_upstream_health(&state);
     let bootstrap_item = check_bootstrap_dns(&cfg.upstreams, &cfg.bootstrap_dns).await;
-    let loop_item = check_forwarding_loop(listen_dns, &cfg.upstreams, &cfg.split_dns);
+    let loop_item = check_forwarding_loop(
+        listen_dns,
+        &cfg.upstreams,
+        &cfg.upstream_groups,
+        &cfg.split_dns,
+    );
 
     let items = vec![
         mdns_item,
@@ -530,19 +535,31 @@ fn points_to_listener(spec: &str, listen_dns: SocketAddr) -> bool {
         || (listen_dns.ip().is_unspecified() && addr.ip().is_unspecified())
 }
 
-fn check_forwarding_loop(
+fn check_forwarding_loop<'a>(
     listen_dns: SocketAddr,
-    upstreams: &[String],
-    split_dns: &[crabdns_core::SplitDnsRule],
+    upstreams: &'a [String],
+    upstream_groups: &'a [crabdns_core::UpstreamGroup],
+    split_dns: &'a [crabdns_core::SplitDnsRule],
 ) -> DiagnosticItem {
-    let mut looping: Vec<&str> = upstreams
+    let mut looping: Vec<&'a str> = upstreams
         .iter()
         .map(String::as_str)
-        .filter(|u| points_to_listener(u, listen_dns))
+        .filter(|u| !u.trim().starts_with('@') && points_to_listener(u, listen_dns))
         .collect();
-    for rule in split_dns {
-        for u in &rule.upstreams {
+    for group in upstream_groups {
+        for u in &group.upstreams {
             if points_to_listener(u, listen_dns) {
+                looping.push(u.as_str());
+            }
+        }
+    }
+    for rule in split_dns {
+        for u in rule.upstreams.iter().chain(&rule.fallback_upstreams).chain(
+            rule.response_ip
+                .iter()
+                .flat_map(|r| r.fallback_upstreams.iter()),
+        ) {
+            if !u.trim().starts_with('@') && points_to_listener(u, listen_dns) {
                 looping.push(u.as_str());
             }
         }
@@ -592,10 +609,10 @@ mod tests {
     #[test]
     fn test_forwarding_loop_detection() {
         let listen: SocketAddr = "0.0.0.0:5354".parse().unwrap();
-        let ok = check_forwarding_loop(listen, &["223.5.5.5:53".to_string()], &[]);
+        let ok = check_forwarding_loop(listen, &["223.5.5.5:53".to_string()], &[], &[]);
         assert_eq!(ok.status, DiagnosticStatus::Ok);
 
-        let looped = check_forwarding_loop(listen, &["127.0.0.1:5354".to_string()], &[]);
+        let looped = check_forwarding_loop(listen, &["127.0.0.1:5354".to_string()], &[], &[]);
         assert_eq!(looped.status, DiagnosticStatus::Error);
     }
 

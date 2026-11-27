@@ -9,6 +9,11 @@ use crate::dnssec_anchors::DnssecNta;
 use crate::error::{CoreError, Result};
 use crate::safesearch::SafeSearchConfig;
 
+pub use crate::split_dns_config::{
+    CompiledUpstreamPolicy, ResponseIpRule, SplitDnsMatchMode, SplitDnsRule, UpstreamGroup,
+    UpstreamPolicy, UpstreamStrategy,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -22,192 +27,10 @@ pub enum BlockMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
-pub enum UpstreamStrategy {
-    #[default]
-    Failover,
-    Parallel,
-    LeastLatency,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum AcmeChallengeType {
     #[default]
     Http01,
     Dns01Local,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct UpstreamPolicy {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upstream_strategy: Option<UpstreamStrategy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
-    pub upstream_timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dnssec_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ecs_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ecs_custom_ip: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ecs_ipv4_prefix: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ecs_ipv6_prefix: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dns_rebinding_protection: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dns64_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub svcb_strip_ech: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub svcb_strip_hints: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cf_cdn_enabled: Option<bool>,
-}
-
-impl UpstreamPolicy {
-    pub fn is_empty(&self) -> bool {
-        self == &Self::default()
-    }
-
-    pub fn normalized(&self) -> Self {
-        let mut out = self.clone();
-        out.ecs_custom_ip = out
-            .ecs_custom_ip
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string);
-        out
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        let _ = CompiledUpstreamPolicy::compile(self)?;
-        Ok(())
-    }
-
-    pub fn merge_over(&self, base: &Self) -> Self {
-        Self {
-            upstream_strategy: self.upstream_strategy.or(base.upstream_strategy),
-            upstream_timeout_ms: self.upstream_timeout_ms.or(base.upstream_timeout_ms),
-            dnssec_enabled: self.dnssec_enabled.or(base.dnssec_enabled),
-            ecs_enabled: self.ecs_enabled.or(base.ecs_enabled),
-            ecs_custom_ip: self
-                .ecs_custom_ip
-                .clone()
-                .or_else(|| base.ecs_custom_ip.clone()),
-            ecs_ipv4_prefix: self.ecs_ipv4_prefix.or(base.ecs_ipv4_prefix),
-            ecs_ipv6_prefix: self.ecs_ipv6_prefix.or(base.ecs_ipv6_prefix),
-            dns_rebinding_protection: self
-                .dns_rebinding_protection
-                .or(base.dns_rebinding_protection),
-            dns64_enabled: self.dns64_enabled.or(base.dns64_enabled),
-            svcb_strip_ech: self.svcb_strip_ech.or(base.svcb_strip_ech),
-            svcb_strip_hints: self.svcb_strip_hints.or(base.svcb_strip_hints),
-            cf_cdn_enabled: self.cf_cdn_enabled.or(base.cf_cdn_enabled),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct CompiledUpstreamPolicy {
-    pub upstream_strategy: Option<UpstreamStrategy>,
-    pub upstream_timeout_ms: Option<u64>,
-    pub dnssec_enabled: Option<bool>,
-    pub ecs_enabled: Option<bool>,
-    pub ecs_custom_subnet: Option<(IpAddr, u8)>,
-    pub ecs_ipv4_prefix: Option<u8>,
-    pub ecs_ipv6_prefix: Option<u8>,
-    pub dns_rebinding_protection: Option<bool>,
-    pub dns64_enabled: Option<bool>,
-    pub svcb_strip_ech: Option<bool>,
-    pub svcb_strip_hints: Option<bool>,
-    pub cf_cdn_enabled: Option<bool>,
-}
-
-impl CompiledUpstreamPolicy {
-    pub fn compile(policy: &UpstreamPolicy) -> Result<Self> {
-        if let Some(ms) = policy.upstream_timeout_ms
-            && ms == 0
-        {
-            return Err(CoreError::Config(
-                "upstream_timeout_ms override must be > 0".to_string(),
-            ));
-        }
-        if let Some(v4) = policy.ecs_ipv4_prefix
-            && v4 > 32
-        {
-            return Err(CoreError::Config(format!(
-                "invalid ecs_ipv4_prefix override: {v4} (must be 0..=32)"
-            )));
-        }
-        if let Some(v6) = policy.ecs_ipv6_prefix
-            && v6 > 128
-        {
-            return Err(CoreError::Config(format!(
-                "invalid ecs_ipv6_prefix override: {v6} (must be 0..=128)"
-            )));
-        }
-        let ecs_custom_subnet = match policy
-            .ecs_custom_ip
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(raw) => Some(crate::edns::parse_ecs_custom(
-                raw,
-                policy
-                    .ecs_ipv4_prefix
-                    .unwrap_or_else(default_ecs_ipv4_prefix),
-                policy
-                    .ecs_ipv6_prefix
-                    .unwrap_or_else(default_ecs_ipv6_prefix),
-            )?),
-            None => None,
-        };
-        Ok(Self {
-            upstream_strategy: policy.upstream_strategy,
-            upstream_timeout_ms: policy.upstream_timeout_ms,
-            dnssec_enabled: policy.dnssec_enabled,
-            ecs_enabled: policy.ecs_enabled,
-            ecs_custom_subnet,
-            ecs_ipv4_prefix: policy.ecs_ipv4_prefix,
-            ecs_ipv6_prefix: policy.ecs_ipv6_prefix,
-            dns_rebinding_protection: policy.dns_rebinding_protection,
-            dns64_enabled: policy.dns64_enabled,
-            svcb_strip_ech: policy.svcb_strip_ech,
-            svcb_strip_hints: policy.svcb_strip_hints,
-            cf_cdn_enabled: policy.cf_cdn_enabled,
-        })
-    }
-
-    pub fn resolve_ecs_config(&self, global: &crate::edns::EcsConfig) -> crate::edns::EcsConfig {
-        crate::edns::EcsConfig {
-            enabled: self.ecs_enabled.unwrap_or(global.enabled),
-            custom_subnet: self.ecs_custom_subnet.or(global.custom_subnet),
-            ipv4_prefix: self.ecs_ipv4_prefix.unwrap_or(global.ipv4_prefix),
-            ipv6_prefix: self.ecs_ipv6_prefix.unwrap_or(global.ipv6_prefix),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct SplitDnsRule {
-    #[serde(default)]
-    pub domain: String,
-    #[serde(default)]
-    pub domains_file: Option<String>,
-    #[serde(default)]
-    pub domains_url: Option<String>,
-    pub upstreams: Vec<String>,
-    #[serde(default = "default_true")]
-    pub fallback_to_default: bool,
-    #[serde(default)]
-    pub policy: UpstreamPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +88,12 @@ pub struct Config {
     pub setup_completed: bool,
     #[serde(default)]
     pub split_dns: Vec<SplitDnsRule>,
+    #[serde(default)]
+    pub upstream_groups: Vec<UpstreamGroup>,
+    #[serde(default)]
+    pub split_dns_match_mode: SplitDnsMatchMode,
+    #[serde(default)]
+    pub split_dns_before_client_upstreams: bool,
     #[serde(default = "default_true")]
     pub cname_cloaking_blocking: bool,
     #[serde(default = "default_true")]
@@ -507,6 +336,9 @@ impl Default for Config {
             web_password_hash: String::new(),
             setup_completed: false,
             split_dns: Vec::new(),
+            upstream_groups: Vec::new(),
+            split_dns_match_mode: SplitDnsMatchMode::default(),
+            split_dns_before_client_upstreams: false,
             cname_cloaking_blocking: true,
             doh_enabled: true,
             listen_dot: None,

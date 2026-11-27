@@ -311,16 +311,22 @@ impl DnsPipeline {
         explicitly_allowed: bool,
         out: &mut Vec<u8>,
     ) -> bool {
-        let route = self.resolve_upstream_for_query(policy, &meta.domain, meta.qtype);
-        if let Some(up) = route.upstream_policy.as_deref() {
-            if up.dnssec_enabled == Some(true)
+        let route = self.resolve_upstream_for_query(
+            Some(meta.client_addr.ip()),
+            Some(QueryProtocol::Udp),
+            policy,
+            &meta.domain,
+            meta.qtype,
+        );
+        if let Some(up) = route.upstream_policy.as_deref()
+            && (up.dnssec_enabled == Some(true)
+                || (up.disable_ipv6 == Some(true) && q.qtype == 28)
                 || (up.dns64_enabled == Some(true) && q.qtype == 28)
                 || (matches!(q.qtype, 64 | 65)
                     && (up.svcb_strip_ech == Some(true) || up.svcb_strip_hints == Some(true)))
-                || (up.cf_cdn_enabled == Some(true) && matches!(q.qtype, 1 | 28 | 64 | 65))
-            {
-                return false;
-            }
+                || (up.cf_cdn_enabled == Some(true) && matches!(q.qtype, 1 | 28 | 64 | 65)))
+        {
+            return false;
         }
         let global_ecs = self.ecs_config.load();
         let ecs_cfg = route

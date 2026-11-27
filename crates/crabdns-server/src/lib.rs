@@ -186,6 +186,9 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.web_password_hash = saved_cfg.web_password_hash;
     config.setup_completed = saved_cfg.setup_completed;
     config.split_dns = saved_cfg.split_dns;
+    config.upstream_groups = saved_cfg.upstream_groups;
+    config.split_dns_match_mode = saved_cfg.split_dns_match_mode;
+    config.split_dns_before_client_upstreams = saved_cfg.split_dns_before_client_upstreams;
     config.cname_cloaking_blocking = saved_cfg.cname_cloaking_blocking;
     config.doh_enabled = saved_cfg.doh_enabled;
     config.allow_private_subscriptions = saved_cfg.allow_private_subscriptions;
@@ -307,8 +310,11 @@ fn configure_pipeline(
     pipeline.set_cname_cloaking(cfg.cname_cloaking_blocking);
     pipeline.set_rdns_enabled(cfg.rdns_enabled);
     pipeline.reload_acl(&cfg.allow_cidrs, &cfg.deny_cidrs, cfg.rate_limit_qps)?;
-    pipeline.reload_split_dns_with_resolver(
+    pipeline.set_split_dns_before_client_upstreams(cfg.split_dns_before_client_upstreams);
+    pipeline.reload_split_dns_full(
+        &cfg.upstream_groups,
         &cfg.split_dns,
+        cfg.split_dns_match_mode,
         cfg.upstream_timeout_ms,
         cfg.upstream_strategy,
         &cfg.bootstrap_dns,

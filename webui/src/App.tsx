@@ -32,6 +32,7 @@ import type { RulesPayload } from "./types/RulesPayload";
 import type { SafeSearchConfig } from "./types/SafeSearchConfig";
 import type { SetupCompletePayload } from "./types/SetupCompletePayload";
 import type { SetupStatusResponse } from "./types/SetupStatusResponse";
+import type { SplitDnsMatchMode } from "./types/SplitDnsMatchMode";
 import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { ConfigSnapshotMeta } from "./types/ConfigSnapshotMeta";
 import type { StatsResponse } from "./types/StatsResponse";
@@ -39,6 +40,7 @@ import type { TestRuleResponse } from "./types/TestRuleResponse";
 import type { TlsStatusResponse } from "./types/TlsStatusResponse";
 import type { UpdateStatusResponse } from "./types/UpdateStatusResponse";
 import type { UpstreamCapabilities } from "./types/UpstreamCapabilities";
+import type { UpstreamGroup } from "./types/UpstreamGroup";
 import type { UpstreamStatus } from "./types/UpstreamStatus";
 import type { UpstreamStrategy } from "./types/UpstreamStrategy";
 import type { WsLogFilter } from "./types/WsLogFilter";
@@ -90,6 +92,10 @@ export default function App() {
   const [configMessage, setConfigMessage] = createSignal("");
   const [configIsError, setConfigIsError] = createSignal(false);
   const [splitDnsRules, setSplitDnsRules] = createSignal<SplitDnsRule[]>([]);
+  const [upstreamGroups, setUpstreamGroups] = createSignal<UpstreamGroup[]>([]);
+  const [splitDnsMatchMode, setSplitDnsMatchMode] =
+    createSignal<SplitDnsMatchMode>("specificity_first");
+  const [splitDnsBeforeClientUpstreams, setSplitDnsBeforeClientUpstreams] = createSignal(false);
   const [cnameCloakingBlocking, setCnameCloakingBlocking] = createSignal(true);
   const [dohEnabled, setDohEnabled] = createSignal(true);
   const [allowPrivateSubscriptions, setAllowPrivateSubscriptions] = createSignal(false);
@@ -746,6 +752,9 @@ export default function App() {
     setAuthEnabled(data.web_auth_enabled);
     setAuthUsername(data.web_username || "admin");
     setSplitDnsRules(data.split_dns ?? []);
+    setUpstreamGroups(data.upstream_groups ?? []);
+    setSplitDnsMatchMode(data.split_dns_match_mode ?? "specificity_first");
+    setSplitDnsBeforeClientUpstreams(data.split_dns_before_client_upstreams ?? false);
     setCnameCloakingBlocking(data.cname_cloaking_blocking);
     setDohEnabled(data.doh_enabled);
     setAllowPrivateSubscriptions(data.allow_private_subscriptions);
@@ -1358,6 +1367,9 @@ export default function App() {
       deny_cidrs: parseLines(denyCidrsText()),
       rate_limit_qps: Number(rateLimitQps()),
       split_dns: splitDnsRules(),
+      upstream_groups: upstreamGroups(),
+      split_dns_match_mode: splitDnsMatchMode(),
+      split_dns_before_client_upstreams: splitDnsBeforeClientUpstreams(),
       cname_cloaking_blocking: cnameCloakingBlocking(),
       doh_enabled: dohEnabled(),
       allow_private_subscriptions: allowPrivateSubscriptions(),
@@ -1743,6 +1755,12 @@ export default function App() {
                 onCachePersistChange={setCachePersistEnabled}
                 splitDnsRules={splitDnsRules()}
                 onSplitDnsChange={setSplitDnsRules}
+                upstreamGroups={upstreamGroups()}
+                onUpstreamGroupsChange={setUpstreamGroups}
+                splitDnsMatchMode={splitDnsMatchMode()}
+                onSplitDnsMatchModeChange={setSplitDnsMatchMode}
+                splitDnsBeforeClientUpstreams={splitDnsBeforeClientUpstreams()}
+                onSplitDnsBeforeClientUpstreamsChange={setSplitDnsBeforeClientUpstreams}
                 refreshingSplitDns={refreshingSplitDns()}
                 onRefreshSplitDns={refreshSplitDnsLists}
                 cnameCloakingBlocking={cnameCloakingBlocking()}

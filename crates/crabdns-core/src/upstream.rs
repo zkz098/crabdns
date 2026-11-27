@@ -17,15 +17,19 @@ use crate::clock::monotonic_now_ms;
 use crate::config::UpstreamStrategy;
 use crate::error::{CoreError, Result};
 use crate::singleflight::{FlightRole, Singleflight, wait_follower};
+use crate::upstream_health::{EndpointHealth, ProbeGuard, is_upstream_error_rcode, wire_rcode};
+use crate::upstream_proxy::{ParsedProxy, exchange_endpoint_via_proxy};
+pub use crate::upstream_transport::UpstreamEndpoint;
 pub use crate::upstream_transport::UpstreamStatus;
 use crate::upstream_transport::{
-    ConnPool, EndpointHealth, H3Session, ProbeGuard, UdpSocketPool, build_doq_client_config,
-    build_h3_client_config, exchange_doh, exchange_doq_addrs, exchange_dot_addrs,
-    exchange_h3_addrs, exchange_tcp, exchange_tcp_pooled, exchange_udp, is_udp_truncated,
-    is_upstream_error_rcode, parse_h3_url, parse_socket_addr, try_exchange_doq_pooled,
-    try_exchange_dot_pooled, try_exchange_h3_pooled, wire_rcode,
+    ConnPool, H3Session, UdpSocketPool, build_doq_client_config, build_h3_client_config,
+    exchange_doh, exchange_doq_addrs, exchange_dot_addrs, exchange_h3_addrs, exchange_tcp,
+    exchange_tcp_pooled, exchange_udp, is_udp_truncated, parse_socket_addr,
+    try_exchange_doq_pooled, try_exchange_dot_pooled, try_exchange_h3_pooled,
 };
-pub(crate) use crate::upstream_transport::{read_tcp_framed, send_tcp_framed, split_host_port};
+pub(crate) use crate::upstream_transport::{
+    endpoint_label, read_tcp_framed, send_tcp_framed, split_host_port,
+};
 
 const BOOTSTRAP_CACHE_CAPACITY: u64 = 256;
 
@@ -41,68 +45,6 @@ pub(crate) fn next_tx_id() -> u16 {
     let seq = TX_ID_SEQ.fetch_add(1, Ordering::Relaxed);
     let mixed = (seq ^ nanos).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     ((mixed >> 32) ^ mixed) as u16
-}
-
-#[derive(Debug, Clone)]
-pub enum UpstreamEndpoint {
-    Udp(SocketAddr),
-    Tcp(SocketAddr),
-    Dot {
-        addr: String,
-        server_name: String,
-    },
-    Doh {
-        url: String,
-    },
-    Doq {
-        addr: String,
-        server_name: String,
-    },
-    Doh3 {
-        url: String,
-        host: String,
-        port: u16,
-    },
-}
-
-impl UpstreamEndpoint {
-    pub fn parse(raw: &str) -> Result<Self> {
-        let trimmed = raw.trim();
-        if let Some(rest) = trimmed.strip_prefix("udp://") {
-            let addr = parse_socket_addr(rest, 53)?;
-            return Ok(Self::Udp(addr));
-        }
-        if let Some(rest) = trimmed.strip_prefix("tcp://") {
-            let addr = parse_socket_addr(rest, 53)?;
-            return Ok(Self::Tcp(addr));
-        }
-        if let Some(rest) = trimmed.strip_prefix("tls://") {
-            let (host, port) = split_host_port(rest, 853);
-            return Ok(Self::Dot {
-                addr: format!("{host}:{port}"),
-                server_name: host,
-            });
-        }
-        if let Some(rest) = trimmed.strip_prefix("quic://") {
-            let (host, port) = split_host_port(rest, 853);
-            return Ok(Self::Doq {
-                addr: format!("{host}:{port}"),
-                server_name: host,
-            });
-        }
-        if let Some(rest) = trimmed.strip_prefix("h3://") {
-            let (url, host, port) = parse_h3_url(rest)?;
-            return Ok(Self::Doh3 { url, host, port });
-        }
-        if trimmed.starts_with("https://") {
-            return Ok(Self::Doh {
-                url: trimmed.to_string(),
-            });
-        }
-
-        let addr = parse_socket_addr(trimmed, 53)?;
-        Ok(Self::Udp(addr))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +332,7 @@ pub struct UpstreamPool {
     tls_connector: TlsConnector,
     doq_client_config: quinn::ClientConfig,
     h3_client_config: quinn::ClientConfig,
+    proxy: Option<ParsedProxy>,
 }
 
 impl UpstreamPool {
@@ -411,6 +354,16 @@ impl UpstreamPool {
         strategy: UpstreamStrategy,
         bootstrap_dns: &[String],
     ) -> Result<Self> {
+        Self::new_with_options(specs, timeout_ms, strategy, bootstrap_dns, None)
+    }
+
+    pub fn new_with_options(
+        specs: &[String],
+        timeout_ms: u64,
+        strategy: UpstreamStrategy,
+        bootstrap_dns: &[String],
+        proxy_url: Option<&str>,
+    ) -> Result<Self> {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut endpoints = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -421,6 +374,27 @@ impl UpstreamPool {
                 "at least one upstream DNS server is required".to_string(),
             ));
         }
+
+        let proxy = match proxy_url.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => {
+                let parsed = ParsedProxy::parse(raw)?;
+                if endpoints.iter().any(|ep| {
+                    matches!(
+                        ep,
+                        UpstreamEndpoint::Udp(_)
+                            | UpstreamEndpoint::Doq { .. }
+                            | UpstreamEndpoint::Doh3 { .. }
+                    )
+                }) {
+                    return Err(CoreError::Config(
+                        "proxy_url only supports tcp://, tls://, and https:// upstreams"
+                            .to_string(),
+                    ));
+                }
+                Some(parsed)
+            }
+            None => None,
+        };
 
         let health = (0..endpoints.len())
             .map(|_| EndpointHealth::default())
@@ -467,7 +441,12 @@ impl UpstreamPool {
             tls_connector,
             doq_client_config,
             h3_client_config,
+            proxy,
         })
+    }
+
+    pub fn endpoint_labels(&self) -> Vec<String> {
+        self.endpoints.iter().map(endpoint_label).collect()
     }
 
     pub fn strategy(&self) -> UpstreamStrategy {
@@ -682,6 +661,11 @@ impl UpstreamPool {
         endpoint: &UpstreamEndpoint,
         query_wire: &[u8],
     ) -> Result<Vec<u8>> {
+        if let Some(proxy) = &self.proxy {
+            return self
+                .exchange_one_proxied(idx, endpoint, proxy, query_wire)
+                .await;
+        }
         match endpoint {
             UpstreamEndpoint::Udp(addr) => {
                 let resp = exchange_udp(*addr, &self.udp_pools[idx], query_wire).await?;
@@ -754,16 +738,49 @@ impl UpstreamPool {
             }
         }
     }
-}
 
-pub(crate) fn endpoint_label(endpoint: &UpstreamEndpoint) -> String {
-    match endpoint {
-        UpstreamEndpoint::Udp(addr) => format!("udp://{addr}"),
-        UpstreamEndpoint::Tcp(addr) => format!("tcp://{addr}"),
-        UpstreamEndpoint::Dot { addr, .. } => format!("tls://{addr}"),
-        UpstreamEndpoint::Doh { url } => url.clone(),
-        UpstreamEndpoint::Doq { addr, .. } => format!("quic://{addr}"),
-        UpstreamEndpoint::Doh3 { url, .. } => url.replacen("https://", "h3://", 1),
+    async fn exchange_one_proxied(
+        &self,
+        idx: usize,
+        endpoint: &UpstreamEndpoint,
+        proxy: &ParsedProxy,
+        query_wire: &[u8],
+    ) -> Result<Vec<u8>> {
+        let (proxy_host, proxy_port) = proxy.proxy_host_port();
+        let proxy_addrs = self
+            .bootstrap
+            .resolve_socket_addrs(proxy_host, proxy_port)
+            .await?;
+        let resolve_locally = matches!(
+            proxy,
+            ParsedProxy::Socks5 {
+                resolve_remote: false,
+                ..
+            }
+        );
+        let resolved_dot_ip =
+            if resolve_locally && let UpstreamEndpoint::Dot { addr, .. } = endpoint {
+                let (host, port) = split_host_port(addr, 853);
+                self.bootstrap
+                    .resolve_socket_addrs(&host, port)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .map(|sa| sa.ip().to_string())
+            } else {
+                None
+            };
+        exchange_endpoint_via_proxy(
+            proxy,
+            &proxy_addrs,
+            &self.tls_connector,
+            &self.tcp_pools[idx],
+            &self.dot_pools[idx],
+            endpoint,
+            resolved_dot_ip,
+            query_wire,
+        )
+        .await
     }
 }
 

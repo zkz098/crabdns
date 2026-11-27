@@ -73,6 +73,7 @@ export function SettingsView(props: SettingsViewProps) {
       props.cachePersistEnabled,
       props.cfCdnEnabled,
       props.ecsEnabled,
+      props.upstreamGroups.length > 0,
       props.splitDnsRules.length > 0,
     ]),
   );

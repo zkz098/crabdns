@@ -202,9 +202,11 @@ pub(crate) fn compile_pipeline_clients(
     groups: &[ClientGroup],
 ) -> ApiResult<ClientRegistry> {
     let cfg = state.app.config.load();
-    ClientRegistry::compile(
+    let up_groups = state.app.pipeline.upstream_groups();
+    ClientRegistry::compile_with_groups(
         clients,
         groups,
+        &up_groups,
         cfg.upstream_timeout_ms,
         cfg.upstream_strategy,
         &cfg.bootstrap_dns,

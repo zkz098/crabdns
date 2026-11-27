@@ -100,11 +100,17 @@ pub fn spawn_subscription_refresh_task(
         {
             let cfg_now = config.load_full();
             let missing_split = cfg_now.split_dns.iter().any(|r| {
-                r.domains_url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|u| !u.is_empty())
-                    .is_some_and(|u| storage.load_split_dns_list(u).ok().flatten().is_none())
+                [
+                    r.domains_url.as_deref(),
+                    r.response_ip
+                        .as_ref()
+                        .and_then(|rip| rip.expected_ip_url.as_deref()),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .any(|u| storage.load_split_dns_list(u).ok().flatten().is_none())
             });
             if missing_split {
                 let client = if cfg_now.allow_private_subscriptions {
