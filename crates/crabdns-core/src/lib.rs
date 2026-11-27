@@ -45,7 +45,7 @@ mod wire_fast;
 
 pub use acl::{AccessController, AclDecision, IpNet};
 pub use cache::{CacheHit, CacheStats, DnsCache, PersistedCacheEntry};
-pub use cf_cdn::{CfCdnConfig, CfCdnManager, CfCdnStatus, CfSpeedTestNode};
+pub use cf_cdn::{CfCdnConfig, CfCdnManager, CfCdnStatus, CfCdnTestPhase, CfSpeedTestNode};
 pub use clients::{
     ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ParsedClientIdentifier,
     ResolvedClientPolicy, ip_to_ptr_domain, validate_client_id, validate_client_identifier,

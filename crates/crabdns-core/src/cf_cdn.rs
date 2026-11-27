@@ -137,12 +137,33 @@ pub struct CfSpeedTestNode {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CfCdnTestPhase {
+    #[default]
+    Idle,
+    ResolvingCidrs,
+    LatencyV4,
+    ThroughputV4,
+    LatencyV6,
+    ThroughputV6,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CfCdnStatus {
     pub enabled: bool,
     pub ipv6_enabled: bool,
     pub testing: bool,
+    #[serde(default)]
+    pub phase: CfCdnTestPhase,
+    #[serde(default)]
+    pub progress_current: usize,
+    #[serde(default)]
+    pub progress_total: usize,
+    #[serde(default)]
+    pub current_ip: Option<String>,
     #[ts(type = "number | null")]
     pub last_run_unix_ms: Option<u64>,
     pub last_error: Option<String>,
@@ -283,11 +304,24 @@ impl Default for CfCdnRuntime {
     }
 }
 
+const PROGRESS_NOTIFY_INTERVAL_MS: u64 = 150;
+
+#[derive(Debug, Clone, Default)]
+struct CfCdnProgressSnapshot {
+    phase: CfCdnTestPhase,
+    current: usize,
+    total: usize,
+    current_ip: Option<String>,
+}
+
 pub struct CfCdnManager {
     runtime: ArcSwap<CfCdnRuntime>,
     testing: AtomicBool,
     run_lock: tokio::sync::Mutex<()>,
     status_tx: tokio::sync::watch::Sender<u64>,
+    progress: std::sync::Mutex<CfCdnProgressSnapshot>,
+    created_at: Instant,
+    last_progress_notify_ms: std::sync::atomic::AtomicU64,
 }
 
 impl Default for CfCdnManager {
@@ -304,6 +338,9 @@ impl CfCdnManager {
             testing: AtomicBool::new(false),
             run_lock: tokio::sync::Mutex::new(()),
             status_tx,
+            progress: std::sync::Mutex::new(CfCdnProgressSnapshot::default()),
+            created_at: Instant::now(),
+            last_progress_notify_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -313,6 +350,50 @@ impl CfCdnManager {
 
     fn notify_status_changed(&self) {
         self.status_tx.send_modify(|rev| *rev = rev.wrapping_add(1));
+    }
+
+    fn update_progress(
+        &self,
+        phase: CfCdnTestPhase,
+        current: usize,
+        total: usize,
+        current_ip: Option<String>,
+    ) {
+        let phase_changed = {
+            let mut p = self
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let changed = p.phase != phase || p.current_ip != current_ip;
+            p.phase = phase;
+            p.current = current;
+            p.total = total;
+            p.current_ip = current_ip;
+            changed
+        };
+        let now_ms = u64::try_from(self.created_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let prev = self.last_progress_notify_ms.load(Ordering::Relaxed);
+        let is_boundary = current == 0 || (total > 0 && current >= total);
+        if phase_changed
+            || ((is_boundary
+                || prev == 0
+                || now_ms.saturating_sub(prev) >= PROGRESS_NOTIFY_INTERVAL_MS)
+                && self
+                    .last_progress_notify_ms
+                    .compare_exchange(prev, now_ms.max(1), Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok())
+        {
+            self.notify_status_changed();
+        }
+    }
+
+    fn reset_progress(&self) {
+        self.last_progress_notify_ms.store(0, Ordering::Relaxed);
+        let mut p = self
+            .progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *p = CfCdnProgressSnapshot::default();
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -325,7 +406,23 @@ impl CfCdnManager {
 
     pub fn status(&self) -> CfCdnStatus {
         let mut status = self.runtime.load().status.clone();
-        status.testing = self.is_testing();
+        let testing = self.is_testing();
+        status.testing = testing;
+        if testing {
+            let p = self
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            status.phase = p.phase;
+            status.progress_current = p.current;
+            status.progress_total = p.total;
+            status.current_ip.clone_from(&p.current_ip);
+        } else {
+            status.phase = CfCdnTestPhase::Idle;
+            status.progress_current = 0;
+            status.progress_total = 0;
+            status.current_ip = None;
+        }
         status
     }
 
@@ -376,12 +473,14 @@ impl CfCdnManager {
     /// and atomically updates the active optimal IPs.
     pub async fn run_speedtest(&self) -> CfCdnStatus {
         let _guard = self.run_lock.lock().await;
+        self.reset_progress();
         self.testing.store(true, Ordering::SeqCst);
-        self.notify_status_changed();
+        self.update_progress(CfCdnTestPhase::ResolvingCidrs, 0, 0, None);
 
         let res = self.run_speedtest_inner().await;
 
         self.testing.store(false, Ordering::SeqCst);
+        self.reset_progress();
         self.notify_status_changed();
         res
     }
@@ -390,6 +489,7 @@ impl CfCdnManager {
         let rt_snapshot = self.runtime.load_full();
         let cfg = rt_snapshot.config.clone();
 
+        self.update_progress(CfCdnTestPhase::ResolvingCidrs, 0, 0, None);
         let (ipv4_cidrs, ipv6_cidrs, fetch_err) = resolve_cidrs(&cfg).await;
 
         let samples_per_cidr = cfg.samples_per_cidr.clamp(1, 32);
@@ -402,8 +502,19 @@ impl CfCdnManager {
             .map(IpAddr::V4)
             .collect();
 
-        let (best_v4_node, candidates_v4) =
-            speedtest_family(&v4_candidates, concurrency, top_n, &cfg.speedtest_url).await;
+        let (best_v4_node, candidates_v4) = speedtest_family(
+            &v4_candidates,
+            concurrency,
+            top_n,
+            &cfg.speedtest_url,
+            |done, total| {
+                self.update_progress(CfCdnTestPhase::LatencyV4, done, total, None);
+            },
+            |done, total, ip| {
+                self.update_progress(CfCdnTestPhase::ThroughputV4, done, total, ip);
+            },
+        )
+        .await;
 
         let (best_v6_node, candidates_v6) = if cfg.ipv6_enabled {
             let v6_candidates: Vec<IpAddr> = ipv6_cidrs
@@ -411,7 +522,19 @@ impl CfCdnManager {
                 .flat_map(|c| c.sample(samples_per_cidr))
                 .map(IpAddr::V6)
                 .collect();
-            speedtest_family(&v6_candidates, concurrency, top_n, &cfg.speedtest_url).await
+            speedtest_family(
+                &v6_candidates,
+                concurrency,
+                top_n,
+                &cfg.speedtest_url,
+                |done, total| {
+                    self.update_progress(CfCdnTestPhase::LatencyV6, done, total, None);
+                },
+                |done, total, ip| {
+                    self.update_progress(CfCdnTestPhase::ThroughputV6, done, total, ip);
+                },
+            )
+            .await
         } else {
             (None, Vec::new())
         };
@@ -433,6 +556,10 @@ impl CfCdnManager {
             enabled: cfg.enabled,
             ipv6_enabled: cfg.ipv6_enabled,
             testing: false,
+            phase: CfCdnTestPhase::Idle,
+            progress_current: 0,
+            progress_total: 0,
+            current_ip: None,
             last_run_unix_ms: Some(current_unix_ms()),
             last_error,
             best_ipv4: best_ipv4.map(|ip| ip.to_string()),
@@ -783,14 +910,21 @@ async fn measure_tcp_latency(addr: SocketAddr, connect_timeout: Duration) -> Opt
     }
 }
 
-async fn screen_candidates(
+async fn screen_candidates<F>(
     ips: &[IpAddr],
     concurrency: usize,
     connect_timeout: Duration,
-) -> Vec<(IpAddr, f64)> {
+    mut on_progress: F,
+) -> Vec<(IpAddr, f64)>
+where
+    F: FnMut(usize, usize),
+{
+    let total = ips.len();
+    on_progress(0, total);
     let mut join_set = JoinSet::new();
     let mut results = Vec::new();
     let mut ip_iter = ips.iter().copied();
+    let mut completed = 0_usize;
 
     for _ in 0..concurrency {
         let Some(ip) = ip_iter.next() else {
@@ -803,9 +937,11 @@ async fn screen_candidates(
     }
 
     while let Some(res) = join_set.join_next().await {
+        completed += 1;
         if let Ok((ip, Some(latency))) = res {
             results.push((ip, latency.as_secs_f64() * 1000.0));
         }
+        on_progress(completed, total);
         if let Some(ip) = ip_iter.next() {
             join_set.spawn(async move {
                 let latency = measure_tcp_latency(SocketAddr::new(ip, 443), connect_timeout).await;
@@ -863,23 +999,31 @@ async fn measure_throughput(ip: IpAddr, speedtest_url: &str) -> Result<f64, Stri
     Ok((total_bytes / elapsed_secs) / 1_000_000.0)
 }
 
-async fn speedtest_family(
+async fn speedtest_family<FL, FT>(
     ips: &[IpAddr],
     concurrency: usize,
     top_n: usize,
     speedtest_url: &str,
-) -> (Option<CfSpeedTestNode>, Vec<CfSpeedTestNode>) {
+    on_latency_progress: FL,
+    mut on_throughput_progress: FT,
+) -> (Option<CfSpeedTestNode>, Vec<CfSpeedTestNode>)
+where
+    FL: FnMut(usize, usize),
+    FT: FnMut(usize, usize, Option<String>),
+{
     if ips.is_empty() {
         return (None, Vec::new());
     }
 
-    let screened = screen_candidates(ips, concurrency, TCP_PROBE_TIMEOUT).await;
+    let screened = screen_candidates(ips, concurrency, TCP_PROBE_TIMEOUT, on_latency_progress).await;
     if screened.is_empty() {
         return (None, Vec::new());
     }
 
-    let mut nodes = Vec::with_capacity(top_n.min(screened.len()));
-    for &(ip, latency_ms) in screened.iter().take(top_n) {
+    let throughput_total = top_n.min(screened.len());
+    let mut nodes = Vec::with_capacity(throughput_total);
+    for (idx, &(ip, latency_ms)) in screened.iter().take(top_n).enumerate() {
+        on_throughput_progress(idx, throughput_total, Some(ip.to_string()));
         let (throughput_mbps, error) = match measure_throughput(ip, speedtest_url).await {
             Ok(mbps) => (Some((mbps * 100.0).round() / 100.0), None),
             Err(err) => (None, Some(err)),
@@ -890,6 +1034,7 @@ async fn speedtest_family(
             throughput_mbps,
             error,
         });
+        on_throughput_progress(idx + 1, throughput_total, Some(ip.to_string()));
     }
 
     // Prefer the highest throughput node; if all throughput tests failed, fall back to lowest latency.

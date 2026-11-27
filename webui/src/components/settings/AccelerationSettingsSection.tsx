@@ -128,8 +128,69 @@ export function AccelerationSettingsSection(props: SettingsViewProps) {
 
         {/* Live status summary */}
         <Show when={props.cfCdnStatus}>
-          {(st) => (
+          {(st) => {
+            const progressPercent = (): number | null => {
+              const s = st();
+              if (!s.testing || s.progress_total <= 0) return null;
+              return Math.min(100, Math.round((s.progress_current / s.progress_total) * 100));
+            };
+            const phaseLabel = (): string => {
+              switch (st().phase) {
+                case "resolving_cidrs":
+                  return t("settingsCfCdnPhaseResolving");
+                case "latency_v4":
+                  return t("settingsCfCdnPhaseLatencyV4");
+                case "throughput_v4":
+                  return t("settingsCfCdnPhaseThroughputV4");
+                case "latency_v6":
+                  return t("settingsCfCdnPhaseLatencyV6");
+                case "throughput_v6":
+                  return t("settingsCfCdnPhaseThroughputV6");
+                default:
+                  return t("settingsCfCdnTesting");
+              }
+            };
+            return (
             <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#000000] p-3 space-y-2 text-xs">
+              <Show when={st().testing}>
+                <div class="rounded-md border border-[#eaeaea] dark:border-[#222222] bg-white dark:bg-[#0a0a0a] p-2.5 space-y-2">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="flex items-center gap-1.5 min-w-0 font-medium text-[#171717] dark:text-[#ededed]">
+                      <span class="i-ri-loader-4-line animate-spin text-sm shrink-0" />
+                      <span class="truncate">{phaseLabel()}</span>
+                      <Show when={st().current_ip}>
+                        {(ip) => (
+                          <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#f4f4f5] dark:bg-[#171717] text-[#52525b] dark:text-[#a1a1aa] border border-[#eaeaea] dark:border-[#262626] shrink-0">
+                            {ip()}
+                          </span>
+                        )}
+                      </Show>
+                    </div>
+                    <Show when={st().progress_total > 0}>
+                      <span class="font-mono text-[11px] text-[#666666] dark:text-[#a1a1aa] tabular-nums shrink-0">
+                        {st().progress_current} / {st().progress_total} ({progressPercent() ?? 0}%)
+                      </span>
+                    </Show>
+                  </div>
+                  <div
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={progressPercent() ?? undefined}
+                    class="h-2 w-full rounded-full overflow-hidden bg-[#eaeaea] dark:bg-[#262626]"
+                  >
+                    <Show
+                      when={progressPercent() !== null}
+                      fallback={<div class="h-full w-1/3 rounded-full bg-emerald-500 animate-pulse" />}
+                    >
+                      <div
+                        class="h-full rounded-full transition-all duration-200 ease-out bg-[#171717] dark:bg-[#ededed]"
+                        style={{ width: `${progressPercent()}%` }}
+                      />
+                    </Show>
+                  </div>
+                </div>
+              </Show>
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div>
                   <div class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
@@ -203,7 +264,8 @@ export function AccelerationSettingsSection(props: SettingsViewProps) {
                 </details>
               </Show>
             </div>
-          )}
+            );
+          }}
         </Show>
 
         <Show when={props.cfCdnEnabled}>
