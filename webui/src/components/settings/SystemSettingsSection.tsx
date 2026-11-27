@@ -1,9 +1,18 @@
 import { For, Show } from "solid-js";
 import { t } from "../../i18n";
+import type { StorageProfile } from "../../types/StorageProfile";
 import { PortPrecheckPanel } from "../PortPrecheckPanel";
+import { SelectMenu, type SelectOption } from "../SelectMenu";
 import { SetupGuideCard } from "../SetupGuideCard";
-import { SettingsCard, SettingsSectionHeader } from "./SettingsControls";
+import { NUMBER_INPUT_CLASS, SettingsCard, SettingsSectionHeader } from "./SettingsControls";
 import type { SettingsViewProps } from "./types";
+
+const STORAGE_PROFILE_OPTIONS: SelectOption<StorageProfile>[] = [
+  { value: "auto", label: () => t("settingsStorageProfileAuto") },
+  { value: "embedded", label: () => t("settingsStorageProfileEmbedded") },
+  { value: "balanced", label: () => t("settingsStorageProfileBalanced") },
+  { value: "performance", label: () => t("settingsStorageProfilePerformance") },
+];
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -48,6 +57,41 @@ export function SystemSettingsSection(props: SettingsViewProps) {
         title={t("settingsSecSystemTitle")}
         description={t("settingsSecSystemDesc")}
       />
+
+      {/* Storage & Disk Protection */}
+      <SettingsCard
+        icon="i-ri-database-line"
+        title={t("settingsStorageCardTitle")}
+        description={t("settingsStorageCardDesc")}
+      >
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-medium text-[#171717] dark:text-[#ededed] mb-1.5">
+              {t("settingsStorageProfileLabel")}
+            </label>
+            <SelectMenu
+              variant="subtle"
+              size="md"
+              value={props.storageProfile}
+              options={STORAGE_PROFILE_OPTIONS}
+              onChange={props.onStorageProfileChange}
+              class="w-full"
+            />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-[#171717] dark:text-[#ededed] mb-1.5">
+              {t("settingsDiskMinFreeLabel")}
+            </label>
+            <input
+              type="number"
+              min={0}
+              value={props.diskMinFreeMb}
+              onInput={(e) => props.onDiskMinFreeMbChange(Number(e.currentTarget.value))}
+              class={NUMBER_INPUT_CLASS}
+            />
+          </div>
+        </div>
+      </SettingsCard>
 
       {/* System Backup & Restore */}
       <Show when={props.onExportBackup || props.onImportBackup}>

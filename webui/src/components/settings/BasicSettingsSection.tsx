@@ -115,6 +115,19 @@ export function BasicSettingsSection(props: SettingsViewProps) {
               class={NUMBER_INPUT_CLASS}
             />
           </div>
+
+          <div>
+            <label class="inline-flex items-center gap-1.5 text-xs font-medium text-[#171717] dark:text-[#ededed] mb-1.5">
+              <span>{t("settingsLogMaxDiskLabel")}</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={props.logMaxDiskMb}
+              onInput={(e) => props.onLogMaxDiskMbChange(Number(e.currentTarget.value))}
+              class={NUMBER_INPUT_CLASS}
+            />
+          </div>
         </div>
       </SettingsCard>
 

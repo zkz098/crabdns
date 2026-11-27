@@ -71,13 +71,19 @@ export function AccelerationSettingsSection(props: SettingsViewProps) {
         </div>
 
         <div class="space-y-2.5 pt-1">
-          <ToggleRow
-            label={t("settingsOptimisticLabel")}
-            tooltip={t("tooltipOptimisticCache")}
-            checked={props.optimisticCache}
-            onChange={props.onOptimisticCacheChange}
-          />
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <ToggleRow
+              label={t("settingsOptimisticLabel")}
+              tooltip={t("tooltipOptimisticCache")}
+              checked={props.optimisticCache}
+              onChange={props.onOptimisticCacheChange}
+            />
+            <ToggleRow
+              label={t("settingsServeStaleLabel")}
+              tooltipAlign="right"
+              checked={props.serveStaleEnabled}
+              onChange={props.onServeStaleChange}
+            />
             <ToggleRow
               label={t("settingsCachePrefetchLabel")}
               tooltip={t("tooltipCachePrefetch")}
@@ -328,6 +334,84 @@ export function AccelerationSettingsSection(props: SettingsViewProps) {
                 class={TEXTAREA_MONO_CLASS}
               />
             </div>
+
+            <details class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3">
+              <summary class="cursor-pointer text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                {t("settingsCfCdnAdvancedLabel")}
+              </summary>
+              <div class="mt-3 space-y-3">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                      {t("settingsCfCdnConcurrencyLabel")}
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={props.cfCdnConcurrency}
+                      onInput={(e) =>
+                        props.onCfCdnConcurrencyChange(Number(e.currentTarget.value) || 50)
+                      }
+                      class={MONO_INPUT_CLASS}
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                      {t("settingsCfCdnTopNLabel")}
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={props.cfCdnTopN}
+                      onInput={(e) => props.onCfCdnTopNChange(Number(e.currentTarget.value) || 3)}
+                      class={MONO_INPUT_CLASS}
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                      {t("settingsCfCdnSamplesPerCidrLabel")}
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={props.cfCdnSamplesPerCidr}
+                      onInput={(e) =>
+                        props.onCfCdnSamplesPerCidrChange(Number(e.currentTarget.value) || 3)
+                      }
+                      class={MONO_INPUT_CLASS}
+                    />
+                  </div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                      {t("settingsCfCdnCustomIpv4Label")}
+                    </label>
+                    <textarea
+                      rows={2}
+                      spellcheck={false}
+                      placeholder="104.16.0.0/13"
+                      value={props.cfCdnCustomIpv4CidrsText}
+                      onInput={(e) => props.onCfCdnCustomIpv4CidrsChange(e.currentTarget.value)}
+                      class={TEXTAREA_MONO_CLASS}
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                      {t("settingsCfCdnCustomIpv6Label")}
+                    </label>
+                    <textarea
+                      rows={2}
+                      spellcheck={false}
+                      placeholder="2606:4700::/32"
+                      value={props.cfCdnCustomIpv6CidrsText}
+                      onInput={(e) => props.onCfCdnCustomIpv6CidrsChange(e.currentTarget.value)}
+                      class={TEXTAREA_MONO_CLASS}
+                    />
+                  </div>
+                </div>
+              </div>
+            </details>
           </div>
         </Show>
       </SettingsCard>

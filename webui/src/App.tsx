@@ -25,6 +25,7 @@ import type { ConfigUpdatePayload } from "./types/ConfigUpdatePayload";
 import type { CreateSubscriptionPayload } from "./types/CreateSubscriptionPayload";
 import type { DnsRewriteEntry } from "./types/DnsRewriteEntry";
 import type { DnsRewritePayload } from "./types/DnsRewritePayload";
+import type { DnssecNta } from "./types/DnssecNta";
 import type { FilterSubscription } from "./types/FilterSubscription";
 import type { QueryEvent } from "./types/QueryEvent";
 import type { QuickRuleResponse } from "./types/QuickRuleResponse";
@@ -39,6 +40,7 @@ import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { SplitDnsSourceStatus } from "./types/SplitDnsSourceStatus";
 import type { ConfigSnapshotMeta } from "./types/ConfigSnapshotMeta";
 import type { StatsResponse } from "./types/StatsResponse";
+import type { StorageProfile } from "./types/StorageProfile";
 import type { TestRuleResponse } from "./types/TestRuleResponse";
 import type { TlsStatusResponse } from "./types/TlsStatusResponse";
 import type { UpdateStatusResponse } from "./types/UpdateStatusResponse";
@@ -90,8 +92,10 @@ export default function App() {
   const [cacheMaxTtlSecs, setCacheMaxTtlSecs] = createSignal(86400);
   const [cachePrefetchEnabled, setCachePrefetchEnabled] = createSignal(true);
   const [cachePersistEnabled, setCachePersistEnabled] = createSignal(false);
+  const [serveStaleEnabled, setServeStaleEnabled] = createSignal(true);
   const [upstreamTimeoutMs, setUpstreamTimeoutMs] = createSignal(3000);
   const [logRetentionHours, setLogRetentionHours] = createSignal(24);
+  const [logMaxDiskMb, setLogMaxDiskMb] = createSignal(256);
   const [configMessage, setConfigMessage] = createSignal("");
   const [configIsError, setConfigIsError] = createSignal(false);
   const [splitDnsRules, setSplitDnsRules] = createSignal<SplitDnsRule[]>([]);
@@ -109,6 +113,18 @@ export default function App() {
   const [ecsIpv4Prefix, setEcsIpv4Prefix] = createSignal(24);
   const [ecsIpv6Prefix, setEcsIpv6Prefix] = createSignal(56);
   const [dnssecEnabled, setDnssecEnabled] = createSignal(false);
+  const [dnssecStrictClock, setDnssecStrictClock] = createSignal(false);
+  const [dnssecAutoRollover, setDnssecAutoRollover] = createSignal(false);
+  const [dnssecTrustAnchorsText, setDnssecTrustAnchorsText] = createSignal("");
+  const [dnssecNtas, setDnssecNtas] = createSignal<DnssecNta[]>([]);
+  const [edeEnabled, setEdeEnabled] = createSignal(true);
+  const [dnsCookiesEnabled, setDnsCookiesEnabled] = createSignal(false);
+  const [dnsCookiesRequireValid, setDnsCookiesRequireValid] = createSignal(false);
+  const [maxUdpPayloadSize, setMaxUdpPayloadSize] = createSignal(1232);
+  const [rrlEnabled, setRrlEnabled] = createSignal(false);
+  const [rrlResponsesPerSecond, setRrlResponsesPerSecond] = createSignal(10);
+  const [rrlSlip, setRrlSlip] = createSignal(2);
+  const [rrlWindowSecs, setRrlWindowSecs] = createSignal(15);
   const [hostsEnabled, setHostsEnabled] = createSignal(false);
   const [hostsPath, setHostsPath] = createSignal("");
   const [dhcpLeasesEnabled, setDhcpLeasesEnabled] = createSignal(false);
@@ -155,7 +171,14 @@ export default function App() {
     "https://speed.cloudflare.com/__down?bytes=99999999",
   );
   const [cfCdnExcludedDomainsText, setCfCdnExcludedDomainsText] = createSignal("");
+  const [cfCdnConcurrency, setCfCdnConcurrency] = createSignal(50);
+  const [cfCdnTopN, setCfCdnTopN] = createSignal(3);
+  const [cfCdnSamplesPerCidr, setCfCdnSamplesPerCidr] = createSignal(3);
+  const [cfCdnCustomIpv4CidrsText, setCfCdnCustomIpv4CidrsText] = createSignal("");
+  const [cfCdnCustomIpv6CidrsText, setCfCdnCustomIpv6CidrsText] = createSignal("");
   const [cfCdnStatus, setCfCdnStatus] = createSignal<CfCdnStatus | null>(null);
+  const [storageProfile, setStorageProfile] = createSignal<StorageProfile>("auto");
+  const [diskMinFreeMb, setDiskMinFreeMb] = createSignal(128);
   const [tlsStatus, setTlsStatus] = createSignal<TlsStatusResponse | null>(null);
   const [reloadingTls, setReloadingTls] = createSignal(false);
   const [tlsMessage, setTlsMessage] = createSignal("");
@@ -810,8 +833,10 @@ export default function App() {
     setCacheMaxTtlSecs(data.cache_max_ttl_secs);
     setCachePrefetchEnabled(data.cache_prefetch_enabled);
     setCachePersistEnabled(data.cache_persist_enabled);
+    setServeStaleEnabled(data.serve_stale_enabled ?? true);
     setUpstreamTimeoutMs(data.upstream_timeout_ms);
     setLogRetentionHours(data.log_retention_hours);
+    setLogMaxDiskMb(data.log_max_disk_mb ?? 256);
     setAuthEnabled(data.web_auth_enabled);
     setAuthUsername(data.web_username || "admin");
     setSplitDnsRules(data.split_dns ?? []);
@@ -827,6 +852,18 @@ export default function App() {
     setEcsIpv4Prefix(data.ecs_ipv4_prefix);
     setEcsIpv6Prefix(data.ecs_ipv6_prefix);
     setDnssecEnabled(data.dnssec_enabled);
+    setDnssecStrictClock(data.dnssec_strict_clock ?? false);
+    setDnssecAutoRollover(data.dnssec_auto_rollover ?? false);
+    setDnssecTrustAnchorsText((data.dnssec_trust_anchors ?? []).join("\n"));
+    setDnssecNtas(data.dnssec_ntas ?? []);
+    setEdeEnabled(data.ede_enabled ?? true);
+    setDnsCookiesEnabled(data.dns_cookies_enabled ?? false);
+    setDnsCookiesRequireValid(data.dns_cookies_require_valid ?? false);
+    setMaxUdpPayloadSize(data.max_udp_payload_size ?? 1232);
+    setRrlEnabled(data.rrl_enabled ?? false);
+    setRrlResponsesPerSecond(data.rrl_responses_per_second ?? 10);
+    setRrlSlip(data.rrl_slip ?? 2);
+    setRrlWindowSecs(data.rrl_window_secs ?? 15);
     setHostsEnabled(data.hosts_enabled);
     setHostsPath(data.hosts_path ?? "");
     setDhcpLeasesEnabled(data.dhcp_leases_enabled);
@@ -880,7 +917,14 @@ export default function App() {
       setCfCdnTtlSecs(data.cf_cdn.ttl_secs);
       setCfCdnSpeedtestUrl(data.cf_cdn.speedtest_url);
       setCfCdnExcludedDomainsText((data.cf_cdn.excluded_domains ?? []).join("\n"));
+      setCfCdnConcurrency(data.cf_cdn.concurrency ?? 50);
+      setCfCdnTopN(data.cf_cdn.top_n ?? 3);
+      setCfCdnSamplesPerCidr(data.cf_cdn.samples_per_cidr ?? 3);
+      setCfCdnCustomIpv4CidrsText((data.cf_cdn.custom_ipv4_cidrs ?? []).join("\n"));
+      setCfCdnCustomIpv6CidrsText((data.cf_cdn.custom_ipv6_cidrs ?? []).join("\n"));
     }
+    setStorageProfile(data.storage_profile ?? "auto");
+    setDiskMinFreeMb(data.disk_min_free_mb ?? 128);
   }
 
   const clientNameMap = createMemo<Record<string, string>>(() => {
@@ -1424,9 +1468,10 @@ export default function App() {
       cache_max_ttl_secs: Number(cacheMaxTtlSecs()),
       cache_prefetch_enabled: cachePrefetchEnabled(),
       cache_persist_enabled: cachePersistEnabled(),
+      serve_stale_enabled: serveStaleEnabled(),
       upstream_timeout_ms: Number(upstreamTimeoutMs()),
       log_retention_hours: Number(logRetentionHours()),
-      log_max_disk_mb: configData()?.log_max_disk_mb ?? null,
+      log_max_disk_mb: Number(logMaxDiskMb()) || 256,
       block_mode: blockMode(),
       allow_cidrs: parseLines(allowCidrsText()),
       deny_cidrs: parseLines(denyCidrsText()),
@@ -1444,8 +1489,10 @@ export default function App() {
       ecs_ipv4_prefix: Number(ecsIpv4Prefix()),
       ecs_ipv6_prefix: Number(ecsIpv6Prefix()),
       dnssec_enabled: dnssecEnabled(),
-      dnssec_trust_anchors: configData()?.dnssec_trust_anchors ?? null,
-      dnssec_ntas: configData()?.dnssec_ntas ?? null,
+      dnssec_strict_clock: dnssecStrictClock(),
+      dnssec_auto_rollover: dnssecAutoRollover(),
+      dnssec_trust_anchors: parseLines(dnssecTrustAnchorsText()),
+      dnssec_ntas: dnssecNtas(),
       hosts_enabled: hostsEnabled(),
       hosts_path: hostsPath().trim(),
       dhcp_leases_enabled: dhcpLeasesEnabled(),
@@ -1477,22 +1524,25 @@ export default function App() {
         interval_secs: Number(cfCdnIntervalSecs()) || 1800,
         speedtest_url:
           cfCdnSpeedtestUrl().trim() || "https://speed.cloudflare.com/__down?bytes=99999999",
-        concurrency: configData()?.cf_cdn?.concurrency ?? 50,
-        top_n: configData()?.cf_cdn?.top_n ?? 3,
-        samples_per_cidr: configData()?.cf_cdn?.samples_per_cidr ?? 3,
+        concurrency: Number(cfCdnConcurrency()) || 50,
+        top_n: Number(cfCdnTopN()) || 3,
+        samples_per_cidr: Number(cfCdnSamplesPerCidr()) || 3,
         ttl_secs: Number(cfCdnTtlSecs()) || 60,
         excluded_domains: parseLines(cfCdnExcludedDomainsText()),
-        custom_ipv4_cidrs: configData()?.cf_cdn?.custom_ipv4_cidrs ?? [],
-        custom_ipv6_cidrs: configData()?.cf_cdn?.custom_ipv6_cidrs ?? [],
+        custom_ipv4_cidrs: parseLines(cfCdnCustomIpv4CidrsText()),
+        custom_ipv6_cidrs: parseLines(cfCdnCustomIpv6CidrsText()),
       },
-      ede_enabled: null,
-      dns_cookies_enabled: null,
-      dns_cookies_require_valid: null,
-      max_udp_payload_size: null,
-      rrl_enabled: null,
-      rrl_responses_per_second: null,
-      rrl_slip: null,
-      rrl_window_secs: null,
+      ede_enabled: edeEnabled(),
+      dns_cookies_enabled: dnsCookiesEnabled(),
+      dns_cookies_require_valid: dnsCookiesRequireValid(),
+      max_udp_payload_size: Number(maxUdpPayloadSize()) || 1232,
+      rrl_enabled: rrlEnabled(),
+      rrl_responses_per_second: Number(rrlResponsesPerSecond()) || 10,
+      rrl_slip: Number(rrlSlip()) || 0,
+      rrl_window_secs: Number(rrlWindowSecs()) || 15,
+      storage_profile: storageProfile(),
+      disk_min_free_mb: Number(diskMinFreeMb()) || 0,
+      confirm_timeout_secs: null,
       acme_enabled: acmeEnabled(),
       acme_domains: acmeDomainsText()
         .split(/[\n,]+/)
@@ -1815,6 +1865,8 @@ export default function App() {
                 onUpstreamTimeoutChange={setUpstreamTimeoutMs}
                 logRetentionHours={logRetentionHours()}
                 onLogRetentionChange={setLogRetentionHours}
+                logMaxDiskMb={logMaxDiskMb()}
+                onLogMaxDiskMbChange={setLogMaxDiskMb}
                 optimisticCache={optimisticCache()}
                 onOptimisticCacheChange={setOptimisticCache}
                 cacheMinTtlSecs={cacheMinTtlSecs()}
@@ -1825,6 +1877,8 @@ export default function App() {
                 onCachePrefetchChange={setCachePrefetchEnabled}
                 cachePersistEnabled={cachePersistEnabled()}
                 onCachePersistChange={setCachePersistEnabled}
+                serveStaleEnabled={serveStaleEnabled()}
+                onServeStaleChange={setServeStaleEnabled}
                 splitDnsRules={splitDnsRules()}
                 onSplitDnsChange={setSplitDnsRules}
                 upstreamGroups={upstreamGroups()}
@@ -1854,6 +1908,30 @@ export default function App() {
                 onEcsIpv6PrefixChange={setEcsIpv6Prefix}
                 dnssecEnabled={dnssecEnabled()}
                 onDnssecEnabledChange={setDnssecEnabled}
+                dnssecStrictClock={dnssecStrictClock()}
+                onDnssecStrictClockChange={setDnssecStrictClock}
+                dnssecAutoRollover={dnssecAutoRollover()}
+                onDnssecAutoRolloverChange={setDnssecAutoRollover}
+                dnssecTrustAnchorsText={dnssecTrustAnchorsText()}
+                onDnssecTrustAnchorsChange={setDnssecTrustAnchorsText}
+                dnssecNtas={dnssecNtas()}
+                onDnssecNtasChange={setDnssecNtas}
+                edeEnabled={edeEnabled()}
+                onEdeEnabledChange={setEdeEnabled}
+                dnsCookiesEnabled={dnsCookiesEnabled()}
+                onDnsCookiesEnabledChange={setDnsCookiesEnabled}
+                dnsCookiesRequireValid={dnsCookiesRequireValid()}
+                onDnsCookiesRequireValidChange={setDnsCookiesRequireValid}
+                maxUdpPayloadSize={maxUdpPayloadSize()}
+                onMaxUdpPayloadSizeChange={setMaxUdpPayloadSize}
+                rrlEnabled={rrlEnabled()}
+                onRrlEnabledChange={setRrlEnabled}
+                rrlResponsesPerSecond={rrlResponsesPerSecond()}
+                onRrlResponsesPerSecondChange={setRrlResponsesPerSecond}
+                rrlSlip={rrlSlip()}
+                onRrlSlipChange={setRrlSlip}
+                rrlWindowSecs={rrlWindowSecs()}
+                onRrlWindowSecsChange={setRrlWindowSecs}
                 hostsEnabled={hostsEnabled()}
                 onHostsEnabledChange={setHostsEnabled}
                 hostsPath={hostsPath()}
@@ -1912,8 +1990,22 @@ export default function App() {
                 onCfCdnSpeedtestUrlChange={setCfCdnSpeedtestUrl}
                 cfCdnExcludedDomainsText={cfCdnExcludedDomainsText()}
                 onCfCdnExcludedDomainsChange={setCfCdnExcludedDomainsText}
+                cfCdnConcurrency={cfCdnConcurrency()}
+                onCfCdnConcurrencyChange={setCfCdnConcurrency}
+                cfCdnTopN={cfCdnTopN()}
+                onCfCdnTopNChange={setCfCdnTopN}
+                cfCdnSamplesPerCidr={cfCdnSamplesPerCidr()}
+                onCfCdnSamplesPerCidrChange={setCfCdnSamplesPerCidr}
+                cfCdnCustomIpv4CidrsText={cfCdnCustomIpv4CidrsText()}
+                onCfCdnCustomIpv4CidrsChange={setCfCdnCustomIpv4CidrsText}
+                cfCdnCustomIpv6CidrsText={cfCdnCustomIpv6CidrsText()}
+                onCfCdnCustomIpv6CidrsChange={setCfCdnCustomIpv6CidrsText}
                 cfCdnStatus={cfCdnStatus()}
                 onRunCfCdnSpeedtest={() => void runCfCdnSpeedtest()}
+                storageProfile={storageProfile()}
+                onStorageProfileChange={setStorageProfile}
+                diskMinFreeMb={diskMinFreeMb()}
+                onDiskMinFreeMbChange={setDiskMinFreeMb}
                 tlsCertPath={tlsCertPath()}
                 onTlsCertPathChange={setTlsCertPath}
                 tlsKeyPath={tlsKeyPath()}

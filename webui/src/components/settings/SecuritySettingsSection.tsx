@@ -1,9 +1,10 @@
-import { For, Show } from "solid-js";
+import { For, Show, createSignal } from "solid-js";
 import { t } from "../../i18n";
 import type { SafeSearchConfig } from "../../types/SafeSearchConfig";
 import { InfoTooltip } from "../InfoTooltip";
 import {
   INPUT_CLASS,
+  MONO_INPUT_CLASS,
   NUMBER_INPUT_CLASS,
   SettingsCard,
   SettingsSectionHeader,
@@ -30,6 +31,30 @@ const SAFESEARCH_ENGINES: Array<{
 ];
 
 export function SecuritySettingsSection(props: SettingsViewProps) {
+  const [ntaDomain, setNtaDomain] = createSignal("");
+  const [ntaExpiry, setNtaExpiry] = createSignal("");
+  const [ntaReason, setNtaReason] = createSignal("");
+
+  function addNta() {
+    const domain = ntaDomain().trim();
+    if (!domain) return;
+    const rawExp = ntaExpiry().trim();
+    const parsedExp = rawExp ? Number(rawExp) : null;
+    const expires_at_unix_secs =
+      parsedExp !== null && Number.isFinite(parsedExp) ? Math.trunc(parsedExp) : null;
+    props.onDnssecNtasChange([
+      ...props.dnssecNtas,
+      {
+        domain,
+        expires_at_unix_secs,
+        reason: ntaReason().trim() || undefined,
+      },
+    ]);
+    setNtaDomain("");
+    setNtaExpiry("");
+    setNtaReason("");
+  }
+
   return (
     <div class="space-y-4">
       <SettingsSectionHeader
@@ -84,15 +109,152 @@ export function SecuritySettingsSection(props: SettingsViewProps) {
             checked={props.svcbStripHints}
             onChange={props.onSvcbStripHintsChange}
           />
-          <div class="sm:col-span-2">
-            <ToggleRow
-              label={t("settingsAllowPrivateSubsLabel")}
-              tooltip={t("tooltipAllowPrivateSubs")}
-              checked={props.allowPrivateSubscriptions}
-              onChange={props.onAllowPrivateSubscriptionsChange}
-            />
-          </div>
+          <ToggleRow
+            label={t("settingsAllowPrivateSubsLabel")}
+            tooltip={t("tooltipAllowPrivateSubs")}
+            checked={props.allowPrivateSubscriptions}
+            onChange={props.onAllowPrivateSubscriptionsChange}
+          />
+          <ToggleRow
+            label={t("settingsEdeLabel")}
+            tooltipAlign="right"
+            checked={props.edeEnabled}
+            onChange={props.onEdeEnabledChange}
+          />
+          <ToggleRow
+            label={t("settingsDnsCookiesLabel")}
+            checked={props.dnsCookiesEnabled}
+            onChange={props.onDnsCookiesEnabledChange}
+          />
+          <ToggleRow
+            label={t("settingsDnsCookiesRequireValidLabel")}
+            tooltipAlign="right"
+            checked={props.dnsCookiesRequireValid}
+            onChange={props.onDnsCookiesRequireValidChange}
+          />
         </div>
+
+        <div class="max-w-xs">
+          <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+            {t("settingsMaxUdpPayloadLabel")}
+          </label>
+          <input
+            type="number"
+            min={512}
+            max={4096}
+            value={props.maxUdpPayloadSize}
+            onInput={(e) => props.onMaxUdpPayloadSizeChange(Number(e.currentTarget.value))}
+            class={NUMBER_INPUT_CLASS}
+          />
+        </div>
+
+        <Show when={props.dnssecEnabled}>
+          <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3.5 space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <ToggleRow
+                label={t("settingsDnssecStrictClockLabel")}
+                checked={props.dnssecStrictClock}
+                onChange={props.onDnssecStrictClockChange}
+                compact
+              />
+              <ToggleRow
+                label={t("settingsDnssecAutoRolloverLabel")}
+                checked={props.dnssecAutoRollover}
+                onChange={props.onDnssecAutoRolloverChange}
+                compact
+              />
+            </div>
+
+            <div>
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                {t("settingsDnssecTrustAnchorsLabel")}
+              </label>
+              <textarea
+                rows={2}
+                spellcheck={false}
+                placeholder=". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+                value={props.dnssecTrustAnchorsText}
+                onInput={(e) => props.onDnssecTrustAnchorsChange(e.currentTarget.value)}
+                class={TEXTAREA_MONO_CLASS}
+              />
+            </div>
+
+            <div class="space-y-2">
+              <label class="block text-xs text-[#666666] dark:text-[#a1a1aa]">
+                {t("settingsDnssecNtasLabel")}
+              </label>
+              <Show when={props.dnssecNtas.length > 0}>
+                <div class="space-y-1.5">
+                  <For each={props.dnssecNtas}>
+                    {(nta, idx) => (
+                      <div class="flex items-center justify-between gap-2 rounded-md border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] px-2.5 py-1.5 text-xs">
+                        <div class="min-w-0 flex-1 flex flex-wrap items-center gap-2 font-mono">
+                          <span class="font-medium text-[#171717] dark:text-[#ededed]">
+                            {nta.domain}
+                          </span>
+                          <Show when={nta.expires_at_unix_secs}>
+                            {(exp) => (
+                              <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                                exp:{exp()}
+                              </span>
+                            )}
+                          </Show>
+                          <Show when={nta.reason}>
+                            {(reason) => (
+                              <span class="text-[11px] text-[#8f8f8f] dark:text-[#71717a] font-sans">
+                                ({reason()})
+                              </span>
+                            )}
+                          </Show>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            props.onDnssecNtasChange(props.dnssecNtas.filter((_, i) => i !== idx()))
+                          }
+                          class="text-[#8f8f8f] hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer bg-transparent border-0 p-1"
+                        >
+                          <span class="i-ri-delete-bin-line text-sm" />
+                        </button>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <div class="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                <input
+                  type="text"
+                  placeholder="broken.example.com"
+                  value={ntaDomain()}
+                  onInput={(e) => setNtaDomain(e.currentTarget.value)}
+                  class={MONO_INPUT_CLASS}
+                />
+                <input
+                  type="number"
+                  placeholder={t("settingsDnssecNtaExpiryPlaceholder")}
+                  value={ntaExpiry()}
+                  onInput={(e) => setNtaExpiry(e.currentTarget.value)}
+                  class={MONO_INPUT_CLASS}
+                />
+                <input
+                  type="text"
+                  placeholder={t("settingsDnssecNtaReasonPlaceholder")}
+                  value={ntaReason()}
+                  onInput={(e) => setNtaReason(e.currentTarget.value)}
+                  class={INPUT_CLASS}
+                />
+                <button
+                  type="button"
+                  disabled={!ntaDomain().trim()}
+                  onClick={addNta}
+                  class="h-9 px-3 rounded-lg text-xs font-medium border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#171717] dark:text-[#ededed] cursor-pointer disabled:opacity-50 transition-colors"
+                >
+                  {t("settingsDnssecNtaAddBtn")}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Show>
 
         <div>
           <label class="inline-flex items-center gap-1.5 text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
@@ -212,6 +374,59 @@ export function SecuritySettingsSection(props: SettingsViewProps) {
             onInput={(e) => props.onRateLimitChange(Number(e.currentTarget.value))}
             class={NUMBER_INPUT_CLASS}
           />
+        </div>
+
+        <div class="border-t border-[#eaeaea] dark:border-[#262626] pt-4 space-y-3">
+          <p class="text-[11px] font-medium uppercase tracking-wider text-[#8f8f8f] dark:text-[#71717a]">
+            {t("settingsRrlTitle")}
+          </p>
+          <ToggleRow
+            label={t("settingsRrlEnabledLabel")}
+            checked={props.rrlEnabled}
+            onChange={props.onRrlEnabledChange}
+          />
+          <Show when={props.rrlEnabled}>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                  {t("settingsRrlRpsLabel")}
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={props.rrlResponsesPerSecond}
+                  onInput={(e) =>
+                    props.onRrlResponsesPerSecondChange(Number(e.currentTarget.value))
+                  }
+                  class={NUMBER_INPUT_CLASS}
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                  {t("settingsRrlSlipLabel")}
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={props.rrlSlip}
+                  onInput={(e) => props.onRrlSlipChange(Number(e.currentTarget.value))}
+                  class={NUMBER_INPUT_CLASS}
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+                  {t("settingsRrlWindowLabel")}
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={props.rrlWindowSecs}
+                  onInput={(e) => props.onRrlWindowSecsChange(Number(e.currentTarget.value))}
+                  class={NUMBER_INPUT_CLASS}
+                />
+              </div>
+            </div>
+          </Show>
         </div>
       </SettingsCard>
 
