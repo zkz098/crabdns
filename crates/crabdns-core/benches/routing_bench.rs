@@ -35,7 +35,7 @@ fn bench_acl(c: &mut Criterion) {
 }
 
 fn bench_split_dns(c: &mut Criterion) {
-    let rules: Vec<SplitDnsRule> = (0..100)
+    let mut rules: Vec<SplitDnsRule> = (0..100)
         .map(|i| SplitDnsRule {
             domain: format!("corp-{i}.internal"),
             upstreams: vec!["127.0.0.1:5353".to_string()],
@@ -43,9 +43,25 @@ fn bench_split_dns(c: &mut Criterion) {
             ..Default::default()
         })
         .collect();
+    let list_domains: String = (0..1000)
+        .map(|i| format!("site-{i}.cn"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    rules.push(SplitDnsRule {
+        domains_url: Some("https://example.invalid/cn.txt".to_string()),
+        upstreams: vec!["127.0.0.1:5354".to_string()],
+        fallback_to_default: true,
+        ..Default::default()
+    });
 
-    let router = SplitUpstreamRouter::new(&rules, 1_000, UpstreamStrategy::Failover)
-        .expect("valid split dns rules");
+    let router = SplitUpstreamRouter::new_with_resolver(
+        &rules,
+        1_000,
+        UpstreamStrategy::Failover,
+        &[],
+        |url| (url == "https://example.invalid/cn.txt").then(|| list_domains.clone()),
+    )
+    .expect("valid split dns rules");
 
     let mut group = c.benchmark_group("split_dns_resolve");
     group.bench_function("exact_hit", |b| {
@@ -53,6 +69,9 @@ fn bench_split_dns(c: &mut Criterion) {
     });
     group.bench_function("subdomain_hit", |b| {
         b.iter(|| black_box(router.resolve(black_box("db.prod.corp-99.internal"))));
+    });
+    group.bench_function("list_hit_uppercase", |b| {
+        b.iter(|| black_box(router.resolve(black_box("API.SITE-500.CN"))));
     });
     group.bench_function("miss", |b| {
         b.iter(|| black_box(router.resolve(black_box("www.example.com"))));

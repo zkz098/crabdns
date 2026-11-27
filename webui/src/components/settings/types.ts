@@ -7,6 +7,7 @@ import type { ConfigSnapshotMeta } from "../../types/ConfigSnapshotMeta";
 import type { SafeSearchConfig } from "../../types/SafeSearchConfig";
 import type { SplitDnsMatchMode } from "../../types/SplitDnsMatchMode";
 import type { SplitDnsRule } from "../../types/SplitDnsRule";
+import type { SplitDnsSourceStatus } from "../../types/SplitDnsSourceStatus";
 import type { TlsStatusResponse } from "../../types/TlsStatusResponse";
 import type { UpdateStatusResponse } from "../../types/UpdateStatusResponse";
 import type { UpstreamCapabilities } from "../../types/UpstreamCapabilities";
@@ -65,6 +66,9 @@ export interface SettingsViewProps {
   onSplitDnsMatchModeChange: (val: SplitDnsMatchMode) => void;
   splitDnsBeforeClientUpstreams: boolean;
   onSplitDnsBeforeClientUpstreamsChange: (val: boolean) => void;
+  splitDnsRefreshIntervalSecs: number;
+  onSplitDnsRefreshIntervalSecsChange: (val: number) => void;
+  splitDnsStatuses?: SplitDnsSourceStatus[];
   refreshingSplitDns?: boolean;
   onRefreshSplitDns?: () => Promise<void> | void;
   cnameCloakingBlocking: boolean;

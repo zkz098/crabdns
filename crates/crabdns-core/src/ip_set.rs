@@ -284,6 +284,35 @@ fn subtract_ranges<T: IpInt>(pos: Vec<(T, T)>, neg: &[(T, T)]) -> Vec<(T, T)> {
     out
 }
 
+pub fn build_response_ip_set<F>(
+    cidrs: &[String],
+    ip_file: Option<&str>,
+    ip_url: Option<&str>,
+    resolve_url: &F,
+) -> Result<IpSet>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut builder = IpSetBuilder::default();
+    for cidr in cidrs {
+        builder.insert_cidr(cidr)?;
+    }
+    if let Some(path) = ip_file.map(str::trim).filter(|p| !p.is_empty()) {
+        let content = std::fs::read_to_string(std::path::Path::new(path)).map_err(|err| {
+            CoreError::Config(format!(
+                "failed to read response_ip expected_ip_file '{path}': {err}"
+            ))
+        })?;
+        builder.insert_text(&content);
+    }
+    if let Some(url) = ip_url.map(str::trim).filter(|u| !u.is_empty())
+        && let Some(content) = resolve_url(url)
+    {
+        builder.insert_text(&content);
+    }
+    Ok(builder.build())
+}
+
 pub fn extract_response_ips(msg: &Message) -> Vec<IpAddr> {
     let mut ips = Vec::new();
     for rec in &msg.answers {

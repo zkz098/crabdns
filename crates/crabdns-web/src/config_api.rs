@@ -58,6 +58,8 @@ pub struct ConfigResponse {
     pub upstream_groups: Vec<UpstreamGroup>,
     pub split_dns_match_mode: SplitDnsMatchMode,
     pub split_dns_before_client_upstreams: bool,
+    #[ts(type = "number")]
+    pub split_dns_refresh_interval_secs: u64,
     pub cname_cloaking_blocking: bool,
     pub doh_enabled: bool,
     pub allow_private_subscriptions: bool,
@@ -144,6 +146,7 @@ impl From<&Config> for ConfigResponse {
             upstream_groups: cfg.upstream_groups.clone(),
             split_dns_match_mode: cfg.split_dns_match_mode,
             split_dns_before_client_upstreams: cfg.split_dns_before_client_upstreams,
+            split_dns_refresh_interval_secs: cfg.split_dns_refresh_interval_secs,
             cname_cloaking_blocking: cfg.cname_cloaking_blocking,
             doh_enabled: cfg.doh_enabled,
             allow_private_subscriptions: cfg.allow_private_subscriptions,
@@ -239,6 +242,9 @@ pub struct ConfigUpdatePayload {
     pub split_dns_match_mode: Option<SplitDnsMatchMode>,
     #[serde(default)]
     pub split_dns_before_client_upstreams: Option<bool>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub split_dns_refresh_interval_secs: Option<u64>,
     #[serde(default)]
     pub cname_cloaking_blocking: Option<bool>,
     #[serde(default)]
@@ -462,6 +468,11 @@ pub async fn update_config(
     let split_dns_before_client_upstreams = payload
         .split_dns_before_client_upstreams
         .unwrap_or(current.split_dns_before_client_upstreams);
+    let split_dns_refresh_interval_secs = payload
+        .split_dns_refresh_interval_secs
+        .unwrap_or(current.split_dns_refresh_interval_secs);
+    crabdns_core::config::validate_split_dns_refresh_interval(split_dns_refresh_interval_secs)
+        .map_err(|err| bad_request(err.to_string()))?;
     let cname_cloaking_blocking = payload
         .cname_cloaking_blocking
         .unwrap_or(current.cname_cloaking_blocking);
@@ -728,6 +739,7 @@ pub async fn update_config(
     next.upstream_groups = upstream_groups;
     next.split_dns_match_mode = split_dns_match_mode;
     next.split_dns_before_client_upstreams = split_dns_before_client_upstreams;
+    next.split_dns_refresh_interval_secs = split_dns_refresh_interval_secs;
     next.cname_cloaking_blocking = cname_cloaking_blocking;
     next.doh_enabled = doh_enabled;
     next.allow_private_subscriptions = allow_private_subscriptions;

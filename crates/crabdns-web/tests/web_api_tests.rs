@@ -1720,3 +1720,160 @@ async fn test_split_dns_groups_and_cache_invalidation_via_config_api() {
     assert!(pipeline.split_router().resolve("qq.cn").is_some());
     assert!(pipeline.split_router().resolve("gov.cn").is_none());
 }
+
+#[tokio::test]
+async fn test_split_dns_conditional_sync_status_and_interval() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_srv = Arc::clone(&hits);
+    let list_app = Router::new().route(
+        "/list.txt",
+        get(move |headers: HeaderMap| {
+            let hits = Arc::clone(&hits_srv);
+            async move {
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                let inm = headers
+                    .get("if-none-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(ToString::to_string);
+                match n {
+                    0 => ([("etag", "\"v1\"")], "alpha.test\n").into_response(),
+                    1 if inm.as_deref() == Some("\"v1\"") => {
+                        StatusCode::NOT_MODIFIED.into_response()
+                    }
+                    1 => (StatusCode::BAD_REQUEST, "missing etag").into_response(),
+                    2 => (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response(),
+                    _ => ([("etag", "\"v2\"")], "beta.test\n").into_response(),
+                }
+            }
+        }),
+    );
+    let list_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind list");
+    let list_addr = list_listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(list_listener, list_app).await;
+    });
+    let list_url = format!("http://{list_addr}/list.txt");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
+    let cfg = Config {
+        allow_private_subscriptions: true,
+        split_dns: vec![crabdns_core::SplitDnsRule {
+            domains_url: Some(list_url.clone()),
+            upstreams: vec!["udp://10.0.0.1:53".to_string()],
+            ..Default::default()
+        }],
+        ..Config::default()
+    };
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, true));
+    let upstream =
+        Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 200).expect("pool"));
+    let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+    let (live_tx, _) = broadcast::channel(16);
+    let app = build_router(AppState {
+        config,
+        pipeline: Arc::clone(&pipeline),
+        storage: Arc::clone(&storage),
+        live_tx,
+        tls_reloader: None,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    async fn refresh(client: &reqwest::Client, base: &str) -> serde_json::Value {
+        let res = client
+            .post(format!("{base}/api/split-dns/refresh"))
+            .send()
+            .await
+            .expect("refresh");
+        assert_eq!(res.status(), StatusCode::OK);
+        serde_json::from_slice(&res.bytes().await.expect("bytes")).expect("json")
+    }
+
+    // 1) 200 + ETag: updated and routed
+    let s1 = refresh(&client, &base).await;
+    assert_eq!(s1["updated"], 1);
+    assert_eq!(s1["sources"][0]["entry_count"], 1);
+    assert_eq!(s1["sources"][0]["etag"], "\"v1\"");
+    assert!(pipeline.split_router().resolve("www.alpha.test").is_some());
+
+    // 2) 304 via If-None-Match
+    let s2 = refresh(&client, &base).await;
+    assert_eq!(s2["not_modified"], 1);
+    assert_eq!(s2["updated"], 0);
+    assert_eq!(s2["sources"][0]["not_modified"], true);
+
+    // 3) 500: old cache kept, error recorded
+    let s3 = refresh(&client, &base).await;
+    assert_eq!(s3["failed"], 1);
+    let status_res = client
+        .get(format!("{base}/api/split-dns/status"))
+        .send()
+        .await
+        .expect("status");
+    assert_eq!(status_res.status(), StatusCode::OK);
+    let status: serde_json::Value =
+        serde_json::from_slice(&status_res.bytes().await.expect("bytes")).expect("json");
+    assert_eq!(status[0]["kind"], "url");
+    assert_eq!(status[0]["cached"], true);
+    assert!(status[0]["last_error"].as_str().is_some());
+    assert!(
+        storage
+            .load_split_dns_list(&list_url)
+            .unwrap()
+            .unwrap()
+            .contains("alpha.test")
+    );
+    assert!(pipeline.split_router().resolve("www.alpha.test").is_some());
+
+    // 4) 200 new content: error cleared, routing updated
+    let s4 = refresh(&client, &base).await;
+    assert_eq!(s4["updated"], 1);
+    assert!(s4["sources"][0]["last_error"].is_null());
+    assert!(pipeline.split_router().resolve("www.beta.test").is_some());
+    assert!(pipeline.split_router().resolve("www.alpha.test").is_none());
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+
+    // Interval validation + roundtrip
+    let mk = |secs: u64| {
+        serde_json::json!({
+            "upstreams": ["udp://1.1.1.1:53"],
+            "cache_size": 64,
+            "optimistic_cache": true,
+            "upstream_timeout_ms": 1000,
+            "log_retention_hours": 24,
+            "split_dns_refresh_interval_secs": secs,
+        })
+    };
+    let bad = client
+        .put(format!("{base}/api/config"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&mk(30)).unwrap())
+        .send()
+        .await
+        .expect("put bad");
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    let good = client
+        .put(format!("{base}/api/config"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&mk(3600)).unwrap())
+        .send()
+        .await
+        .expect("put good");
+    assert_eq!(good.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&good.bytes().await.expect("bytes")).expect("json");
+    assert_eq!(body["split_dns_refresh_interval_secs"], 3600);
+}

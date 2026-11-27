@@ -403,6 +403,32 @@ impl SplitDnsRule {
     }
 }
 
+pub(crate) fn parse_qtypes(raw_list: &[String]) -> Result<Vec<hickory_proto::rr::RecordType>> {
+    let mut out = Vec::with_capacity(raw_list.len());
+    for raw in raw_list {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rt = trimmed
+            .to_ascii_uppercase()
+            .parse::<hickory_proto::rr::RecordType>()
+            .map_err(|_| CoreError::Config(format!("invalid split_dns qtype '{trimmed}'")))?;
+        if !out.contains(&rt) {
+            out.push(rt);
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn normalize_str_list(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn clean_opt(raw: Option<String>) -> Option<String> {
     raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }

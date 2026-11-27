@@ -20,6 +20,7 @@ mod doh3;
 mod doq;
 mod dot;
 mod listeners;
+mod split_dns_watch;
 mod tasks;
 mod tls;
 
@@ -55,6 +56,7 @@ pub struct RunningServer {
     web_tls_accept_task: Option<JoinHandle<()>>,
     web_tls_task: Option<JoinHandle<()>>,
     sub_refresh_task: JoinHandle<()>,
+    split_dns_watch_task: JoinHandle<()>,
     hosts_watch_task: JoinHandle<()>,
     dhcp_watch_task: JoinHandle<()>,
     neighbor_watch_task: JoinHandle<()>,
@@ -95,6 +97,7 @@ impl RunningServer {
         join_opt_with_timeout(self.web_tls_accept_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_opt_with_timeout(self.web_tls_task, SHUTDOWN_JOIN_TIMEOUT).await;
         join_with_timeout(self.sub_refresh_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.split_dns_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.hosts_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.dhcp_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.neighbor_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
@@ -189,6 +192,7 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.upstream_groups = saved_cfg.upstream_groups;
     config.split_dns_match_mode = saved_cfg.split_dns_match_mode;
     config.split_dns_before_client_upstreams = saved_cfg.split_dns_before_client_upstreams;
+    config.split_dns_refresh_interval_secs = saved_cfg.split_dns_refresh_interval_secs;
     config.cname_cloaking_blocking = saved_cfg.cname_cloaking_blocking;
     config.doh_enabled = saved_cfg.doh_enabled;
     config.allow_private_subscriptions = saved_cfg.allow_private_subscriptions;
@@ -602,6 +606,7 @@ async fn start_web_and_tls(
 
 struct BackgroundTasks {
     sub_refresh: JoinHandle<()>,
+    split_dns_watch: JoinHandle<()>,
     hosts_watch: JoinHandle<()>,
     dhcp_watch: JoinHandle<()>,
     neighbor_watch: JoinHandle<()>,
@@ -631,6 +636,12 @@ fn spawn_background_tasks(
             shutdown_rx.clone(),
         ),
         sub_refresh: tasks::spawn_subscription_refresh_task(
+            Arc::clone(&config),
+            Arc::clone(&storage),
+            Arc::clone(&pipeline),
+            shutdown_rx.clone(),
+        ),
+        split_dns_watch: split_dns_watch::spawn_split_dns_sync_and_watch_task(
             Arc::clone(&config),
             Arc::clone(&storage),
             Arc::clone(&pipeline),
@@ -804,6 +815,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         web_tls_accept_task: web_tls.web_tls_accept_task,
         web_tls_task: web_tls.web_tls_task,
         sub_refresh_task: bg.sub_refresh,
+        split_dns_watch_task: bg.split_dns_watch,
         hosts_watch_task: bg.hosts_watch,
         dhcp_watch_task: bg.dhcp_watch,
         neighbor_watch_task: bg.neighbor_watch,

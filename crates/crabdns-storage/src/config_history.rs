@@ -9,7 +9,33 @@ use crate::models::Result;
 
 const CONFIG_HISTORY_PREFIX: &[u8] = b"cfg_hist:";
 const SPLIT_LIST_PREFIX: &[u8] = b"split_list:";
+const SPLIT_LIST_META_PREFIX: &[u8] = b"split_list_meta:";
 const MAX_CONFIG_HISTORY: usize = 20;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct SplitDnsListMeta {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub last_synced_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub last_attempt_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub entry_count: usize,
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub bytes: u64,
+    #[serde(default)]
+    pub not_modified: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -143,6 +169,39 @@ impl StorageEngine {
             None => Ok(None),
         }
     }
+
+    /// Saves synchronization metadata (ETag, Last-Modified, timestamps, error) for a remote split-DNS list URL.
+    pub fn save_split_dns_list_meta(&self, meta: &SplitDnsListMeta) -> Result<()> {
+        let mut key = Vec::with_capacity(SPLIT_LIST_META_PREFIX.len() + meta.url.len());
+        key.extend_from_slice(SPLIT_LIST_META_PREFIX);
+        key.extend_from_slice(meta.url.trim().as_bytes());
+        let bytes = serde_json::to_vec(meta)?;
+        self.meta.insert(key, bytes)?;
+        Ok(())
+    }
+
+    /// Loads synchronization metadata for a remote split-DNS list URL.
+    pub fn load_split_dns_list_meta(&self, url: &str) -> Result<Option<SplitDnsListMeta>> {
+        let mut key = Vec::with_capacity(SPLIT_LIST_META_PREFIX.len() + url.len());
+        key.extend_from_slice(SPLIT_LIST_META_PREFIX);
+        key.extend_from_slice(url.trim().as_bytes());
+        match self.meta.get(key)? {
+            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Lists all persisted split-DNS list synchronization metadata records.
+    pub fn list_split_dns_list_metas(&self) -> Result<Vec<SplitDnsListMeta>> {
+        let mut out = Vec::new();
+        for guard in self.meta.prefix(SPLIT_LIST_META_PREFIX) {
+            let val = guard.value()?;
+            if let Ok(meta) = serde_json::from_slice::<SplitDnsListMeta>(&val) {
+                out.push(meta);
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -183,5 +242,33 @@ mod tests {
                 .expect("get")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn test_split_dns_list_meta_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = StorageEngine::open(dir.path()).expect("open storage");
+
+        let meta = SplitDnsListMeta {
+            url: "https://example.invalid/cn.txt".to_string(),
+            etag: Some("\"abc123\"".to_string()),
+            last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
+            last_synced_at: Some(1_700_000_000),
+            last_attempt_at: Some(1_700_000_100),
+            last_error: Some("timeout".to_string()),
+            entry_count: 42,
+            bytes: 1024,
+            not_modified: true,
+        };
+        storage.save_split_dns_list_meta(&meta).expect("save meta");
+
+        let loaded = storage
+            .load_split_dns_list_meta("  https://example.invalid/cn.txt ")
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded, meta);
+
+        let all = storage.list_split_dns_list_metas().expect("list");
+        assert_eq!(all, vec![meta]);
     }
 }

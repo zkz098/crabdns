@@ -33,7 +33,9 @@ import type { SafeSearchConfig } from "./types/SafeSearchConfig";
 import type { SetupCompletePayload } from "./types/SetupCompletePayload";
 import type { SetupStatusResponse } from "./types/SetupStatusResponse";
 import type { SplitDnsMatchMode } from "./types/SplitDnsMatchMode";
+import type { SplitDnsRefreshSummary } from "./types/SplitDnsRefreshSummary";
 import type { SplitDnsRule } from "./types/SplitDnsRule";
+import type { SplitDnsSourceStatus } from "./types/SplitDnsSourceStatus";
 import type { ConfigSnapshotMeta } from "./types/ConfigSnapshotMeta";
 import type { StatsResponse } from "./types/StatsResponse";
 import type { TestRuleResponse } from "./types/TestRuleResponse";
@@ -96,6 +98,8 @@ export default function App() {
   const [splitDnsMatchMode, setSplitDnsMatchMode] =
     createSignal<SplitDnsMatchMode>("specificity_first");
   const [splitDnsBeforeClientUpstreams, setSplitDnsBeforeClientUpstreams] = createSignal(false);
+  const [splitDnsRefreshIntervalSecs, setSplitDnsRefreshIntervalSecs] = createSignal(86400);
+  const [splitDnsStatuses, setSplitDnsStatuses] = createSignal<SplitDnsSourceStatus[]>([]);
   const [cnameCloakingBlocking, setCnameCloakingBlocking] = createSignal(true);
   const [dohEnabled, setDohEnabled] = createSignal(true);
   const [allowPrivateSubscriptions, setAllowPrivateSubscriptions] = createSignal(false);
@@ -388,6 +392,18 @@ export default function App() {
     }
   }
 
+  async function fetchSplitDnsStatus() {
+    try {
+      const res = await fetch("/api/split-dns/status");
+      if (res.ok) {
+        const list: SplitDnsSourceStatus[] = await res.json();
+        setSplitDnsStatuses(list);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   async function refreshSplitDnsLists() {
     setRefreshingSplitDns(true);
     setConfigIsError(false);
@@ -395,8 +411,19 @@ export default function App() {
     try {
       const res = await fetch("/api/split-dns/refresh", { method: "POST" });
       if (res.ok) {
-        const body = (await res.json()) as { updated?: number };
-        setConfigMessage(`${t("settingsSaved")} (${body.updated ?? 0})`);
+        const body = (await res.json()) as SplitDnsRefreshSummary;
+        if (body.sources) {
+          setSplitDnsStatuses(body.sources);
+        }
+        const failed = body.failed ?? 0;
+        const updated = body.updated ?? 0;
+        const notModified = body.not_modified ?? 0;
+        setConfigIsError(failed > 0 && updated === 0);
+        setConfigMessage(
+          `${t("splitDnsRefreshSummary")}: ${updated} updated · ${notModified} unchanged${
+            failed > 0 ? ` · ${failed} failed` : ""
+          }`,
+        );
       } else {
         const errBody = await res.json().catch(() => null);
         setConfigIsError(true);
@@ -755,6 +782,7 @@ export default function App() {
     setUpstreamGroups(data.upstream_groups ?? []);
     setSplitDnsMatchMode(data.split_dns_match_mode ?? "specificity_first");
     setSplitDnsBeforeClientUpstreams(data.split_dns_before_client_upstreams ?? false);
+    setSplitDnsRefreshIntervalSecs(data.split_dns_refresh_interval_secs ?? 86400);
     setCnameCloakingBlocking(data.cname_cloaking_blocking);
     setDohEnabled(data.doh_enabled);
     setAllowPrivateSubscriptions(data.allow_private_subscriptions);
@@ -1315,6 +1343,7 @@ export default function App() {
         const data: ConfigResponse = await res.json();
         applyConfigToForm(data);
         void fetchConfigHistory();
+        void fetchSplitDnsStatus();
       }
     } catch {
       // ignore
@@ -1370,6 +1399,7 @@ export default function App() {
       upstream_groups: upstreamGroups(),
       split_dns_match_mode: splitDnsMatchMode(),
       split_dns_before_client_upstreams: splitDnsBeforeClientUpstreams(),
+      split_dns_refresh_interval_secs: Number(splitDnsRefreshIntervalSecs()),
       cname_cloaking_blocking: cnameCloakingBlocking(),
       doh_enabled: dohEnabled(),
       allow_private_subscriptions: allowPrivateSubscriptions(),
@@ -1456,6 +1486,7 @@ export default function App() {
           fetchAcmeStatus(),
           fetchCfCdnStatus(),
           fetchConfigHistory(),
+          fetchSplitDnsStatus(),
         ]);
       } else {
         setConfigIsError(true);
@@ -1761,6 +1792,9 @@ export default function App() {
                 onSplitDnsMatchModeChange={setSplitDnsMatchMode}
                 splitDnsBeforeClientUpstreams={splitDnsBeforeClientUpstreams()}
                 onSplitDnsBeforeClientUpstreamsChange={setSplitDnsBeforeClientUpstreams}
+                splitDnsRefreshIntervalSecs={splitDnsRefreshIntervalSecs()}
+                onSplitDnsRefreshIntervalSecsChange={setSplitDnsRefreshIntervalSecs}
+                splitDnsStatuses={splitDnsStatuses()}
                 refreshingSplitDns={refreshingSplitDns()}
                 onRefreshSplitDns={refreshSplitDnsLists}
                 cnameCloakingBlocking={cnameCloakingBlocking()}

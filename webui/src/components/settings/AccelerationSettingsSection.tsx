@@ -344,6 +344,9 @@ export function AccelerationSettingsSection(props: SettingsViewProps) {
           onMatchModeChange={props.onSplitDnsMatchModeChange}
           splitBeforeClientUpstreams={props.splitDnsBeforeClientUpstreams}
           onSplitBeforeClientUpstreamsChange={props.onSplitDnsBeforeClientUpstreamsChange}
+          refreshIntervalSecs={props.splitDnsRefreshIntervalSecs}
+          onRefreshIntervalSecsChange={props.onSplitDnsRefreshIntervalSecsChange}
+          sourceStatuses={props.splitDnsStatuses}
           refreshing={props.refreshingSplitDns}
           onRefresh={props.onRefreshSplitDns}
         />

@@ -209,6 +209,10 @@ pub fn build_router_with_managers(
             post(split_dns_sync::refresh_split_dns),
         )
         .route(
+            "/api/split-dns/status",
+            get(split_dns_sync::get_split_dns_status),
+        )
+        .route(
             "/api/subscriptions/refresh",
             post(subscriptions::refresh_all_subscriptions),
         )

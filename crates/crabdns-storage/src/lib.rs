@@ -12,7 +12,7 @@ pub mod config_history;
 mod log_sink;
 mod models;
 pub use client_stats::{ClientActivityStats, ClientProtocolCounts, ClientStatsTracker};
-pub use config_history::ConfigSnapshotMeta;
+pub use config_history::{ConfigSnapshotMeta, SplitDnsListMeta};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 pub use log_sink::spawn_log_sink;
 use models::{

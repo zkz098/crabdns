@@ -13,7 +13,7 @@ use ts_rs::TS;
 
 use crate::RouterState;
 
-const MAX_SUBSCRIPTION_BYTES: usize = 50 * 1024 * 1024;
+pub(crate) const MAX_SUBSCRIPTION_BYTES: usize = 50 * 1024 * 1024;
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
@@ -189,11 +189,7 @@ pub async fn fetch_subscription_text(
     fetch_subscription_text_with_policy(client, url, false).await
 }
 
-pub async fn fetch_subscription_text_with_policy(
-    client: &reqwest::Client,
-    url: &str,
-    allow_private: bool,
-) -> Result<String, String> {
+pub(crate) async fn verify_url_ssrf_policy(url: &str, allow_private: bool) -> Result<(), String> {
     validate_subscription_url_with_policy(url, allow_private)?;
 
     if !allow_private
@@ -215,6 +211,15 @@ pub async fn fetch_subscription_text_with_policy(
             }
         }
     }
+    Ok(())
+}
+
+pub async fn fetch_subscription_text_with_policy(
+    client: &reqwest::Client,
+    url: &str,
+    allow_private: bool,
+) -> Result<String, String> {
+    verify_url_ssrf_policy(url, allow_private).await?;
 
     let resp = client
         .get(url)
@@ -231,7 +236,7 @@ pub async fn fetch_subscription_text_with_policy(
         .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
 }
 
-async fn read_response_bounded(
+pub(crate) async fn read_response_bounded(
     mut resp: reqwest::Response,
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {

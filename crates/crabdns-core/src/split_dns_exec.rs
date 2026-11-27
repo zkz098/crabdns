@@ -16,6 +16,13 @@ use crate::pipeline_types::LogMeta;
 use crate::split_dns::{CompiledResponseIpRule, RouteTarget, SplitQueryContext};
 use crate::upstream::UpstreamPool;
 
+pub(crate) struct FastResolvedRoute {
+    pub pool: Arc<UpstreamPool>,
+    pub cache_scope: Option<String>,
+    pub is_local_route: bool,
+    pub upstream_policy: Option<Arc<CompiledUpstreamPolicy>>,
+}
+
 pub(crate) struct ResolvedUpstreamRoute {
     pub pool: Arc<UpstreamPool>,
     pub cache_scope: Option<String>,
@@ -47,6 +54,84 @@ impl ResolvedUpstreamRoute {
 }
 
 impl DnsPipeline {
+    pub(crate) fn resolve_fast_route_for_query(
+        &self,
+        client_ip: Option<IpAddr>,
+        protocol: Option<QueryProtocol>,
+        policy: Option<&ResolvedClientPolicy>,
+        domain: &str,
+        qtype: RecordType,
+    ) -> FastResolvedRoute {
+        let split_first = self
+            .split_dns_before_client_upstreams
+            .load(Ordering::Relaxed);
+
+        if !split_first && let Some(client_route) = build_fast_client_route(policy) {
+            return client_route;
+        }
+
+        if qtype == RecordType::PTR
+            && is_private_ptr_domain(domain)
+            && let Some(ref pool) = self.private_ptr_router.load().pool
+        {
+            return FastResolvedRoute {
+                pool: Arc::clone(pool),
+                cache_scope: None,
+                is_local_route: true,
+                upstream_policy: policy.map(|p| Arc::clone(&p.upstream_policy)),
+            };
+        }
+
+        let fallback_default =
+            build_fast_client_route(policy).unwrap_or_else(|| FastResolvedRoute {
+                pool: self.upstream.load_full(),
+                cache_scope: policy.and_then(|p| p.upstream_policy_scope.clone()),
+                is_local_route: false,
+                upstream_policy: policy.map(|p| Arc::clone(&p.upstream_policy)),
+            });
+
+        let split_router = self.split_router.load();
+        if !split_router.is_empty() {
+            let empty_tags: &[String] = &[];
+            let split_ctx = SplitQueryContext {
+                domain,
+                qtype,
+                client_ip,
+                protocol,
+                client_group_id: policy.and_then(|p| p.group_id.as_deref()),
+                client_group_name: policy.and_then(|p| p.group_name.as_deref()),
+                client_tags: policy.map_or(empty_tags, |p| p.tags.as_slice()),
+            };
+            if let Some(m) = split_router.resolve_fast(&split_ctx) {
+                if !m.target.pool.has_healthy_endpoint()
+                    && m.fallback_to_default
+                    && fallback_default.pool.has_healthy_endpoint()
+                {
+                    return fallback_default;
+                }
+                let (merged_policy, cache_scope) = match policy {
+                    Some(p) => {
+                        let merged = Arc::new(m.target.policy.merge_over(&p.upstream_policy));
+                        let scope = match p.upstream_policy_scope.as_deref() {
+                            Some(cs) => format!("{}:{cs}", m.target.scope),
+                            None => m.target.scope.clone(),
+                        };
+                        (merged, Some(scope))
+                    }
+                    None => (Arc::clone(&m.target.policy), Some(m.target.scope.clone())),
+                };
+                return FastResolvedRoute {
+                    pool: Arc::clone(&m.target.pool),
+                    cache_scope,
+                    is_local_route: m.target.is_local_route,
+                    upstream_policy: Some(merged_policy),
+                };
+            }
+        }
+
+        fallback_default
+    }
+
     pub(crate) fn resolve_upstream_for_query(
         &self,
         client_ip: Option<IpAddr>,
@@ -497,6 +582,17 @@ impl DnsPipeline {
         self.exchange_and_validate(&target.pool, &query_wire, &meta.domain, target_flags)
             .await
     }
+}
+
+fn build_fast_client_route(policy: Option<&ResolvedClientPolicy>) -> Option<FastResolvedRoute> {
+    let p = policy?;
+    let (scope, pool) = p.upstream_pool.as_ref()?;
+    Some(FastResolvedRoute {
+        pool: Arc::clone(pool),
+        cache_scope: Some(scope.clone()),
+        is_local_route: pool.has_private_endpoint(),
+        upstream_policy: Some(Arc::clone(&p.upstream_policy)),
+    })
 }
 
 fn build_client_route(policy: Option<&ResolvedClientPolicy>) -> Option<ResolvedUpstreamRoute> {

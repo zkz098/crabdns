@@ -110,6 +110,7 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         upstream_groups: Some(cfg.upstream_groups.clone()),
         split_dns_match_mode: Some(cfg.split_dns_match_mode),
         split_dns_before_client_upstreams: Some(cfg.split_dns_before_client_upstreams),
+        split_dns_refresh_interval_secs: Some(cfg.split_dns_refresh_interval_secs),
         cname_cloaking_blocking: Some(cfg.cname_cloaking_blocking),
         doh_enabled: Some(cfg.doh_enabled),
         allow_private_subscriptions: Some(cfg.allow_private_subscriptions),
@@ -386,6 +387,11 @@ fn merge_config_payload(current: &Config, mut payload: ConfigUpdatePayload) -> A
     }
     if let Some(before) = payload.split_dns_before_client_upstreams {
         next.split_dns_before_client_upstreams = before;
+    }
+    if let Some(interval) = payload.split_dns_refresh_interval_secs
+        && (interval == 0 || interval >= 60)
+    {
+        next.split_dns_refresh_interval_secs = interval;
     }
     apply_optional_flags(&mut next, current, payload);
     Ok(next)

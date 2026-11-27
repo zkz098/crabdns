@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use foldhash::fast::RandomState;
@@ -7,86 +8,322 @@ use crate::error::{CoreError, Result};
 use crate::filter_trie::LabelInterner;
 
 const MAX_REGEX_SET_SIZE: usize = 2 * 1024 * 1024;
+const STACK_BITSET_WORDS: usize = 4;
+const STACK_CANDIDATE_CAP: usize = 16;
+
+pub(crate) const HIT_FLAG_EXACT: u8 = 0b01;
+pub(crate) const HIT_FLAG_EXCLUDE: u8 = 0b10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrieRouteHit {
+    pub route_idx: u32,
+    pub flags: u8,
+    pub pattern_len: u16,
+}
+
+impl TrieRouteHit {
+    #[inline]
+    pub(crate) const fn is_exact(self) -> bool {
+        (self.flags & HIT_FLAG_EXACT) != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_exclude(self) -> bool {
+        (self.flags & HIT_FLAG_EXCLUDE) != 0
+    }
+
+    #[inline]
+    pub(crate) fn specificity_score(self) -> u32 {
+        u32::from(self.pattern_len) * 2 + u32::from(self.is_exact())
+    }
+}
 
 #[derive(Debug, Default)]
-struct BuilderNode {
+struct UnifiedBuilderNode {
     children: HashMap<u32, u32, RandomState>,
-    is_suffix: bool,
-    is_exact: bool,
+    hits: Vec<TrieRouteHit>,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FlatNode {
+struct UnifiedFlatNode {
     children_start: u32,
     children_len: u32,
-    is_suffix: bool,
-    is_exact: bool,
+    hits_start: u32,
+    hits_len: u32,
 }
 
-/// Compact reversed-label Trie for fast, zero-allocation split-DNS domain matching.
+/// Stack-backed route bitset supporting up to 256 routes with zero heap allocation.
+pub(crate) enum RouteBitset {
+    Inline([u64; STACK_BITSET_WORDS]),
+    Heap(Vec<u64>),
+}
+
+impl RouteBitset {
+    pub(crate) fn new(route_count: usize) -> Self {
+        let words = route_count.div_ceil(64).max(1);
+        if words <= STACK_BITSET_WORDS {
+            Self::Inline([0_u64; STACK_BITSET_WORDS])
+        } else {
+            Self::Heap(vec![0_u64; words])
+        }
+    }
+
+    #[inline]
+    fn words(&self) -> &[u64] {
+        match self {
+            Self::Inline(arr) => arr,
+            Self::Heap(vec) => vec,
+        }
+    }
+
+    #[inline]
+    fn words_mut(&mut self) -> &mut [u64] {
+        match self {
+            Self::Inline(arr) => arr,
+            Self::Heap(vec) => vec,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, route_idx: u32) {
+        let word_idx = (route_idx as usize) >> 6;
+        let bit = 1_u64 << (route_idx & 63);
+        if let Some(w) = self.words_mut().get_mut(word_idx) {
+            *w |= bit;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, route_idx: u32) -> bool {
+        let word_idx = (route_idx as usize) >> 6;
+        let bit = 1_u64 << (route_idx & 63);
+        self.words().get(word_idx).is_some_and(|w| (*w & bit) != 0)
+    }
+
+    pub(crate) fn iter_excluding<'a>(&'a self, excluded: &'a Self) -> RouteBitsetIter<'a> {
+        RouteBitsetIter {
+            pos_words: self.words(),
+            excl_words: excluded.words(),
+            word_idx: 0,
+            current_word: 0,
+            initialized: false,
+        }
+    }
+}
+
+pub(crate) struct RouteBitsetIter<'a> {
+    pos_words: &'a [u64],
+    excl_words: &'a [u64],
+    word_idx: usize,
+    current_word: u64,
+    initialized: bool,
+}
+
+impl Iterator for RouteBitsetIter<'_> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.initialized {
+            self.initialized = true;
+            if let Some(&pw) = self.pos_words.first() {
+                let ew = self.excl_words.first().copied().unwrap_or(0);
+                self.current_word = pw & !ew;
+            }
+        }
+        loop {
+            if self.current_word != 0 {
+                let tz = self.current_word.trailing_zeros();
+                self.current_word &= self.current_word - 1;
+                return Some(u32::try_from(self.word_idx * 64).unwrap_or(u32::MAX) + tz);
+            }
+            self.word_idx += 1;
+            if self.word_idx >= self.pos_words.len() {
+                return None;
+            }
+            let pw = self.pos_words[self.word_idx];
+            let ew = self.excl_words.get(self.word_idx).copied().unwrap_or(0);
+            self.current_word = pw & !ew;
+        }
+    }
+}
+
+/// Stack-backed scored route candidate list (zero heap allocation up to 16 hits).
+pub(crate) struct ScoredCandidates {
+    inline: [(u32, u32); STACK_CANDIDATE_CAP],
+    inline_len: usize,
+    heap: Option<Vec<(u32, u32)>>,
+}
+
+impl Default for ScoredCandidates {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScoredCandidates {
+    pub(crate) fn new() -> Self {
+        Self {
+            inline: [(0, 0); STACK_CANDIDATE_CAP],
+            inline_len: 0,
+            heap: None,
+        }
+    }
+
+    pub(crate) fn insert_max(&mut self, route_idx: u32, score: u32) {
+        if let Some(ref mut vec) = self.heap {
+            if let Some(existing) = vec.iter_mut().find(|(id, _)| *id == route_idx) {
+                existing.1 = existing.1.max(score);
+            } else {
+                vec.push((route_idx, score));
+            }
+            return;
+        }
+
+        for entry in &mut self.inline[..self.inline_len] {
+            if entry.0 == route_idx {
+                entry.1 = entry.1.max(score);
+                return;
+            }
+        }
+
+        if self.inline_len < STACK_CANDIDATE_CAP {
+            self.inline[self.inline_len] = (route_idx, score);
+            self.inline_len += 1;
+        } else {
+            let mut vec = Vec::with_capacity(STACK_CANDIDATE_CAP + 4);
+            vec.extend_from_slice(&self.inline[..self.inline_len]);
+            vec.push((route_idx, score));
+            self.heap = Some(vec);
+        }
+    }
+
+    pub(crate) fn sort_excluding(&mut self, excluded: &RouteBitset) -> &[(u32, u32)] {
+        if let Some(ref mut vec) = self.heap {
+            vec.retain(|(id, _)| !excluded.contains(*id));
+            vec.sort_unstable_by_key(|&(id, score)| (Reverse(score), id));
+            return vec.as_slice();
+        }
+
+        let mut kept = 0_usize;
+        for idx in 0..self.inline_len {
+            let item = self.inline[idx];
+            if !excluded.contains(item.0) {
+                self.inline[kept] = item;
+                kept += 1;
+            }
+        }
+        self.inline_len = kept;
+        let slice = &mut self.inline[..self.inline_len];
+        slice.sort_unstable_by_key(|&(id, score)| (Reverse(score), id));
+        slice
+    }
+}
+
+/// Compact unified reversed-label Trie across all split-DNS routes.
 #[derive(Debug, Default)]
-pub struct SplitDomainTrie {
+pub struct UnifiedSplitTrie {
     interner: LabelInterner,
-    nodes: Box<[FlatNode]>,
+    nodes: Box<[UnifiedFlatNode]>,
     children: Box<[(u32, u32)]>,
+    hits: Box<[TrieRouteHit]>,
 }
 
-impl SplitDomainTrie {
+impl UnifiedSplitTrie {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
-    pub fn matches(&self, domain: &str) -> bool {
+    pub(crate) fn collect_config_order(
+        &self,
+        clean_domain: &str,
+        pos: &mut RouteBitset,
+        excl: &mut RouteBitset,
+    ) {
+        self.walk_hits(clean_domain, |hit| {
+            if hit.is_exclude() {
+                excl.set(hit.route_idx);
+            } else {
+                pos.set(hit.route_idx);
+            }
+        });
+    }
+
+    pub(crate) fn collect_specificity_first(
+        &self,
+        clean_domain: &str,
+        candidates: &mut ScoredCandidates,
+        excl: &mut RouteBitset,
+    ) {
+        self.walk_hits(clean_domain, |hit| {
+            if hit.is_exclude() {
+                excl.set(hit.route_idx);
+            } else {
+                candidates.insert_max(hit.route_idx, hit.specificity_score());
+            }
+        });
+    }
+
+    #[inline]
+    fn walk_hits<F>(&self, clean_domain: &str, mut on_hit: F)
+    where
+        F: FnMut(TrieRouteHit),
+    {
         if self.nodes.is_empty() {
-            return false;
-        }
-        let clean = domain.trim().trim_matches('.');
-        if clean.is_empty() {
-            return false;
+            return;
         }
         let mut node_idx = 0_usize;
-        for label in clean.rsplit('.').filter(|s| !s.is_empty()) {
-            let node = self.nodes[node_idx];
-            if node.is_suffix {
-                return true;
-            }
+        let mut labels = clean_domain
+            .rsplit('.')
+            .filter(|s| !s.is_empty())
+            .peekable();
+        while let Some(label) = labels.next() {
             let Some(label_id) = self.interner.lookup(label) else {
-                return false;
+                break;
             };
-            let start = node.children_start as usize;
-            let end = start + node.children_len as usize;
-            let slice = &self.children[start..end];
+            let node = self.nodes[node_idx];
+            let c_start = node.children_start as usize;
+            let c_end = c_start + node.children_len as usize;
+            let slice = &self.children[c_start..c_end];
             let Ok(pos) = slice.binary_search_by_key(&label_id, |&(id, _)| id) else {
-                return false;
+                break;
             };
             node_idx = slice[pos].1 as usize;
+            let hit_node = self.nodes[node_idx];
+            if hit_node.hits_len > 0 {
+                let is_terminal = labels.peek().is_none();
+                let h_start = hit_node.hits_start as usize;
+                let h_end = h_start + hit_node.hits_len as usize;
+                for &hit in &self.hits[h_start..h_end] {
+                    if !hit.is_exact() || is_terminal {
+                        on_hit(hit);
+                    }
+                }
+            }
         }
-        let terminal = self.nodes[node_idx];
-        terminal.is_suffix || terminal.is_exact
     }
 }
 
-/// Builder for [`SplitDomainTrie`].
+/// Builder for [`UnifiedSplitTrie`].
 #[derive(Debug)]
-pub struct SplitDomainTrieBuilder {
+pub struct UnifiedSplitTrieBuilder {
     interner: LabelInterner,
-    nodes: Vec<BuilderNode>,
+    nodes: Vec<UnifiedBuilderNode>,
     has_entries: bool,
 }
 
-impl Default for SplitDomainTrieBuilder {
+impl Default for UnifiedSplitTrieBuilder {
     fn default() -> Self {
         Self {
             interner: LabelInterner::default(),
-            nodes: vec![BuilderNode::default()],
+            nodes: vec![UnifiedBuilderNode::default()],
             has_entries: false,
         }
     }
 }
 
-impl SplitDomainTrieBuilder {
-    pub fn insert(&mut self, domain: &str, exact_only: bool) {
+impl UnifiedSplitTrieBuilder {
+    pub fn insert(&mut self, domain: &str, route_idx: u32, exact_only: bool, is_exclude: bool) {
         let mut current_idx = 0_usize;
         let mut any_label = false;
         for label in domain.rsplit('.').filter(|s| !s.is_empty()) {
@@ -96,7 +333,7 @@ impl SplitDomainTrieBuilder {
                 current_idx = next_idx as usize;
             } else {
                 let next_idx = u32::try_from(self.nodes.len()).unwrap_or(u32::MAX);
-                self.nodes.push(BuilderNode::default());
+                self.nodes.push(UnifiedBuilderNode::default());
                 self.nodes[current_idx].children.insert(label_id, next_idx);
                 current_idx = next_idx as usize;
             }
@@ -105,20 +342,33 @@ impl SplitDomainTrieBuilder {
             return;
         }
         self.has_entries = true;
-        if exact_only {
-            self.nodes[current_idx].is_exact = true;
+        let flags = if exact_only { HIT_FLAG_EXACT } else { 0 }
+            | if is_exclude { HIT_FLAG_EXCLUDE } else { 0 };
+        let pattern_len = u16::try_from(domain.len()).unwrap_or(u16::MAX);
+        let hits = &mut self.nodes[current_idx].hits;
+        if let Some(existing) = hits
+            .iter_mut()
+            .find(|h| h.route_idx == route_idx && h.flags == flags)
+        {
+            existing.pattern_len = existing.pattern_len.max(pattern_len);
         } else {
-            self.nodes[current_idx].is_suffix = true;
+            hits.push(TrieRouteHit {
+                route_idx,
+                flags,
+                pattern_len,
+            });
         }
     }
 
-    pub fn freeze(self) -> SplitDomainTrie {
+    pub fn freeze(self) -> UnifiedSplitTrie {
         if !self.has_entries {
-            return SplitDomainTrie::default();
+            return UnifiedSplitTrie::default();
         }
-        let mut flat_nodes = Vec::with_capacity(self.nodes.len());
         let total_children: usize = self.nodes.iter().map(|n| n.children.len()).sum();
+        let total_hits: usize = self.nodes.iter().map(|n| n.hits.len()).sum();
+        let mut flat_nodes = Vec::with_capacity(self.nodes.len());
         let mut children = Vec::with_capacity(total_children);
+        let mut hits = Vec::with_capacity(total_hits);
 
         for mut node in self.nodes {
             let children_start = u32::try_from(children.len()).unwrap_or(u32::MAX);
@@ -127,72 +377,68 @@ impl SplitDomainTrieBuilder {
             pairs.sort_unstable_by_key(|&(label_id, _)| label_id);
             children.extend(pairs);
 
-            flat_nodes.push(FlatNode {
+            let hits_start = u32::try_from(hits.len()).unwrap_or(u32::MAX);
+            let hits_len = u32::try_from(node.hits.len()).unwrap_or(u32::MAX);
+            hits.extend(node.hits);
+
+            flat_nodes.push(UnifiedFlatNode {
                 children_start,
                 children_len,
-                is_suffix: node.is_suffix,
-                is_exact: node.is_exact,
+                hits_start,
+                hits_len,
             });
         }
 
-        SplitDomainTrie {
+        UnifiedSplitTrie {
             interner: self.interner,
             nodes: flat_nodes.into_boxed_slice(),
             children: children.into_boxed_slice(),
+            hits: hits.into_boxed_slice(),
         }
     }
 }
 
-pub(crate) struct DomainMatcher {
-    single_suffix: Option<String>,
-    trie: SplitDomainTrie,
-    keywords: Vec<String>,
+pub(crate) struct NonTrieMatcher {
+    keywords: Box<[Box<str>]>,
     regexes: Option<RegexSet>,
-    exclude_trie: SplitDomainTrie,
-    exclude_keywords: Vec<String>,
+    exclude_keywords: Box<[Box<str>]>,
     exclude_regexes: Option<RegexSet>,
 }
 
-impl DomainMatcher {
-    pub(crate) fn matches(&self, clean_domain: &str) -> bool {
-        let pos = self
-            .single_suffix
-            .as_deref()
-            .is_some_and(|s| matches_suffix_ci(clean_domain, s))
-            || self.trie.matches(clean_domain)
-            || matches_any_keyword_ci(clean_domain, &self.keywords)
+impl NonTrieMatcher {
+    #[inline]
+    pub(crate) fn matches_positive(&self, clean_domain: &str) -> bool {
+        matches_any_keyword_ci(clean_domain, &self.keywords)
             || self
                 .regexes
                 .as_ref()
-                .is_some_and(|re| re.is_match(clean_domain));
-        if !pos {
-            return false;
-        }
-        let excluded = self.exclude_trie.matches(clean_domain)
-            || matches_any_keyword_ci(clean_domain, &self.exclude_keywords)
+                .is_some_and(|re| re.is_match(clean_domain))
+    }
+
+    #[inline]
+    pub(crate) fn matches_exclude(&self, clean_domain: &str) -> bool {
+        matches_any_keyword_ci(clean_domain, &self.exclude_keywords)
             || self
                 .exclude_regexes
                 .as_ref()
-                .is_some_and(|re| re.is_match(clean_domain));
-        !excluded
+                .is_some_and(|re| re.is_match(clean_domain))
     }
 }
 
 #[derive(Default)]
-pub(crate) struct DomainMatcherBuilder {
-    pub(crate) single_suffix: Option<String>,
-    trie: SplitDomainTrieBuilder,
+pub(crate) struct NonTrieMatcherBuilder {
     keywords: Vec<String>,
     regex_patterns: Vec<String>,
-    exclude_trie: SplitDomainTrieBuilder,
     exclude_keywords: Vec<String>,
     exclude_regex_patterns: Vec<String>,
-    pub(crate) has_positive: bool,
+    pub(crate) has_positive_non_trie: bool,
 }
 
-impl DomainMatcherBuilder {
+impl NonTrieMatcherBuilder {
     pub(crate) fn insert_pattern(
         &mut self,
+        trie: &mut UnifiedSplitTrieBuilder,
+        route_idx: u32,
         raw: &str,
         force_exclude: bool,
         strict: bool,
@@ -228,7 +474,7 @@ impl DomainMatcherBuilder {
                 if is_exclude {
                     self.exclude_keywords.push(norm);
                 } else {
-                    self.has_positive = true;
+                    self.has_positive_non_trie = true;
                     self.keywords.push(norm);
                 }
             }
@@ -240,7 +486,7 @@ impl DomainMatcherBuilder {
         {
             let norm = normalize_suffix(exact);
             if !norm.is_empty() {
-                self.insert_trie(&norm, true, is_exclude);
+                trie.insert(&norm, route_idx, true, is_exclude);
             }
             return Ok(());
         }
@@ -248,7 +494,7 @@ impl DomainMatcherBuilder {
         if let Some(clash_suffix) = strip_clash_rule_ci(body, "DOMAIN-SUFFIX,") {
             let norm = normalize_suffix(clash_suffix);
             if !norm.is_empty() {
-                self.insert_trie(&norm, false, is_exclude);
+                trie.insert(&norm, route_idx, false, is_exclude);
             }
             return Ok(());
         }
@@ -258,7 +504,7 @@ impl DomainMatcherBuilder {
         }
 
         if let Some(domain) = parse_suffix_line(body) {
-            self.insert_trie(&domain, false, is_exclude);
+            trie.insert(&domain, route_idx, false, is_exclude);
         } else if strict {
             return Err(CoreError::Config(format!(
                 "invalid split_dns domain pattern '{raw}'"
@@ -288,31 +534,27 @@ impl DomainMatcherBuilder {
         if is_exclude {
             self.exclude_regex_patterns.push(trimmed.to_string());
         } else {
-            self.has_positive = true;
+            self.has_positive_non_trie = true;
             self.regex_patterns.push(trimmed.to_string());
         }
         Ok(())
     }
 
-    fn insert_trie(&mut self, domain: &str, exact_only: bool, is_exclude: bool) {
-        if is_exclude {
-            self.exclude_trie.insert(domain, exact_only);
-        } else {
-            self.has_positive = true;
-            self.trie.insert(domain, exact_only);
-        }
-    }
-
-    pub(crate) fn build(self) -> Result<DomainMatcher> {
+    pub(crate) fn build(self) -> Result<NonTrieMatcher> {
         let regexes = compile_regex_set(&self.regex_patterns)?;
         let exclude_regexes = compile_regex_set(&self.exclude_regex_patterns)?;
-        Ok(DomainMatcher {
-            single_suffix: self.single_suffix,
-            trie: self.trie.freeze(),
-            keywords: self.keywords,
+        Ok(NonTrieMatcher {
+            keywords: self
+                .keywords
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect(),
             regexes,
-            exclude_trie: self.exclude_trie.freeze(),
-            exclude_keywords: self.exclude_keywords,
+            exclude_keywords: self
+                .exclude_keywords
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect(),
             exclude_regexes,
         })
     }
@@ -330,21 +572,15 @@ fn compile_regex_set(patterns: &[String]) -> Result<Option<RegexSet>> {
     Ok(Some(set))
 }
 
-pub(crate) fn insert_domains_into_matcher(content: &str, builder: &mut DomainMatcherBuilder) {
+pub(crate) fn insert_domains_into_route(
+    content: &str,
+    trie: &mut UnifiedSplitTrieBuilder,
+    route_idx: u32,
+    non_trie: &mut NonTrieMatcherBuilder,
+) {
     for raw_line in content.lines() {
-        let _ = builder.insert_pattern(raw_line, false, false);
+        let _ = non_trie.insert_pattern(trie, route_idx, raw_line, false, false);
     }
-}
-
-pub(crate) fn is_plain_suffix_spec(raw: &str) -> bool {
-    let t = raw.trim();
-    strip_prefix_ci(t, "full:").is_none()
-        && strip_prefix_ci(t, "keyword:").is_none()
-        && strip_prefix_ci(t, "regexp:").is_none()
-        && strip_prefix_ci(t, "exclude:").is_none()
-        && !t.starts_with("@@")
-        && !t.starts_with('!')
-        && !t.contains(',')
 }
 
 pub(crate) fn strip_hash_comment(raw: &str) -> &str {
@@ -431,7 +667,7 @@ pub(crate) fn matches_suffix_ci(domain: &str, suffix_lower: &str) -> bool {
     split == 0 || domain.as_bytes()[split - 1] == b'.'
 }
 
-fn matches_any_keyword_ci(domain: &str, keywords_lower: &[String]) -> bool {
+fn matches_any_keyword_ci(domain: &str, keywords_lower: &[Box<str>]) -> bool {
     keywords_lower
         .iter()
         .any(|kw| contains_ascii_ci(domain.as_bytes(), kw.as_bytes()))
@@ -451,20 +687,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_split_domain_trie_suffix_and_exact() {
-        let mut builder = SplitDomainTrieBuilder::default();
-        builder.insert("cn", false);
-        builder.insert("bilibili.com", false);
-        builder.insert("exact.example.org", true);
+    fn test_unified_trie_specificity_exclude_and_case_insensitive() {
+        let mut builder = UnifiedSplitTrieBuilder::default();
+        builder.insert("cn", 0, false, false);
+        builder.insert("bilibili.com", 1, false, false);
+        builder.insert("api.bilibili.com", 2, false, false);
+        builder.insert("exact.example.org", 3, true, false);
+        builder.insert("example.org", 4, false, false);
+        builder.insert("internal.cn", 0, false, true);
+        builder.insert("exact.bilibili.com", 1, true, true);
 
         let trie = builder.freeze();
-        assert!(trie.matches("cn"));
-        assert!(trie.matches("gov.cn"));
-        assert!(trie.matches("a.b.gov.cn"));
-        assert!(trie.matches("api.bilibili.com"));
-        assert!(trie.matches("exact.example.org"));
-        assert!(!trie.matches("sub.exact.example.org"));
-        assert!(!trie.matches("google.com"));
-        assert!(!trie.matches("notcn"));
+
+        let mut cand = ScoredCandidates::new();
+        let mut excl = RouteBitset::new(5);
+        trie.collect_specificity_first("API.BiliBili.COM", &mut cand, &mut excl);
+        let sorted = cand.sort_excluding(&excl);
+        assert_eq!(sorted[0].0, 2);
+        assert_eq!(sorted[1].0, 1);
+
+        let mut cand2 = ScoredCandidates::new();
+        let mut excl2 = RouteBitset::new(5);
+        trie.collect_specificity_first("exact.example.org", &mut cand2, &mut excl2);
+        let sorted2 = cand2.sort_excluding(&excl2);
+        assert_eq!(sorted2[0].0, 3);
+        assert_eq!(sorted2[1].0, 4);
+
+        let mut cand3 = ScoredCandidates::new();
+        let mut excl3 = RouteBitset::new(5);
+        trie.collect_specificity_first("sub.exact.example.org", &mut cand3, &mut excl3);
+        let sorted3 = cand3.sort_excluding(&excl3);
+        assert_eq!(sorted3.len(), 1);
+        assert_eq!(sorted3[0].0, 4);
+
+        let mut pos = RouteBitset::new(5);
+        let mut excl4 = RouteBitset::new(5);
+        trie.collect_config_order("app.internal.cn", &mut pos, &mut excl4);
+        let remaining: Vec<u32> = pos.iter_excluding(&excl4).collect();
+        assert!(remaining.is_empty());
+
+        let mut pos2 = RouteBitset::new(5);
+        let mut excl5 = RouteBitset::new(5);
+        trie.collect_config_order("sub.exact.bilibili.com", &mut pos2, &mut excl5);
+        let remaining2: Vec<u32> = pos2.iter_excluding(&excl5).collect();
+        assert_eq!(remaining2, vec![1]);
+    }
+
+    #[test]
+    fn test_bitset_and_candidates_heap_spill() {
+        let mut bs = RouteBitset::new(320);
+        let mut excl = RouteBitset::new(320);
+        bs.set(5);
+        bs.set(270);
+        bs.set(319);
+        excl.set(270);
+        assert_eq!(bs.iter_excluding(&excl).collect::<Vec<_>>(), vec![5, 319]);
+
+        let mut cand = ScoredCandidates::new();
+        let excl_empty = RouteBitset::new(24);
+        for i in 0..20_u32 {
+            cand.insert_max(i, i * 2);
+        }
+        cand.insert_max(3, 999);
+        let sorted = cand.sort_excluding(&excl_empty);
+        assert_eq!(sorted.len(), 20);
+        assert_eq!(sorted[0], (3, 999));
     }
 }

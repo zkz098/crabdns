@@ -94,6 +94,8 @@ pub struct Config {
     pub split_dns_match_mode: SplitDnsMatchMode,
     #[serde(default)]
     pub split_dns_before_client_upstreams: bool,
+    #[serde(default = "default_split_dns_refresh_interval_secs")]
+    pub split_dns_refresh_interval_secs: u64,
     #[serde(default = "default_true")]
     pub cname_cloaking_blocking: bool,
     #[serde(default = "default_true")]
@@ -307,6 +309,19 @@ fn default_dhcp_leases_domain() -> String {
     "lan".to_string()
 }
 
+const fn default_split_dns_refresh_interval_secs() -> u64 {
+    86_400
+}
+
+pub fn validate_split_dns_refresh_interval(secs: u64) -> Result<()> {
+    if secs != 0 && secs < 60 {
+        return Err(CoreError::Config(
+            "split_dns_refresh_interval_secs must be 0 (disabled) or >= 60".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -339,6 +354,7 @@ impl Default for Config {
             upstream_groups: Vec::new(),
             split_dns_match_mode: SplitDnsMatchMode::default(),
             split_dns_before_client_upstreams: false,
+            split_dns_refresh_interval_secs: default_split_dns_refresh_interval_secs(),
             cname_cloaking_blocking: true,
             doh_enabled: true,
             listen_dot: None,

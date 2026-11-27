@@ -311,7 +311,7 @@ impl DnsPipeline {
         explicitly_allowed: bool,
         out: &mut Vec<u8>,
     ) -> bool {
-        let route = self.resolve_upstream_for_query(
+        let route = self.resolve_fast_route_for_query(
             Some(meta.client_addr.ip()),
             Some(QueryProtocol::Udp),
             policy,

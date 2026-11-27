@@ -1,9 +1,10 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal } from "solid-js";
 import { t } from "../i18n";
 import type { QueryProtocol } from "../types/QueryProtocol";
 import type { ResponseIpRule } from "../types/ResponseIpRule";
 import type { SplitDnsMatchMode } from "../types/SplitDnsMatchMode";
 import type { SplitDnsRule } from "../types/SplitDnsRule";
+import type { SplitDnsSourceStatus } from "../types/SplitDnsSourceStatus";
 import type { UpstreamGroup } from "../types/UpstreamGroup";
 import type { UpstreamPolicy } from "../types/UpstreamPolicy";
 import { InfoTooltip } from "./InfoTooltip";
@@ -27,6 +28,9 @@ interface SplitDnsListProps {
   onMatchModeChange?: (next: SplitDnsMatchMode) => void;
   splitBeforeClientUpstreams?: boolean;
   onSplitBeforeClientUpstreamsChange?: (next: boolean) => void;
+  refreshIntervalSecs?: number;
+  onRefreshIntervalSecsChange?: (next: number) => void;
+  sourceStatuses?: SplitDnsSourceStatus[];
   refreshing?: boolean;
   onRefresh?: () => Promise<void> | void;
 }
@@ -110,6 +114,58 @@ export function SplitDnsList(props: SplitDnsListProps) {
     { value: "specificity_first", label: () => t("splitDnsMatchSpecificity") },
     { value: "config_order", label: () => t("splitDnsMatchConfigOrder") },
   ];
+
+  const refreshIntervalOptions = createMemo<SelectOption[]>(() => {
+    const base: SelectOption[] = [
+      { value: "0", label: () => t("splitDnsRefreshManual") },
+      { value: "3600", label: () => t("splitDnsRefreshEveryHour") },
+      { value: "21600", label: () => t("splitDnsRefreshEvery6Hours") },
+      { value: "43200", label: () => t("splitDnsRefreshEvery12Hours") },
+      { value: "86400", label: () => t("splitDnsRefreshEvery24Hours") },
+      { value: "604800", label: () => t("splitDnsRefreshEvery7Days") },
+    ];
+    const current = props.refreshIntervalSecs;
+    if (current !== undefined && !base.some((opt) => Number(opt.value) === current)) {
+      base.push({ value: String(current), label: () => `${current}s` });
+    }
+    return base;
+  });
+
+  const statusBySource = createMemo(() => {
+    const map = new Map<string, SplitDnsSourceStatus>();
+    for (const s of props.sourceStatuses ?? []) {
+      map.set(s.source, s);
+    }
+    return map;
+  });
+
+  function formatSyncTime(ts: number | null): string {
+    if (!ts) return "";
+    try {
+      return new Date(ts * 1000).toLocaleString();
+    } catch {
+      return "";
+    }
+  }
+
+  function ruleSourceStatuses(rule: SplitDnsRule): SplitDnsSourceStatus[] {
+    const map = statusBySource();
+    const sources = [
+      rule.domains_url?.trim(),
+      rule.domains_file?.trim(),
+      rule.response_ip?.expected_ip_url?.trim(),
+      rule.response_ip?.expected_ip_file?.trim(),
+    ];
+    const out: SplitDnsSourceStatus[] = [];
+    for (const s of sources) {
+      if (!s) continue;
+      const st = map.get(s);
+      if (st && !out.some((x) => x.source === st.source)) {
+        out.push(st);
+      }
+    }
+    return out;
+  }
 
   const localityOptions: SelectOption[] = [
     { value: "", label: () => t("splitDnsLocalAuto") },
@@ -410,24 +466,47 @@ export function SplitDnsList(props: SplitDnsListProps) {
         </div>
       </div>
 
-      {/* Global Split-DNS Matching Mode & Client Precedence */}
-      <Show when={props.onMatchModeChange || props.onSplitBeforeClientUpstreamsChange}>
+      {/* Global Split-DNS Matching Mode, Sync Interval & Client Precedence */}
+      <Show
+        when={
+          props.onMatchModeChange ||
+          props.onSplitBeforeClientUpstreamsChange ||
+          props.onRefreshIntervalSecsChange
+        }
+      >
         <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2">
-          <Show when={props.onMatchModeChange}>
-            <div class="flex items-center gap-2">
-              <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
-                {t("splitDnsMatchModeLabel")}
-              </span>
-              <SelectMenu
-                size="xs"
-                value={props.matchMode ?? "specificity_first"}
-                options={matchModeOptions}
-                onChange={(val) => props.onMatchModeChange?.(val)}
-                class="w-44"
-                triggerClass="dark:bg-[#000000]"
-              />
-            </div>
-          </Show>
+          <div class="flex flex-wrap items-center gap-3">
+            <Show when={props.onMatchModeChange}>
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                  {t("splitDnsMatchModeLabel")}
+                </span>
+                <SelectMenu
+                  size="xs"
+                  value={props.matchMode ?? "specificity_first"}
+                  options={matchModeOptions}
+                  onChange={(val) => props.onMatchModeChange?.(val)}
+                  class="w-44"
+                  triggerClass="dark:bg-[#000000]"
+                />
+              </div>
+            </Show>
+            <Show when={props.onRefreshIntervalSecsChange}>
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] text-[#666666] dark:text-[#a1a1aa]">
+                  {t("splitDnsRefreshIntervalLabel")}
+                </span>
+                <SelectMenu
+                  size="xs"
+                  value={String(props.refreshIntervalSecs ?? 86400)}
+                  options={refreshIntervalOptions()}
+                  onChange={(val) => props.onRefreshIntervalSecsChange?.(Number(val))}
+                  class="w-36"
+                  triggerClass="dark:bg-[#000000]"
+                />
+              </div>
+            </Show>
+          </div>
           <Show when={props.onSplitBeforeClientUpstreamsChange}>
             <div class="flex items-center gap-2 text-[11px] text-[#171717] dark:text-[#ededed]">
               <ToggleSwitch
@@ -904,6 +983,36 @@ export function SplitDnsList(props: SplitDnsListProps) {
                           <span class="px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700 dark:text-sky-400 font-mono text-[10px]">
                             {badge}
                           </span>
+                        )}
+                      </For>
+                      <For each={ruleSourceStatuses(rule)}>
+                        {(status) => (
+                          <>
+                            <Show
+                              when={status.cached}
+                              fallback={
+                                <span class="px-1.5 py-0.5 rounded bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 text-[10px]">
+                                  {t("splitDnsNotSynced")}
+                                </span>
+                              }
+                            >
+                              <span
+                                class="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-mono text-[10px]"
+                                title={formatSyncTime(status.last_synced_at)}
+                              >
+                                {status.entry_count} {t("splitDnsEntriesLabel")}
+                                {status.not_modified ? ` · ${t("splitDnsNotModified")}` : ""}
+                              </span>
+                            </Show>
+                            <Show when={status.last_error}>
+                              <span
+                                class="px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-700 dark:text-rose-400 text-[10px]"
+                                title={status.last_error ?? ""}
+                              >
+                                {t("splitDnsSyncError")}
+                              </span>
+                            </Show>
+                          </>
                         )}
                       </For>
                     </div>
