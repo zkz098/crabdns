@@ -1015,7 +1015,8 @@ where
         return (None, Vec::new());
     }
 
-    let screened = screen_candidates(ips, concurrency, TCP_PROBE_TIMEOUT, on_latency_progress).await;
+    let screened =
+        screen_candidates(ips, concurrency, TCP_PROBE_TIMEOUT, on_latency_progress).await;
     if screened.is_empty() {
         return (None, Vec::new());
     }

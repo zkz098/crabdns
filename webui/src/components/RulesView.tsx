@@ -224,7 +224,8 @@ export function RulesView(props: RulesViewProps) {
     const p = props.subProgress;
     if (!p || !p.active) return null;
     if (p.phase === "rebuilding") return 100;
-    if (p.phase === "parsing") return p.total_count > 1 ? Math.round((p.current_index / p.total_count) * 100) : 100;
+    if (p.phase === "parsing")
+      return p.total_count > 1 ? Math.round((p.current_index / p.total_count) * 100) : 100;
     if (p.total_bytes !== null && p.total_bytes > 0) {
       return Math.min(100, Math.round((p.downloaded_bytes / p.total_bytes) * 100));
     }

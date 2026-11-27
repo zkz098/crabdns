@@ -521,9 +521,7 @@ where
                 &mut on_progress,
             )
             .await
-            .map_err(|mirror_err| {
-                format!("{primary_err}; gh-proxy mirror failed: {mirror_err}")
-            })
+            .map_err(|mirror_err| format!("{primary_err}; gh-proxy mirror failed: {mirror_err}"))
         }
     }
 }
@@ -1158,7 +1156,10 @@ mod tests {
             None
         );
         assert_eq!(
-            github_mirror_url("https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt", GH_PROXY_PREFIX),
+            github_mirror_url(
+                "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt",
+                GH_PROXY_PREFIX
+            ),
             None
         );
         assert_eq!(
@@ -1189,7 +1190,10 @@ mod tests {
             assert!(snap.using_mirror);
 
             mgr.set_phase(SubscriptionLoadPhase::Rebuilding);
-            assert_eq!(mgr.status_snapshot().phase, SubscriptionLoadPhase::Rebuilding);
+            assert_eq!(
+                mgr.status_snapshot().phase,
+                SubscriptionLoadPhase::Rebuilding
+            );
         }
 
         let after = mgr.status_snapshot();
