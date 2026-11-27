@@ -38,6 +38,16 @@ pub const MANIFEST_URLS: &[&str] = &[
     "https://v6.gh-proxy.org/https://github.com/zkz098/crabdns/releases/latest/download/latest.hsig.json",
 ];
 
+/// Primary manifest probe timeout when a fallback mirror URL is available.
+///
+/// If GitHub takes longer than this just to serve the small signed manifest JSON,
+/// it is treated as slow/unreachable and the mirror URL is used instead.
+const MANIFEST_PRIMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// If the primary GitHub manifest responds slower than this threshold, prefer the
+/// mirror URL for downloading the much larger release binary.
+const MANIFEST_SLOW_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Expected asset kind in `SignedManifest`.
 pub const EXPECTED_KIND: &str = "portable";
 
@@ -88,11 +98,13 @@ pub struct UpdateConfig {
 
 impl UpdateConfig {
     /// Build the default production update configuration for `crabdns`.
+    ///
+    /// Automatically prioritizes the mirror manifest URL when deployed in mainland China.
     pub fn default_production() -> Result<Self, String> {
         let pins = load_embedded_pin_file()?;
         let url_policy = UrlPolicy::with_prefixes(ALLOWED_DOWNLOAD_PREFIXES.iter().copied());
         Ok(Self {
-            manifest_urls: MANIFEST_URLS.iter().map(|s| (*s).to_string()).collect(),
+            manifest_urls: default_manifest_urls(is_china_deployment()),
             pins,
             url_policy,
             enforce_version_url_prefix: true,
@@ -201,6 +213,86 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+fn is_china_tz_marker(value: &str) -> bool {
+    const CN_ZONES: &[&str] = &[
+        "Asia/Shanghai",
+        "Asia/Chongqing",
+        "Asia/Harbin",
+        "Asia/Urumqi",
+        "Asia/Kashgar",
+        "PRC",
+    ];
+    let trimmed = value.trim().trim_start_matches(':');
+    CN_ZONES
+        .iter()
+        .any(|zone| trimmed == *zone || trimmed.ends_with(&format!("/{zone}")))
+}
+
+fn is_china_timezone_or_locale(
+    tz_env: Option<&str>,
+    localtime_target: Option<&str>,
+    etc_timezone: Option<&str>,
+    locale_env: Option<&str>,
+) -> bool {
+    if tz_env.is_some_and(is_china_tz_marker)
+        || localtime_target.is_some_and(is_china_tz_marker)
+        || etc_timezone.is_some_and(is_china_tz_marker)
+    {
+        return true;
+    }
+    locale_env.is_some_and(|loc| {
+        let lower = loc.trim().to_ascii_lowercase();
+        lower.starts_with("zh_cn") || lower.starts_with("zh-cn")
+    })
+}
+
+/// Detect whether the current host appears to be deployed in mainland China
+/// based on system timezone and locale signals.
+pub(crate) fn is_china_deployment() -> bool {
+    let tz_env = std::env::var("TZ").ok();
+    let localtime_target = std::fs::read_link("/etc/localtime")
+        .ok()
+        .and_then(|p| p.into_os_string().into_string().ok());
+    let etc_timezone = std::fs::read_to_string("/etc/timezone").ok();
+    let locale_env = std::env::var("LC_ALL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("LANG").ok());
+
+    is_china_timezone_or_locale(
+        tz_env.as_deref(),
+        localtime_target.as_deref(),
+        etc_timezone.as_deref(),
+        locale_env.as_deref(),
+    )
+}
+
+fn default_manifest_urls(prefer_mirror: bool) -> Vec<String> {
+    let mut urls: Vec<String> = MANIFEST_URLS.iter().map(|s| (*s).to_string()).collect();
+    if prefer_mirror && let Some(pos) = urls.iter().position(|u| u.starts_with(GH_PROXY_PREFIX)) {
+        let mirror = urls.remove(pos);
+        urls.insert(0, mirror);
+    }
+    urls
+}
+
+/// Promote a `GH_PROXY_PREFIX` mirror URL from `asset.fallback_urls` to `asset.url`,
+/// keeping the original `asset.url` as the first fallback.
+fn prioritize_mirror_asset<M>(asset: &mut sigilup::manifest::PlatformAsset<M>) {
+    if asset.url.starts_with(GH_PROXY_PREFIX) {
+        return;
+    }
+    if let Some(pos) = asset
+        .fallback_urls
+        .iter()
+        .position(|u| u.starts_with(GH_PROXY_PREFIX))
+    {
+        let mirror = asset.fallback_urls.remove(pos);
+        let original = std::mem::replace(&mut asset.url, mirror);
+        asset.fallback_urls.insert(0, original);
+    }
+}
+
 /// Check for a newer signed release using `sigilup`.
 pub async fn check_for_update_with_config(
     client: &reqwest::Client,
@@ -236,23 +328,89 @@ pub async fn check_for_update_from_version(
     ctx.min_security_epoch = cfg.pins.min_security_epoch;
 
     let url_refs: Vec<&str> = cfg.manifest_urls.iter().map(String::as_str).collect();
-    match updater
-        .check_for_update_any::<serde_json::Value, _>(
-            &url_refs,
-            &mut evaluator,
-            &mut epoch_store,
-            ctx,
-        )
-        .await
-        .map_err(|e| format!("sigilup update check failed: {e}"))?
-    {
+    let (decision, prefer_mirror) = match url_refs.split_first() {
+        Some((&primary, rest)) if !rest.is_empty() && !primary.starts_with(GH_PROXY_PREFIX) => {
+            let started = std::time::Instant::now();
+            match tokio::time::timeout(
+                MANIFEST_PRIMARY_TIMEOUT,
+                updater.check_for_update::<serde_json::Value, _>(
+                    primary,
+                    &mut evaluator,
+                    &mut epoch_store,
+                    ctx,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(decision)) => {
+                    let slow = started.elapsed() >= MANIFEST_SLOW_THRESHOLD;
+                    if slow {
+                        tracing::info!(
+                            elapsed_ms = started.elapsed().as_millis(),
+                            "primary GitHub manifest was slow; prioritizing mirror for artifact download"
+                        );
+                    }
+                    (decision, slow)
+                }
+                Ok(Err(err)) => {
+                    tracing::debug!(error = %err, "primary manifest check failed; trying fallback URLs");
+                    let decision = updater
+                        .check_for_update_any::<serde_json::Value, _>(
+                            rest,
+                            &mut evaluator,
+                            &mut epoch_store,
+                            ctx,
+                        )
+                        .await
+                        .map_err(|e| format!("sigilup update check failed: {e}"))?;
+                    (decision, rest.iter().any(|u| u.starts_with(GH_PROXY_PREFIX)))
+                }
+                Err(_) => {
+                    tracing::info!(
+                        timeout_secs = MANIFEST_PRIMARY_TIMEOUT.as_secs(),
+                        "primary GitHub manifest timed out; falling back to mirror"
+                    );
+                    let decision = updater
+                        .check_for_update_any::<serde_json::Value, _>(
+                            rest,
+                            &mut evaluator,
+                            &mut epoch_store,
+                            ctx,
+                        )
+                        .await
+                        .map_err(|e| format!("sigilup update check failed: {e}"))?;
+                    (decision, rest.iter().any(|u| u.starts_with(GH_PROXY_PREFIX)))
+                }
+            }
+        }
+        _ => {
+            let decision = updater
+                .check_for_update_any::<serde_json::Value, _>(
+                    &url_refs,
+                    &mut evaluator,
+                    &mut epoch_store,
+                    ctx,
+                )
+                .await
+                .map_err(|e| format!("sigilup update check failed: {e}"))?;
+            let prefer_mirror = url_refs
+                .first()
+                .is_some_and(|u| u.starts_with(GH_PROXY_PREFIX));
+            (decision, prefer_mirror)
+        }
+    };
+
+    match decision {
         UpdateDecision::UpToDate => Ok(None),
-        UpdateDecision::UpdateAvailable(inner) => {
+        UpdateDecision::UpdateAvailable(mut inner) => {
             let version = inner.version.to_string();
             if cfg.enforce_version_url_prefix {
                 for url in inner.asset.all_urls() {
                     validate_asset_url(url, &version)?;
                 }
+            }
+            if prefer_mirror {
+                prioritize_mirror_asset(&mut inner.asset);
             }
             let notes = inner.notes.clone();
             let asset_url = inner.asset.url.clone();
@@ -997,5 +1155,60 @@ mod tests {
         assert_eq!(after_drop.phase, UpdatePhase::Idle);
         assert_eq!(after_drop.downloaded_bytes, 0);
         assert_eq!(after_drop.total_bytes, None);
+    }
+
+    #[test]
+    fn china_detection_and_mirror_prioritization_work() {
+        assert!(is_china_timezone_or_locale(
+            Some("Asia/Shanghai"),
+            None,
+            None,
+            None
+        ));
+        assert!(is_china_timezone_or_locale(
+            None,
+            Some("/usr/share/zoneinfo/Asia/Shanghai"),
+            None,
+            None
+        ));
+        assert!(is_china_timezone_or_locale(
+            None,
+            None,
+            Some("Asia/Urumqi\n"),
+            None
+        ));
+        assert!(is_china_timezone_or_locale(
+            None,
+            None,
+            None,
+            Some("zh_CN.UTF-8")
+        ));
+        assert!(!is_china_timezone_or_locale(
+            Some("UTC"),
+            Some("/usr/share/zoneinfo/Etc/UTC"),
+            Some("Etc/UTC"),
+            Some("en_US.UTF-8")
+        ));
+
+        let cn_urls = default_manifest_urls(true);
+        assert!(cn_urls[0].starts_with(GH_PROXY_PREFIX));
+        assert!(cn_urls[1].starts_with("https://github.com/"));
+
+        let default_urls = default_manifest_urls(false);
+        assert!(default_urls[0].starts_with("https://github.com/"));
+        assert!(default_urls[1].starts_with(GH_PROXY_PREFIX));
+
+        let primary = "https://github.com/zkz098/crabdns/releases/download/v0.2.1/crabdns.tar.gz";
+        let mirror = format!("{GH_PROXY_PREFIX}{primary}");
+        let mut asset = PlatformAsset {
+            kind: "portable".to_string(),
+            url: primary.to_string(),
+            fallback_urls: vec![mirror.clone()],
+            digest: ArtifactHasher::hash_bytes(b"test"),
+            metadata: None::<serde_json::Value>,
+        };
+        prioritize_mirror_asset(&mut asset);
+        assert_eq!(asset.url, mirror);
+        assert_eq!(asset.fallback_urls, vec![primary.to_string()]);
     }
 }

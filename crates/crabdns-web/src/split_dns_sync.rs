@@ -118,16 +118,20 @@ fn header_string(resp: &reqwest::Response, name: reqwest::header::HeaderName) ->
         .map(ToString::to_string)
 }
 
-async fn fetch_split_dns_conditional(
+async fn fetch_split_dns_conditional_attempt(
     client: &reqwest::Client,
     url: &str,
     allow_private: bool,
     if_none_match: Option<&str>,
     if_modified_since: Option<&str>,
+    timeout_override: Option<std::time::Duration>,
 ) -> Result<FetchOutcome, String> {
     verify_url_ssrf_policy(url, allow_private).await?;
 
     let mut req = client.get(url);
+    if let Some(t) = timeout_override {
+        req = req.timeout(t);
+    }
     if let Some(etag) = if_none_match {
         req = req.header(IF_NONE_MATCH, etag);
     }
@@ -161,6 +165,60 @@ async fn fetch_split_dns_conditional(
         etag,
         last_modified,
     })
+}
+
+async fn fetch_split_dns_conditional(
+    client: &reqwest::Client,
+    url: &str,
+    allow_private: bool,
+    if_none_match: Option<&str>,
+    if_modified_since: Option<&str>,
+) -> Result<FetchOutcome, String> {
+    let candidates = crate::subscriptions::ordered_github_candidates(
+        url,
+        Some(crate::update_api::GH_PROXY_PREFIX),
+        crate::update_api::is_china_deployment(),
+    );
+    let has_fallback = candidates.len() > 1;
+    let mut errors = Vec::new();
+
+    for (idx, (candidate_url, using_mirror)) in candidates.iter().enumerate() {
+        let is_last = idx + 1 == candidates.len();
+        let timeout_override = if has_fallback && !is_last {
+            Some(std::time::Duration::from_secs(12))
+        } else {
+            None
+        };
+        match fetch_split_dns_conditional_attempt(
+            client,
+            candidate_url,
+            allow_private,
+            if_none_match,
+            if_modified_since,
+            timeout_override,
+        )
+        .await
+        {
+            Ok(outcome) => return Ok(outcome),
+            Err(err) => {
+                if !is_last {
+                    tracing::info!(
+                        url = %candidate_url,
+                        using_mirror = *using_mirror,
+                        error = %err,
+                        "split-dns list fetch attempt failed, trying fallback"
+                    );
+                }
+                errors.push(if *using_mirror {
+                    format!("gh-proxy mirror failed: {err}")
+                } else {
+                    err
+                });
+            }
+        }
+    }
+
+    Err(errors.join("; "))
 }
 
 /// Recompiles `UpstreamGroupRegistry` and `SplitUpstreamRouter` using currently cached

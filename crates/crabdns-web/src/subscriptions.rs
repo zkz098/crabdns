@@ -477,6 +477,21 @@ pub async fn fetch_subscription_text_with_policy(
     .await
 }
 
+pub(crate) fn ordered_github_candidates(
+    url: &str,
+    mirror_prefix: Option<&str>,
+    prefer_mirror: bool,
+) -> Vec<(String, bool)> {
+    let Some(mirror) = mirror_prefix.and_then(|prefix| github_mirror_url(url, prefix)) else {
+        return vec![(url.to_string(), false)];
+    };
+    if prefer_mirror {
+        vec![(mirror, true), (url.to_string(), false)]
+    } else {
+        vec![(url.to_string(), false), (mirror, true)]
+    }
+}
+
 pub(crate) async fn fetch_subscription_with_fallback_and_progress<F>(
     client: &reqwest::Client,
     url: &str,
@@ -487,43 +502,54 @@ pub(crate) async fn fetch_subscription_with_fallback_and_progress<F>(
 where
     F: FnMut(u64, Option<u64>, bool),
 {
-    let mirror_url = mirror_prefix.and_then(|prefix| github_mirror_url(url, prefix));
-    let primary_timeout = mirror_url.as_ref().map(|_| DIRECT_GITHUB_TIMEOUT);
-
-    match fetch_single_subscription_attempt(
-        client,
+    let candidates = ordered_github_candidates(
         url,
-        allow_private,
-        primary_timeout,
-        false,
-        &mut on_progress,
-    )
-    .await
-    {
-        Ok(text) => Ok(text),
-        Err(primary_err) => {
-            let Some(mirror) = mirror_url else {
-                return Err(primary_err);
-            };
-            tracing::info!(
-                url = %url,
-                mirror_url = %mirror,
-                error = %primary_err,
-                "subscription direct fetch failed, retrying via gh-proxy mirror"
-            );
-            on_progress(0, None, true);
-            fetch_single_subscription_attempt(
-                client,
-                &mirror,
-                allow_private,
-                None,
-                true,
-                &mut on_progress,
-            )
-            .await
-            .map_err(|mirror_err| format!("{primary_err}; gh-proxy mirror failed: {mirror_err}"))
+        mirror_prefix,
+        crate::update_api::is_china_deployment(),
+    );
+    let has_fallback = candidates.len() > 1;
+    let mut errors = Vec::new();
+
+    for (idx, (candidate_url, using_mirror)) in candidates.iter().enumerate() {
+        let is_last = idx + 1 == candidates.len();
+        let timeout_override = if has_fallback && !is_last {
+            Some(DIRECT_GITHUB_TIMEOUT)
+        } else {
+            None
+        };
+        if idx > 0 {
+            on_progress(0, None, *using_mirror);
+        }
+        match fetch_single_subscription_attempt(
+            client,
+            candidate_url,
+            allow_private,
+            timeout_override,
+            *using_mirror,
+            &mut on_progress,
+        )
+        .await
+        {
+            Ok(text) => return Ok(text),
+            Err(err) => {
+                if !is_last {
+                    tracing::info!(
+                        url = %candidate_url,
+                        using_mirror = *using_mirror,
+                        error = %err,
+                        "subscription fetch attempt failed, trying fallback"
+                    );
+                }
+                errors.push(if *using_mirror {
+                    format!("gh-proxy mirror failed: {err}")
+                } else {
+                    err
+                });
+            }
         }
     }
+
+    Err(errors.join("; "))
 }
 
 pub(crate) async fn read_response_bounded(
@@ -1165,6 +1191,44 @@ mod tests {
         assert_eq!(
             github_mirror_url("https://small.oisd.nl", GH_PROXY_PREFIX),
             None
+        );
+
+        let cn_order = ordered_github_candidates(
+            "https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt",
+            Some(GH_PROXY_PREFIX),
+            true,
+        );
+        assert_eq!(
+            cn_order,
+            vec![
+                (
+                    "https://v6.gh-proxy.org/https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt".to_string(),
+                    true
+                ),
+                (
+                    "https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt".to_string(),
+                    false
+                ),
+            ]
+        );
+
+        let default_order = ordered_github_candidates(
+            "https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt",
+            Some(GH_PROXY_PREFIX),
+            false,
+        );
+        assert_eq!(
+            default_order,
+            vec![
+                (
+                    "https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt".to_string(),
+                    false
+                ),
+                (
+                    "https://v6.gh-proxy.org/https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt".to_string(),
+                    true
+                ),
+            ]
         );
     }
 
