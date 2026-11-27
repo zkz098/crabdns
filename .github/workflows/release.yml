@@ -59,16 +59,6 @@ jobs:
             target: aarch64-unknown-linux-musl
             ext: tar.gz
             bin: crabdns
-          - platform: darwin-aarch64
-            os: macos-latest
-            target: aarch64-apple-darwin
-            ext: tar.gz
-            bin: crabdns
-          - platform: windows-x86_64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            ext: zip
-            bin: crabdns.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -131,6 +121,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Download all release archives
         uses: actions/download-artifact@v8
         with:
@@ -171,13 +163,11 @@ jobs:
           MIRROR_PREFIX="https://v6.gh-proxy.org/"
 
           ARCHIVE_FILES=()
-          for p in linux-x86_64 linux-aarch64 darwin-aarch64 windows-x86_64; do
-            for ext in tar.gz zip; do
-              f="dist/crabdns-${TAG}-${p}.${ext}"
-              if [ -f "$f" ]; then
-                ARCHIVE_FILES+=("$f")
-              fi
-            done
+          for p in linux-x86_64 linux-aarch64; do
+            f="dist/crabdns-${TAG}-${p}.tar.gz"
+            if [ -f "$f" ]; then
+              ARCHIVE_FILES+=("$f")
+            fi
           done
 
           sigilup sign "${ARCHIVE_FILES[@]}"
@@ -187,18 +177,17 @@ jobs:
 
           tag, base_url, mirror_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
           assets = {}
-          for p in ("linux-x86_64", "linux-aarch64", "darwin-aarch64", "windows-x86_64"):
-              for ext in ("tar.gz", "zip"):
-                  fname = f"crabdns-{tag}-{p}.{ext}"
-                  fpath = os.path.join("dist", fname)
-                  if os.path.isfile(fpath):
-                      primary = f"{base_url}/{fname}"
-                      assets[f"{p}-portable"] = {
-                          "kind": "portable",
-                          "path": fpath,
-                          "url": primary,
-                          "fallbackUrls": [f"{mirror_prefix}{primary}"],
-                      }
+          for p in ("linux-x86_64", "linux-aarch64"):
+              fname = f"crabdns-{tag}-{p}.tar.gz"
+              fpath = os.path.join("dist", fname)
+              if os.path.isfile(fpath):
+                  primary = f"{base_url}/{fname}"
+                  assets[f"{p}-portable"] = {
+                      "kind": "portable",
+                      "path": fpath,
+                      "url": primary,
+                      "fallbackUrls": [f"{mirror_prefix}{primary}"],
+                  }
           with open("dist/assets.json", "w", encoding="utf-8") as fh:
               json.dump(assets, fh, indent=2)
           PY
@@ -215,6 +204,14 @@ jobs:
             --pins crates/crabdns-web/src/sigilup-pins.json \
             --manifest dist/latest.hsig.json \
             "${ARCHIVE_FILES[@]}"
+      - name: Generate release notes with git-cliff
+        id: git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header --tag ${{ steps.meta.outputs.tag }}
+        env:
+          OUTPUT: RELEASE_NOTES.md
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -222,10 +219,10 @@ jobs:
           name: "CrabDNS ${{ steps.meta.outputs.tag }}"
           draft: false
           prerelease: ${{ contains(steps.meta.outputs.tag, 'alpha') || contains(steps.meta.outputs.tag, 'beta') || contains(steps.meta.outputs.tag, 'rc') }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
           files: |
             dist/crabdns-*.tar.gz
-            dist/crabdns-*.zip
             dist/*.sha256
             dist/*.hsig
             dist/latest.hsig.json
