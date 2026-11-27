@@ -66,6 +66,7 @@ pub struct RouterState {
     pub updater: Arc<update_api::UpdateManager>,
     pub acme: Arc<acme_api::AcmeManager>,
     pub events: Arc<ws::WsEventHub>,
+    pub subscription_progress: Arc<subscriptions::SubscriptionProgressManager>,
 }
 
 impl RouterState {
@@ -165,6 +166,7 @@ pub fn build_router_with_managers(
         updater,
         acme,
         events: Arc::new(ws::WsEventHub::default()),
+        subscription_progress: Arc::new(subscriptions::SubscriptionProgressManager::new()),
     };
 
     let protected_api = Router::new()
@@ -211,6 +213,10 @@ pub fn build_router_with_managers(
         .route(
             "/api/split-dns/status",
             get(split_dns_sync::get_split_dns_status),
+        )
+        .route(
+            "/api/subscriptions/progress",
+            get(subscriptions::get_subscription_progress),
         )
         .route(
             "/api/subscriptions/refresh",

@@ -33,6 +33,7 @@ import type { SafeSearchConfig } from "./types/SafeSearchConfig";
 import type { SetupCompletePayload } from "./types/SetupCompletePayload";
 import type { SetupStatusResponse } from "./types/SetupStatusResponse";
 import type { SplitDnsMatchMode } from "./types/SplitDnsMatchMode";
+import type { SubscriptionProgressStatus } from "./types/SubscriptionProgressStatus";
 import type { SplitDnsRefreshSummary } from "./types/SplitDnsRefreshSummary";
 import type { SplitDnsRule } from "./types/SplitDnsRule";
 import type { SplitDnsSourceStatus } from "./types/SplitDnsSourceStatus";
@@ -191,6 +192,7 @@ export default function App() {
   const [updateAction, setUpdateAction] = createSignal<UpdateAction>(null);
   const [updateMessage, setUpdateMessage] = createSignal("");
   const [updateIsError, setUpdateIsError] = createSignal(false);
+  const [subProgress, setSubProgress] = createSignal<SubscriptionProgressStatus | null>(null);
 
   const [setupChecked, setSetupChecked] = createSignal(false);
   const [setupStatus, setSetupStatus] = createSignal<SetupStatusResponse | null>(null);
@@ -724,6 +726,40 @@ export default function App() {
       setRefreshingIds((prev) => ({ ...prev, [id]: false }));
     }
   }
+
+  const shouldPollSubscriptionProgress = createMemo(
+    () =>
+      addingSub() ||
+      refreshingAll() ||
+      Object.values(refreshingIds()).some(Boolean) ||
+      Boolean(subProgress()?.active),
+  );
+
+  async function fetchSubscriptionProgress() {
+    try {
+      const res = await fetch("/api/subscriptions/progress", { cache: "no-store" });
+      if (res.ok) {
+        setSubProgress(await res.json());
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  createEffect(() => {
+    if (!shouldConnectWs() || !shouldPollSubscriptionProgress() || wsConnected()) return;
+    let inFlight = false;
+    const timer = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fetchSubscriptionProgress();
+      } finally {
+        inFlight = false;
+      }
+    }, 350);
+    onCleanup(() => clearInterval(timer));
+  });
 
   async function refreshAllSubscriptions() {
     setRefreshingAll(true);
@@ -1555,6 +1591,9 @@ export default function App() {
     if (activeTab === "settings" || Boolean(cfCdnStatus()?.testing)) {
       topics.push("cf_cdn");
     }
+    if (activeTab === "rules" || shouldPollSubscriptionProgress()) {
+      topics.push("subscriptions");
+    }
     return topics;
   });
 
@@ -1572,6 +1611,7 @@ export default function App() {
     onBlocking: (next) => setBlockingStatus(next),
     onUpdate: (next) => setUpdateStatus(next),
     onCfCdn: (next) => setCfCdnStatus(next),
+    onSubscriptionProgress: (next) => setSubProgress(next),
   });
 
   createEffect(() => {
@@ -1721,6 +1761,7 @@ export default function App() {
                 refreshingIds={refreshingIds()}
                 refreshingAll={refreshingAll()}
                 addingSub={addingSub()}
+                subProgress={subProgress()}
                 onAddSubscription={addSubscription}
                 onToggleSubscription={toggleSubscription}
                 onRefreshSubscription={refreshSubscription}

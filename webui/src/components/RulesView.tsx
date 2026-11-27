@@ -2,6 +2,7 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import { t, type TranslationKey } from "../i18n";
 import type { CreateSubscriptionPayload } from "../types/CreateSubscriptionPayload";
 import type { FilterSubscription } from "../types/FilterSubscription";
+import type { SubscriptionProgressStatus } from "../types/SubscriptionProgressStatus";
 import type { TestRuleResponse } from "../types/TestRuleResponse";
 import { SelectMenu, type SelectOption } from "./SelectMenu";
 
@@ -18,6 +19,7 @@ interface RulesViewProps {
   refreshingIds: Record<string, boolean>;
   refreshingAll: boolean;
   addingSub: boolean;
+  subProgress?: SubscriptionProgressStatus | null;
   onAddSubscription: (payload: CreateSubscriptionPayload) => Promise<boolean>;
   onToggleSubscription: (sub: FilterSubscription) => void;
   onRefreshSubscription: (id: string) => void;
@@ -138,6 +140,12 @@ const CATEGORY_TABS: Array<{ key: PresetCategory; labelKey: TranslationKey }> = 
   { key: "security", labelKey: "subsCatSecurity" },
 ];
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 function formatTimestamp(iso: string | null): string {
   if (!iso) return t("subsNeverUpdated");
   const date = new Date(iso);
@@ -205,6 +213,31 @@ export function RulesView(props: RulesViewProps) {
 
   const totalSubRules = () =>
     props.subscriptions.reduce((acc, s) => (s.enabled ? acc + s.rule_count : acc), 0);
+
+  const isAnyRefreshing = () =>
+    props.addingSub ||
+    props.refreshingAll ||
+    Object.values(props.refreshingIds).some(Boolean) ||
+    Boolean(props.subProgress?.active);
+
+  const subProgressPercent = (): number | null => {
+    const p = props.subProgress;
+    if (!p || !p.active) return null;
+    if (p.phase === "rebuilding") return 100;
+    if (p.phase === "parsing") return p.total_count > 1 ? Math.round((p.current_index / p.total_count) * 100) : 100;
+    if (p.total_bytes !== null && p.total_bytes > 0) {
+      return Math.min(100, Math.round((p.downloaded_bytes / p.total_bytes) * 100));
+    }
+    return null;
+  };
+
+  const subProgressPhaseLabel = (): string => {
+    const p = props.subProgress;
+    if (!p || !p.active) return t("subsRefreshing");
+    if (p.phase === "parsing") return t("subsProgressParsing");
+    if (p.phase === "rebuilding") return t("subsProgressRebuilding");
+    return t("subsProgressDownloading");
+  };
 
   async function handleCreateSubmit(e: Event) {
     e.preventDefault();
@@ -374,6 +407,74 @@ export function RulesView(props: RulesViewProps) {
             </button>
           </div>
         </div>
+
+        {/* Subscription Loading Progress Bar */}
+        <Show when={isAnyRefreshing()}>
+          <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3 space-y-2">
+            <div class="flex items-center justify-between gap-2 text-xs">
+              <div class="flex items-center gap-1.5 min-w-0 font-medium text-[#171717] dark:text-[#ededed]">
+                <span class="i-ri-loader-4-line animate-spin text-sm shrink-0" />
+                <span class="truncate">
+                  {subProgressPhaseLabel()}
+                  {props.subProgress?.current_name ? `: ${props.subProgress.current_name}` : ""}
+                </span>
+                <Show when={(props.subProgress?.total_count ?? 0) > 1}>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#eaeaea] dark:bg-[#1f1f1f] text-[#52525b] dark:text-[#a1a1aa] shrink-0 tabular-nums">
+                    {props.subProgress?.current_index}/{props.subProgress?.total_count}
+                  </span>
+                </Show>
+                <Show when={props.subProgress?.using_mirror}>
+                  <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-500/10 text-sky-700 dark:text-sky-400 border border-sky-500/20 shrink-0">
+                    <span class="i-ri-global-line text-[11px]" />
+                    {t("subsProgressMirror")}
+                  </span>
+                </Show>
+              </div>
+              <span class="font-mono text-[11px] text-[#666666] dark:text-[#a1a1aa] tabular-nums shrink-0">
+                {(() => {
+                  const p = props.subProgress;
+                  if (!p || !p.active) return "";
+                  const total = p.total_bytes;
+                  const done = p.downloaded_bytes;
+                  const pct = subProgressPercent();
+                  if (p.phase === "downloading") {
+                    if (total !== null && total > 0 && pct !== null) {
+                      return `${formatBytes(done)} / ${formatBytes(total)} (${pct}%)`;
+                    }
+                    if (done > 0) {
+                      return formatBytes(done);
+                    }
+                  }
+                  if (pct !== null) {
+                    return `${pct}%`;
+                  }
+                  return "";
+                })()}
+              </span>
+            </div>
+            <div
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={subProgressPercent() ?? undefined}
+              class="h-2 w-full rounded-full overflow-hidden bg-[#eaeaea] dark:bg-[#262626]"
+            >
+              <Show
+                when={subProgressPercent() !== null}
+                fallback={<div class="h-full w-1/3 rounded-full bg-emerald-500 animate-pulse" />}
+              >
+                <div
+                  class={`h-full rounded-full transition-all duration-200 ease-out ${
+                    props.subProgress?.phase === "rebuilding"
+                      ? "bg-emerald-500 animate-pulse"
+                      : "bg-[#171717] dark:bg-[#ededed]"
+                  }`}
+                  style={{ width: `${subProgressPercent()}%` }}
+                />
+              </Show>
+            </div>
+          </div>
+        </Show>
 
         {/* Curated Preset Catalog Drawer */}
         <Show when={showCatalog()}>

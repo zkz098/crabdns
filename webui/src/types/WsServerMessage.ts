@@ -3,7 +3,8 @@ import type { BlockingStatusResponse } from "./BlockingStatusResponse";
 import type { CfCdnStatus } from "./CfCdnStatus";
 import type { QueryEvent } from "./QueryEvent";
 import type { StatsResponse } from "./StatsResponse";
+import type { SubscriptionProgressStatus } from "./SubscriptionProgressStatus";
 import type { UpdateStatusResponse } from "./UpdateStatusResponse";
 import type { WsTopic } from "./WsTopic";
 
-export type WsServerMessage = { "type": "log", "data": QueryEvent } | { "type": "stats", "data": StatsResponse } | { "type": "blocking", "data": BlockingStatusResponse } | { "type": "update", "data": UpdateStatusResponse } | { "type": "cf_cdn", "data": CfCdnStatus } | { "type": "subscribed", "data": { topics: Array<WsTopic>, } } | { "type": "error", "data": { message: string, } };
+export type WsServerMessage = { "type": "log", "data": QueryEvent } | { "type": "stats", "data": StatsResponse } | { "type": "blocking", "data": BlockingStatusResponse } | { "type": "update", "data": UpdateStatusResponse } | { "type": "cf_cdn", "data": CfCdnStatus } | { "type": "subscriptions", "data": SubscriptionProgressStatus } | { "type": "subscribed", "data": { topics: Array<WsTopic>, } } | { "type": "error", "data": { message: string, } };

@@ -107,6 +107,10 @@ const en = {
   subsDelete: "Delete",
   subsRefreshOne: "Update",
   subsUpdatedToast: "Subscriptions updated",
+  subsProgressDownloading: "Downloading",
+  subsProgressParsing: "Parsing & saving rules...",
+  subsProgressRebuilding: "Rebuilding filter engine...",
+  subsProgressMirror: "gh-proxy mirror",
 
   settingsTitle: "Runtime Configuration",
   settingsSubtitle:
@@ -827,6 +831,10 @@ const zhCN: Record<TranslationKey, string> = {
   subsDelete: "删除",
   subsRefreshOne: "更新",
   subsUpdatedToast: "订阅已更新",
+  subsProgressDownloading: "正在下载",
+  subsProgressParsing: "正在解析并保存规则...",
+  subsProgressRebuilding: "正在重建过滤引擎...",
+  subsProgressMirror: "gh-proxy 镜像",
 
   settingsTitle: "运行时配置",
   settingsSubtitle:

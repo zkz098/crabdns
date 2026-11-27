@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -9,11 +10,196 @@ use chrono::Utc;
 use crabdns_core::{DnsPipeline, FilterEngine};
 use crabdns_storage::{FilterSubscription, StorageEngine};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use ts_rs::TS;
 
 use crate::RouterState;
+use crate::update_api::GH_PROXY_PREFIX;
 
 pub(crate) const MAX_SUBSCRIPTION_BYTES: usize = 50 * 1024 * 1024;
+const DIRECT_GITHUB_TIMEOUT: Duration = Duration::from_secs(12);
+const PROGRESS_NOTIFY_INTERVAL_MS: u64 = 150;
+
+const GITHUB_MIRROR_HOSTS: &[&str] = &[
+    "github.com",
+    "raw.githubusercontent.com",
+    "gist.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "codeload.github.com",
+    "release-assets.githubusercontent.com",
+];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SubscriptionLoadPhase {
+    #[default]
+    Idle,
+    Downloading,
+    Parsing,
+    Rebuilding,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SubscriptionProgressStatus {
+    pub active: bool,
+    pub phase: SubscriptionLoadPhase,
+    pub current_id: Option<String>,
+    pub current_name: Option<String>,
+    pub current_index: usize,
+    pub total_count: usize,
+    #[ts(type = "number")]
+    pub downloaded_bytes: u64,
+    #[ts(type = "number | null")]
+    pub total_bytes: Option<u64>,
+    pub using_mirror: bool,
+}
+
+#[derive(Debug)]
+pub struct SubscriptionProgressManager {
+    status: Mutex<SubscriptionProgressStatus>,
+    status_tx: watch::Sender<u64>,
+    created_at: Instant,
+    last_notify_ms: AtomicU64,
+}
+
+impl Default for SubscriptionProgressManager {
+    fn default() -> Self {
+        let (status_tx, _) = watch::channel(0);
+        Self {
+            status: Mutex::new(SubscriptionProgressStatus::default()),
+            status_tx,
+            created_at: Instant::now(),
+            last_notify_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+impl SubscriptionProgressManager {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn subscribe_status(&self) -> watch::Receiver<u64> {
+        self.status_tx.subscribe()
+    }
+
+    #[must_use]
+    pub fn status_snapshot(&self) -> SubscriptionProgressStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn notify_changed(&self) {
+        self.status_tx.send_modify(|rev| *rev = rev.wrapping_add(1));
+    }
+
+    pub fn begin_batch(&self, total_count: usize) -> SubscriptionProgressGuard<'_> {
+        self.last_notify_ms.store(0, Ordering::Relaxed);
+        {
+            let mut s = self
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *s = SubscriptionProgressStatus {
+                active: true,
+                phase: SubscriptionLoadPhase::Downloading,
+                current_id: None,
+                current_name: None,
+                current_index: 0,
+                total_count: total_count.max(1),
+                downloaded_bytes: 0,
+                total_bytes: None,
+                using_mirror: false,
+            };
+        }
+        self.notify_changed();
+        SubscriptionProgressGuard(self)
+    }
+
+    pub fn begin_item(&self, index: usize, id: Option<&str>, name: &str) {
+        self.last_notify_ms.store(0, Ordering::Relaxed);
+        {
+            let mut s = self
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.active = true;
+            s.phase = SubscriptionLoadPhase::Downloading;
+            s.current_id = id.map(ToString::to_string);
+            s.current_name = Some(name.to_string());
+            s.current_index = index;
+            s.downloaded_bytes = 0;
+            s.total_bytes = None;
+            s.using_mirror = false;
+        }
+        self.notify_changed();
+    }
+
+    pub fn update_download(&self, downloaded: u64, total: Option<u64>, using_mirror: bool) {
+        let mirror_changed = {
+            let mut s = self
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let changed = s.using_mirror != using_mirror;
+            s.phase = SubscriptionLoadPhase::Downloading;
+            s.downloaded_bytes = downloaded;
+            s.total_bytes = total.filter(|&v| v > 0);
+            s.using_mirror = using_mirror;
+            changed
+        };
+        let now_ms = u64::try_from(self.created_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let prev = self.last_notify_ms.load(Ordering::Relaxed);
+        let is_complete = total.is_some_and(|t| downloaded >= t);
+        if mirror_changed
+            || ((is_complete
+                || prev == 0
+                || now_ms.saturating_sub(prev) >= PROGRESS_NOTIFY_INTERVAL_MS)
+                && self
+                    .last_notify_ms
+                    .compare_exchange(prev, now_ms.max(1), Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok())
+        {
+            self.notify_changed();
+        }
+    }
+
+    pub fn set_phase(&self, phase: SubscriptionLoadPhase) {
+        {
+            let mut s = self
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.phase = phase;
+        }
+        self.notify_changed();
+    }
+
+    pub fn finish(&self) {
+        {
+            let mut s = self
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *s = SubscriptionProgressStatus::default();
+        }
+        self.notify_changed();
+    }
+}
+
+pub struct SubscriptionProgressGuard<'a>(&'a SubscriptionProgressManager);
+
+impl Drop for SubscriptionProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
@@ -214,15 +400,49 @@ pub(crate) async fn verify_url_ssrf_policy(url: &str, allow_private: bool) -> Re
     Ok(())
 }
 
-pub async fn fetch_subscription_text_with_policy(
+pub(crate) fn github_mirror_url(raw_url: &str, mirror_prefix: &str) -> Option<String> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() || trimmed.starts_with(mirror_prefix) {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if !GITHUB_MIRROR_HOSTS
+        .iter()
+        .any(|candidate| host == *candidate)
+    {
+        return None;
+    }
+    let prefix = if mirror_prefix.ends_with('/') {
+        mirror_prefix.to_string()
+    } else {
+        format!("{mirror_prefix}/")
+    };
+    Some(format!("{prefix}{trimmed}"))
+}
+
+async fn fetch_single_subscription_attempt<F>(
     client: &reqwest::Client,
     url: &str,
     allow_private: bool,
-) -> Result<String, String> {
+    timeout_override: Option<Duration>,
+    using_mirror: bool,
+    on_progress: &mut F,
+) -> Result<String, String>
+where
+    F: FnMut(u64, Option<u64>, bool),
+{
     verify_url_ssrf_policy(url, allow_private).await?;
 
-    let resp = client
-        .get(url)
+    let mut req = client.get(url);
+    if let Some(t) = timeout_override {
+        req = req.timeout(t);
+    }
+
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -231,23 +451,107 @@ pub async fn fetch_subscription_text_with_policy(
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    let bytes = read_response_bounded(resp, MAX_SUBSCRIPTION_BYTES).await?;
+    let total_bytes = resp.content_length().filter(|&v| v > 0);
+    on_progress(0, total_bytes, using_mirror);
+    let bytes =
+        read_response_bounded_with_progress(resp, MAX_SUBSCRIPTION_BYTES, |downloaded, total| {
+            on_progress(downloaded, total, using_mirror);
+        })
+        .await?;
     Ok(String::from_utf8(bytes)
         .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
 }
 
+pub async fn fetch_subscription_text_with_policy(
+    client: &reqwest::Client,
+    url: &str,
+    allow_private: bool,
+) -> Result<String, String> {
+    fetch_subscription_with_fallback_and_progress(
+        client,
+        url,
+        allow_private,
+        Some(GH_PROXY_PREFIX),
+        |_, _, _| {},
+    )
+    .await
+}
+
+pub(crate) async fn fetch_subscription_with_fallback_and_progress<F>(
+    client: &reqwest::Client,
+    url: &str,
+    allow_private: bool,
+    mirror_prefix: Option<&str>,
+    mut on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(u64, Option<u64>, bool),
+{
+    let mirror_url = mirror_prefix.and_then(|prefix| github_mirror_url(url, prefix));
+    let primary_timeout = mirror_url.as_ref().map(|_| DIRECT_GITHUB_TIMEOUT);
+
+    match fetch_single_subscription_attempt(
+        client,
+        url,
+        allow_private,
+        primary_timeout,
+        false,
+        &mut on_progress,
+    )
+    .await
+    {
+        Ok(text) => Ok(text),
+        Err(primary_err) => {
+            let Some(mirror) = mirror_url else {
+                return Err(primary_err);
+            };
+            tracing::info!(
+                url = %url,
+                mirror_url = %mirror,
+                error = %primary_err,
+                "subscription direct fetch failed, retrying via gh-proxy mirror"
+            );
+            on_progress(0, None, true);
+            fetch_single_subscription_attempt(
+                client,
+                &mirror,
+                allow_private,
+                None,
+                true,
+                &mut on_progress,
+            )
+            .await
+            .map_err(|mirror_err| {
+                format!("{primary_err}; gh-proxy mirror failed: {mirror_err}")
+            })
+        }
+    }
+}
+
 pub(crate) async fn read_response_bounded(
-    mut resp: reqwest::Response,
+    resp: reqwest::Response,
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
-    if let Some(len) = resp.content_length()
+    read_response_bounded_with_progress(resp, max_bytes, |_, _| {}).await
+}
+
+pub(crate) async fn read_response_bounded_with_progress<F>(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+    mut on_progress: F,
+) -> Result<Vec<u8>, String>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    let total_len = resp.content_length().filter(|&v| v > 0);
+    if let Some(len) = total_len
         && len > max_bytes as u64
     {
         return Err("Subscription file exceeds 50 MB limit".to_string());
     }
 
     let mut out = Vec::with_capacity(
-        usize::try_from(resp.content_length().unwrap_or(0))
+        usize::try_from(total_len.unwrap_or(0))
             .unwrap_or(0)
             .min(max_bytes),
     );
@@ -260,6 +564,7 @@ pub(crate) async fn read_response_bounded(
             return Err("Subscription file exceeds 50 MB limit".to_string());
         }
         out.extend_from_slice(&chunk);
+        on_progress(out.len() as u64, total_len);
     }
     Ok(out)
 }
@@ -333,9 +638,26 @@ async fn fetch_and_store_subscription(
     storage: &Arc<StorageEngine>,
     sub: &mut FilterSubscription,
     allow_private: bool,
+    progress: Option<&SubscriptionProgressManager>,
 ) {
-    match fetch_subscription_text_with_policy(client, &sub.url, allow_private).await {
+    let fetch_res = fetch_subscription_with_fallback_and_progress(
+        client,
+        &sub.url,
+        allow_private,
+        Some(GH_PROXY_PREFIX),
+        |downloaded, total, using_mirror| {
+            if let Some(mgr) = progress {
+                mgr.update_download(downloaded, total, using_mirror);
+            }
+        },
+    )
+    .await;
+
+    match fetch_res {
         Ok(text) => {
+            if let Some(mgr) = progress {
+                mgr.set_phase(SubscriptionLoadPhase::Parsing);
+            }
             let st = Arc::clone(storage);
             let sub_id = sub.id.clone();
             let save_res = tokio::task::spawn_blocking(move || {
@@ -379,14 +701,35 @@ pub async fn refresh_enabled_subscriptions_job_with_policy(
     pipeline: &Arc<DnsPipeline>,
     allow_private: bool,
 ) -> Result<Vec<FilterSubscription>, String> {
+    refresh_enabled_subscriptions_job_with_progress(client, storage, pipeline, allow_private, None)
+        .await
+}
+
+pub async fn refresh_enabled_subscriptions_job_with_progress(
+    client: &reqwest::Client,
+    storage: &Arc<StorageEngine>,
+    pipeline: &Arc<DnsPipeline>,
+    allow_private: bool,
+    progress: Option<&SubscriptionProgressManager>,
+) -> Result<Vec<FilterSubscription>, String> {
     let mut snapshot = {
         let _guard = storage.subscription_lock().lock().await;
         storage_blocking(storage, StorageEngine::list_subscriptions).await?
     };
 
+    let enabled_total = snapshot.iter().filter(|s| s.enabled).count();
+    let _progress_guard = (enabled_total > 0)
+        .then(|| progress.map(|mgr| mgr.begin_batch(enabled_total)))
+        .flatten();
+
+    let mut idx = 0_usize;
     for sub in &mut snapshot {
         if sub.enabled {
-            fetch_and_store_subscription(client, storage, sub, allow_private).await;
+            idx += 1;
+            if let Some(mgr) = progress {
+                mgr.begin_item(idx, Some(&sub.id), &sub.name);
+            }
+            fetch_and_store_subscription(client, storage, sub, allow_private, progress).await;
         }
     }
 
@@ -407,8 +750,17 @@ pub async fn refresh_enabled_subscriptions_job_with_policy(
         latest
     };
 
+    if let Some(mgr) = progress {
+        mgr.set_phase(SubscriptionLoadPhase::Rebuilding);
+    }
     rebuild_filter_engine_async(storage, pipeline).await?;
     Ok(updated)
+}
+
+pub async fn get_subscription_progress(
+    State(state): State<RouterState>,
+) -> Json<SubscriptionProgressStatus> {
+    Json(state.subscription_progress.status_snapshot())
 }
 
 pub async fn list_subscriptions(
@@ -446,8 +798,24 @@ pub async fn create_subscription(
     };
 
     if sub.enabled {
+        let _progress_guard = state.subscription_progress.begin_batch(1);
+        state
+            .subscription_progress
+            .begin_item(1, Some(&sub.id), &sub.name);
         let client = state.subscription_client(allow_private);
-        fetch_and_store_subscription(client, &state.app.storage, &mut sub, allow_private).await;
+        fetch_and_store_subscription(
+            client,
+            &state.app.storage,
+            &mut sub,
+            allow_private,
+            Some(&state.subscription_progress),
+        )
+        .await;
+        if sub.last_error.is_none() {
+            state
+                .subscription_progress
+                .set_phase(SubscriptionLoadPhase::Rebuilding);
+        }
     }
 
     let _guard = state.app.storage.subscription_lock().lock().await;
@@ -460,6 +828,13 @@ pub async fn create_subscription(
         .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     if sub.enabled && sub.last_error.is_none() {
+        let _progress_guard = state.subscription_progress.begin_batch(1);
+        state
+            .subscription_progress
+            .begin_item(1, Some(&sub.id), &sub.name);
+        state
+            .subscription_progress
+            .set_phase(SubscriptionLoadPhase::Rebuilding);
         rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
             .await
             .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -526,9 +901,19 @@ pub async fn update_subscription(
     };
 
     if should_fetch {
+        let _progress_guard = state.subscription_progress.begin_batch(1);
+        state
+            .subscription_progress
+            .begin_item(1, Some(&updated_sub.id), &updated_sub.name);
         let client = state.subscription_client(allow_private);
-        fetch_and_store_subscription(client, &state.app.storage, &mut updated_sub, allow_private)
-            .await;
+        fetch_and_store_subscription(
+            client,
+            &state.app.storage,
+            &mut updated_sub,
+            allow_private,
+            Some(&state.subscription_progress),
+        )
+        .await;
     }
 
     let _guard = state.app.storage.subscription_lock().lock().await;
@@ -600,25 +985,41 @@ pub async fn refresh_subscription(
 
     let allow_private = state.app.config.load().allow_private_subscriptions;
     let client = state.subscription_client(allow_private);
-    fetch_and_store_subscription(client, &state.app.storage, &mut target, allow_private).await;
+    {
+        let _progress_guard = state.subscription_progress.begin_batch(1);
+        state
+            .subscription_progress
+            .begin_item(1, Some(&target.id), &target.name);
+        fetch_and_store_subscription(
+            client,
+            &state.app.storage,
+            &mut target,
+            allow_private,
+            Some(&state.subscription_progress),
+        )
+        .await;
 
-    let _guard = state.app.storage.subscription_lock().lock().await;
-    let mut subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
-        .await
-        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if let Some(sub) = subs.iter_mut().find(|s| s.id == id) {
-        sub.rule_count = target.rule_count;
-        sub.last_updated = target.last_updated;
-        sub.last_error.clone_from(&target.last_error);
-        storage_blocking(&state.app.storage, move |st| st.save_subscriptions(&subs))
+        let _guard = state.app.storage.subscription_lock().lock().await;
+        let mut subs = storage_blocking(&state.app.storage, StorageEngine::list_subscriptions)
             .await
             .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    }
+        if let Some(sub) = subs.iter_mut().find(|s| s.id == id) {
+            sub.rule_count = target.rule_count;
+            sub.last_updated = target.last_updated;
+            sub.last_error.clone_from(&target.last_error);
+            storage_blocking(&state.app.storage, move |st| st.save_subscriptions(&subs))
+                .await
+                .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        }
 
-    if target.enabled {
-        rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
-            .await
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        if target.enabled {
+            state
+                .subscription_progress
+                .set_phase(SubscriptionLoadPhase::Rebuilding);
+            rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
+                .await
+                .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        }
     }
 
     Ok(Json(target))
@@ -629,11 +1030,12 @@ pub async fn refresh_all_subscriptions(
 ) -> ApiResult<Json<Vec<FilterSubscription>>> {
     let allow_private = state.app.config.load().allow_private_subscriptions;
     let client = state.subscription_client(allow_private);
-    let subs = refresh_enabled_subscriptions_job_with_policy(
+    let subs = refresh_enabled_subscriptions_job_with_progress(
         client,
         &state.app.storage,
         &state.app.pipeline,
         allow_private,
+        Some(&state.subscription_progress),
     )
     .await
     .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -724,5 +1126,111 @@ mod tests {
             fetch_err.contains("Request failed"),
             "unexpected redirect error: {fetch_err}"
         );
+    }
+
+    #[test]
+    fn test_github_mirror_url() {
+        assert_eq!(
+            github_mirror_url(
+                "https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt",
+                GH_PROXY_PREFIX
+            ),
+            Some(
+                "https://v6.gh-proxy.org/https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            github_mirror_url(
+                "https://github.com/StevenBlack/hosts/raw/master/hosts",
+                "https://v6.gh-proxy.org"
+            ),
+            Some(
+                "https://v6.gh-proxy.org/https://github.com/StevenBlack/hosts/raw/master/hosts"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            github_mirror_url(
+                "https://v6.gh-proxy.org/https://raw.githubusercontent.com/a/b/c.txt",
+                GH_PROXY_PREFIX
+            ),
+            None
+        );
+        assert_eq!(
+            github_mirror_url("https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt", GH_PROXY_PREFIX),
+            None
+        );
+        assert_eq!(
+            github_mirror_url("https://small.oisd.nl", GH_PROXY_PREFIX),
+            None
+        );
+    }
+
+    #[test]
+    fn test_subscription_progress_manager_lifecycle_and_drop_reset() {
+        let mgr = SubscriptionProgressManager::new();
+        assert!(!mgr.status_snapshot().active);
+        assert_eq!(mgr.status_snapshot().phase, SubscriptionLoadPhase::Idle);
+
+        {
+            let _guard = mgr.begin_batch(3);
+            mgr.begin_item(2, Some("sub-2"), "AdRules");
+            mgr.update_download(1024, Some(2048), true);
+            let snap = mgr.status_snapshot();
+            assert!(snap.active);
+            assert_eq!(snap.phase, SubscriptionLoadPhase::Downloading);
+            assert_eq!(snap.current_id.as_deref(), Some("sub-2"));
+            assert_eq!(snap.current_name.as_deref(), Some("AdRules"));
+            assert_eq!(snap.current_index, 2);
+            assert_eq!(snap.total_count, 3);
+            assert_eq!(snap.downloaded_bytes, 1024);
+            assert_eq!(snap.total_bytes, Some(2048));
+            assert!(snap.using_mirror);
+
+            mgr.set_phase(SubscriptionLoadPhase::Rebuilding);
+            assert_eq!(mgr.status_snapshot().phase, SubscriptionLoadPhase::Rebuilding);
+        }
+
+        let after = mgr.status_snapshot();
+        assert!(!after.active);
+        assert_eq!(after.phase, SubscriptionLoadPhase::Idle);
+        assert_eq!(after.downloaded_bytes, 0);
+        assert!(!after.using_mirror);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_subscription_progress_callback_reports_bytes() {
+        let body = "||ads.example.com^\n||tracker.example.com^\n";
+        let app = axum::Router::new().route(
+            "/rules.txt",
+            axum::routing::get(move || async move { body }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = build_subscription_http_client(true);
+        let mut events = Vec::new();
+        let text = fetch_subscription_with_fallback_and_progress(
+            &client,
+            &format!("http://{addr}/rules.txt"),
+            true,
+            None,
+            |downloaded, total, using_mirror| {
+                events.push((downloaded, total, using_mirror));
+            },
+        )
+        .await
+        .expect("fetch should succeed");
+
+        assert_eq!(text, body);
+        assert!(!events.is_empty());
+        let last = events.last().copied().unwrap();
+        assert_eq!(last.0, body.len() as u64);
+        assert_eq!(last.1, Some(body.len() as u64));
+        assert!(!last.2);
     }
 }

@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, watch};
 use ts_rs::TS;
 
 use crate::controls::BlockingStatusResponse;
+use crate::subscriptions::SubscriptionProgressStatus;
 use crate::update_api::UpdateStatusResponse;
 use crate::{RouterState, StatsResponse, build_stats_response};
 
@@ -67,6 +68,7 @@ pub enum WsTopic {
     Blocking,
     Update,
     CfCdn,
+    Subscriptions,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -107,6 +109,7 @@ pub enum WsServerMessage {
     Blocking(BlockingStatusResponse),
     Update(UpdateStatusResponse),
     CfCdn(CfCdnStatus),
+    Subscriptions(SubscriptionProgressStatus),
     Subscribed { topics: Vec<WsTopic> },
     Error { message: String },
 }
@@ -120,6 +123,7 @@ impl TopicSet {
     const BLOCKING_BIT: u8 = 1 << 2;
     const UPDATE_BIT: u8 = 1 << 3;
     const CF_CDN_BIT: u8 = 1 << 4;
+    const SUBSCRIPTIONS_BIT: u8 = 1 << 5;
 
     const fn bit(topic: WsTopic) -> u8 {
         match topic {
@@ -128,6 +132,7 @@ impl TopicSet {
             WsTopic::Blocking => Self::BLOCKING_BIT,
             WsTopic::Update => Self::UPDATE_BIT,
             WsTopic::CfCdn => Self::CF_CDN_BIT,
+            WsTopic::Subscriptions => Self::SUBSCRIPTIONS_BIT,
         }
     }
 
@@ -151,6 +156,7 @@ impl TopicSet {
             WsTopic::Blocking,
             WsTopic::Update,
             WsTopic::CfCdn,
+            WsTopic::Subscriptions,
         ] {
             if self.contains(topic) {
                 out.push(topic);
@@ -169,6 +175,7 @@ struct WsSessionState {
     blocking_rx: watch::Receiver<u64>,
     update_rx: watch::Receiver<u64>,
     cf_cdn_rx: watch::Receiver<u64>,
+    subscription_progress_rx: watch::Receiver<u64>,
 }
 
 impl WsSessionState {
@@ -177,10 +184,12 @@ impl WsSessionState {
         let mut blocking_rx = state.events.subscribe_blocking();
         let mut update_rx = state.updater.subscribe_status();
         let mut cf_cdn_rx = state.app.pipeline.cf_cdn_manager().subscribe_status();
+        let mut subscription_progress_rx = state.subscription_progress.subscribe_status();
         let _ = stats_rx.borrow_and_update();
         let _ = blocking_rx.borrow_and_update();
         let _ = update_rx.borrow_and_update();
         let _ = cf_cdn_rx.borrow_and_update();
+        let _ = subscription_progress_rx.borrow_and_update();
 
         Self {
             topics: TopicSet::default(),
@@ -191,6 +200,7 @@ impl WsSessionState {
             blocking_rx,
             update_rx,
             cf_cdn_rx,
+            subscription_progress_rx,
         }
     }
 }
@@ -328,6 +338,13 @@ async fn send_new_topic_snapshots(
     if next.contains(WsTopic::CfCdn) && !prev.contains(WsTopic::CfCdn) {
         let _ = session.cf_cdn_rx.borrow_and_update();
         let msg = WsServerMessage::CfCdn(state.app.pipeline.cf_cdn_manager().status());
+        if !send_ws_message(socket, &msg).await {
+            return false;
+        }
+    }
+    if next.contains(WsTopic::Subscriptions) && !prev.contains(WsTopic::Subscriptions) {
+        let _ = session.subscription_progress_rx.borrow_and_update();
+        let msg = WsServerMessage::Subscriptions(state.subscription_progress.status_snapshot());
         if !send_ws_message(socket, &msg).await {
             return false;
         }
@@ -482,6 +499,13 @@ async fn handle_ws_events(
             res = session.cf_cdn_rx.changed(), if session.topics.contains(WsTopic::CfCdn) => {
                 if res.is_ok()
                     && !send_ws_message(&mut socket, &WsServerMessage::CfCdn(state.app.pipeline.cf_cdn_manager().status())).await
+                {
+                    break;
+                }
+            }
+            res = session.subscription_progress_rx.changed(), if session.topics.contains(WsTopic::Subscriptions) => {
+                if res.is_ok()
+                    && !send_ws_message(&mut socket, &WsServerMessage::Subscriptions(state.subscription_progress.status_snapshot())).await
                 {
                     break;
                 }

@@ -2,6 +2,7 @@ import type { BlockingStatusResponse } from "./types/BlockingStatusResponse";
 import type { CfCdnStatus } from "./types/CfCdnStatus";
 import type { QueryEvent } from "./types/QueryEvent";
 import type { StatsResponse } from "./types/StatsResponse";
+import type { SubscriptionProgressStatus } from "./types/SubscriptionProgressStatus";
 import type { UpdateStatusResponse } from "./types/UpdateStatusResponse";
 import type { WsClientMessage } from "./types/WsClientMessage";
 import type { WsLogFilter } from "./types/WsLogFilter";
@@ -17,6 +18,7 @@ export interface WsEventClientOptions {
   onBlocking: (status: BlockingStatusResponse) => void;
   onUpdate: (status: UpdateStatusResponse) => void;
   onCfCdn: (status: CfCdnStatus) => void;
+  onSubscriptionProgress?: (status: SubscriptionProgressStatus) => void;
 }
 
 export interface WsEventClient {
@@ -171,6 +173,9 @@ export function createWsEventClient(options: WsEventClientOptions): WsEventClien
           break;
         case "cf_cdn":
           options.onCfCdn(msg.data);
+          break;
+        case "subscriptions":
+          options.onSubscriptionProgress?.(msg.data);
           break;
         case "subscribed":
         case "error":
