@@ -41,5 +41,7 @@ tikv-jemalloc-ctl = { workspace = true, features = ["profiling", "stats", "use_s
 
 [dev-dependencies]
 dhat.workspace = true
+futures-util.workspace = true
 sigilup = { workspace = true, features = ["sign"] }
 tempfile.workspace = true
+tokio-tungstenite.workspace = true

@@ -1249,3 +1249,351 @@ async fn test_acme_http01_challenge_and_status_api() {
     assert_eq!(status_json["enabled"], true);
     assert_eq!(status_json["domains"][0], "dns.example.com");
 }
+
+async fn recv_ws_json(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> serde_json::Value {
+    use futures_util::StreamExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(item) = ws.next().await {
+            let msg = item.expect("ws frame");
+            if let Message::Text(text) = msg {
+                return serde_json::from_str::<serde_json::Value>(&text).expect("valid ws json");
+            }
+        }
+        panic!("ws stream closed before message");
+    })
+    .await
+    .expect("timed out waiting for ws message")
+}
+
+fn sample_query_event(
+    domain: &str,
+    outcome: crabdns_core::QueryOutcome,
+    protocol: crabdns_core::QueryProtocol,
+) -> QueryEvent {
+    QueryEvent {
+        timestamp: chrono::Utc::now(),
+        client_ip: "192.168.1.42".to_string(),
+        client_name: Some("workstation".to_string()),
+        client_id: Some("desk-1".to_string()),
+        profile_id: None,
+        protocol,
+        domain: domain.to_string(),
+        qtype: "A".to_string(),
+        outcome,
+        matched_rule: None,
+        matched_list: None,
+        upstream: None,
+        elapsed_us: 120,
+        rcode: "NOERROR".to_string(),
+        answers: vec!["1.2.3.4".to_string()],
+    }
+}
+
+async fn send_ws_json(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    payload: &serde_json::Value,
+) {
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+
+    ws.send(Message::Text(payload.to_string().into()))
+        .await
+        .expect("send ws json");
+}
+
+async fn spawn_ws_test_server(
+    cfg: Config,
+    updater: Option<Arc<crabdns_web::update_api::UpdateManager>>,
+) -> (
+    std::net::SocketAddr,
+    broadcast::Sender<QueryEvent>,
+    Arc<DnsPipeline>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut full_cfg = cfg;
+    full_cfg.data_dir = dir.path().to_path_buf();
+    let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+    let config = Arc::new(ArcSwap::from_pointee(full_cfg));
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, false));
+    let upstream = Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
+    let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+    let (live_tx, _) = broadcast::channel(32);
+
+    let app_state = AppState {
+        config,
+        pipeline: Arc::clone(&pipeline),
+        storage,
+        live_tx: live_tx.clone(),
+        tls_reloader: None,
+    };
+    let app = match updater {
+        Some(u) => build_router_with_updater(app_state, u),
+        None => build_router(app_state),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, live_tx, pipeline, dir)
+}
+
+#[tokio::test]
+async fn test_ws_events_requires_auth_when_enabled() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let password_hash = auth::hash_password("s3cret-pass").expect("hash");
+    let (addr, _live_tx, _pipeline, _dir) = spawn_ws_test_server(
+        Config {
+            web_auth_enabled: true,
+            web_username: "admin".to_string(),
+            web_password_hash: password_hash,
+            ..Config::default()
+        },
+        None,
+    )
+    .await;
+
+    let ws_url = format!("ws://{addr}/api/ws");
+    let unauthed = tokio_tungstenite::connect_async(&ws_url).await;
+    match unauthed {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        other => panic!("expected 401 on unauthenticated ws upgrade, got {other:?}"),
+    }
+
+    let client = reqwest::Client::new();
+    let login_res = client
+        .post(format!("http://{addr}/api/auth/login"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::to_vec(&serde_json::json!({
+                "username": "admin",
+                "password": "s3cret-pass",
+            }))
+            .unwrap(),
+        )
+        .send()
+        .await
+        .expect("login");
+    assert_eq!(login_res.status(), StatusCode::OK);
+    let login_json: serde_json::Value =
+        serde_json::from_slice(&login_res.bytes().await.expect("login body")).expect("login json");
+    let token = login_json["token"].as_str().expect("token");
+
+    let mut req = ws_url.into_client_request().expect("ws req");
+    req.headers_mut().insert(
+        axum::http::header::COOKIE,
+        axum::http::HeaderValue::from_str(&format!("crabdns_session={token}")).unwrap(),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(req)
+        .await
+        .expect("authenticated ws connect");
+
+    send_ws_json(
+        &mut ws,
+        &serde_json::json!({ "type": "subscribe", "topics": ["blocking"] }),
+    )
+    .await;
+
+    let sub_ack = recv_ws_json(&mut ws).await;
+    assert_eq!(sub_ack["type"], "subscribed");
+    assert_eq!(sub_ack["data"]["topics"], serde_json::json!(["blocking"]));
+
+    let blocking_snap = recv_ws_json(&mut ws).await;
+    assert_eq!(blocking_snap["type"], "blocking");
+    assert_eq!(blocking_snap["data"]["paused"], false);
+}
+
+async fn post_ok(client: &reqwest::Client, url: String, body: Option<serde_json::Value>) {
+    let req = client.post(url);
+    let req = match body {
+        Some(json) => req
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&json).unwrap()),
+        None => req,
+    };
+    assert_eq!(req.send().await.expect("post").status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_ws_events_subscriptions_and_log_filtering() {
+    use crabdns_core::{QueryOutcome, QueryProtocol};
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (addr, live_tx, _pipeline, _dir) = spawn_ws_test_server(Config::default(), None).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+        .await
+        .expect("connect ws");
+
+    // Before subscribing to logs, live events are not pushed.
+    let _ = live_tx.send(sample_query_event(
+        "ignored-before-sub.test",
+        QueryOutcome::Blocked,
+        QueryProtocol::Udp,
+    ));
+
+    send_ws_json(
+        &mut ws,
+        &serde_json::json!({
+            "type": "subscribe",
+            "topics": ["stats", "blocking", "update", "cf_cdn"],
+        }),
+    )
+    .await;
+
+    assert_eq!(recv_ws_json(&mut ws).await["type"], "subscribed");
+    let mut initial_types = Vec::new();
+    for _ in 0..4 {
+        initial_types.push(recv_ws_json(&mut ws).await["type"].as_str().unwrap().to_string());
+    }
+    assert_eq!(initial_types, vec!["stats", "blocking", "update", "cf_cdn"]);
+
+    let client = reqwest::Client::new();
+    post_ok(
+        &client,
+        format!("http://{addr}/api/blocking/pause"),
+        Some(serde_json::json!({ "duration_secs": 60 })),
+    )
+    .await;
+    let paused_msg = recv_ws_json(&mut ws).await;
+    assert_eq!(paused_msg["type"], "blocking");
+    assert_eq!(paused_msg["data"]["paused"], true);
+
+    post_ok(&client, format!("http://{addr}/api/blocking/resume"), None).await;
+    let resumed_msg = recv_ws_json(&mut ws).await;
+    assert_eq!(resumed_msg["type"], "blocking");
+    assert_eq!(resumed_msg["data"]["paused"], false);
+
+    post_ok(&client, format!("http://{addr}/api/cache/flush"), None).await;
+    assert_eq!(recv_ws_json(&mut ws).await["type"], "stats");
+
+    // Subscribe to logs with server-side filter.
+    send_ws_json(
+        &mut ws,
+        &serde_json::json!({
+            "type": "subscribe",
+            "topics": ["logs"],
+            "log_filter": { "search": "match", "outcome": "blocked" },
+        }),
+    )
+    .await;
+    let logs_ack = recv_ws_json(&mut ws).await;
+    assert_eq!(logs_ack["type"], "subscribed");
+    assert_eq!(logs_ack["data"]["topics"], serde_json::json!(["logs"]));
+
+    for (domain, outcome) in [
+        ("match-allowed.test", QueryOutcome::Forwarded),
+        ("other-blocked.test", QueryOutcome::Blocked),
+        ("match-blocked.test", QueryOutcome::Blocked),
+    ] {
+        let _ = live_tx.send(sample_query_event(domain, outcome, QueryProtocol::Udp));
+    }
+    let log_msg = recv_ws_json(&mut ws).await;
+    assert_eq!(log_msg["type"], "log");
+    assert_eq!(log_msg["data"]["domain"], "match-blocked.test");
+
+    // Update filter via set_log_filter and verify malformed JSON yields an Error frame.
+    send_ws_json(
+        &mut ws,
+        &serde_json::json!({ "type": "set_log_filter", "filter": { "protocol": "doh" } }),
+    )
+    .await;
+    ws.send(Message::Text("not-json".into()))
+        .await
+        .expect("send invalid");
+    assert_eq!(recv_ws_json(&mut ws).await["type"], "error");
+
+    for (domain, proto) in [
+        ("udp-skip.test", QueryProtocol::Udp),
+        ("doh-keep.test", QueryProtocol::Doh),
+    ] {
+        let _ = live_tx.send(sample_query_event(domain, QueryOutcome::Forwarded, proto));
+    }
+    let doh_msg = recv_ws_json(&mut ws).await;
+    assert_eq!(doh_msg["type"], "log");
+    assert_eq!(doh_msg["data"]["domain"], "doh-keep.test");
+}
+
+#[tokio::test]
+async fn test_ws_events_cf_cdn_and_update_push() {
+    use crabdns_core::CfCdnConfig;
+    use crabdns_web::update_api::{EXPECTED_EXE_NAME, InstallTarget, UpdateConfig, UpdateManager};
+    use sigilup::UrlPolicy;
+
+    let dead_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let dead_addr = dead_listener.local_addr().expect("addr");
+    drop(dead_listener);
+
+    let pins = UpdateConfig::default_production()
+        .expect("default update cfg")
+        .pins;
+    let mut url_policy = UrlPolicy::with_prefixes([format!("http://{dead_addr}/")]);
+    url_policy.require_https = false;
+    let updater = Arc::new(UpdateManager::new());
+    updater.set_config_override(UpdateConfig {
+        manifest_urls: vec![format!("http://{dead_addr}/latest.hsig.json")],
+        pins,
+        url_policy,
+        enforce_version_url_prefix: false,
+        verify_timestamp_unix: None,
+        install_target: InstallTarget::CustomPath(std::path::PathBuf::from(EXPECTED_EXE_NAME)),
+    });
+
+    let (addr, _live_tx, pipeline, _dir) =
+        spawn_ws_test_server(Config::default(), Some(updater)).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+        .await
+        .expect("connect ws");
+
+    send_ws_json(
+        &mut ws,
+        &serde_json::json!({ "type": "subscribe", "topics": ["cf_cdn", "update"] }),
+    )
+    .await;
+
+    assert_eq!(recv_ws_json(&mut ws).await["type"], "subscribed");
+    assert_eq!(recv_ws_json(&mut ws).await["type"], "update");
+    let initial_cf = recv_ws_json(&mut ws).await;
+    assert_eq!(initial_cf["type"], "cf_cdn");
+    assert_eq!(initial_cf["data"]["enabled"], false);
+
+    pipeline.cf_cdn_manager().reload_config(CfCdnConfig {
+        enabled: true,
+        ..CfCdnConfig::default()
+    });
+    let cf_push = recv_ws_json(&mut ws).await;
+    assert_eq!(cf_push["type"], "cf_cdn");
+    assert_eq!(cf_push["data"]["enabled"], true);
+
+    let client = reqwest::Client::new();
+    let check_res = client
+        .post(format!("http://{addr}/api/update/check"))
+        .send()
+        .await
+        .expect("update check");
+    assert_eq!(check_res.status(), StatusCode::BAD_GATEWAY);
+
+    let mut saw_error = false;
+    for _ in 0..4 {
+        let msg = recv_ws_json(&mut ws).await;
+        assert_eq!(msg["type"], "update");
+        if msg["data"]["last_error"].is_string() && msg["data"]["busy"] == false {
+            saw_error = true;
+            break;
+        }
+    }
+    assert!(saw_error, "expected update push with last_error");
+}

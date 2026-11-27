@@ -36,6 +36,7 @@ pub mod split_dns_sync;
 pub mod subscriptions;
 pub mod tls_api;
 pub mod update_api;
+pub mod ws;
 
 #[derive(Embed)]
 #[folder = "../../webui/dist"]
@@ -64,6 +65,7 @@ pub struct RouterState {
     pub doh_limiter: Arc<Semaphore>,
     pub updater: Arc<update_api::UpdateManager>,
     pub acme: Arc<acme_api::AcmeManager>,
+    pub events: Arc<ws::WsEventHub>,
 }
 
 impl RouterState {
@@ -85,9 +87,9 @@ struct HealthResponse {
     filter_rules: usize,
 }
 
-#[derive(Debug, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
-struct StatsResponse {
+pub struct StatsResponse {
     stats: StatsSnapshot,
     filter: FilterStats,
     #[ts(type = "number")]
@@ -162,6 +164,7 @@ pub fn build_router_with_managers(
         doh_limiter: Arc::new(Semaphore::new(DOH_MAX_INFLIGHT)),
         updater,
         acme,
+        events: Arc::new(ws::WsEventHub::default()),
     };
 
     let protected_api = Router::new()
@@ -169,6 +172,7 @@ pub fn build_router_with_managers(
         .route("/api/stats/reset", post(reset_stats))
         .route("/api/logs", get(get_logs).delete(clear_logs))
         .route("/api/logs/ws", get(controls::ws_logs))
+        .route("/api/ws", get(ws::ws_events))
         .route(
             "/api/backup",
             get(backup_api::export_backup).post(backup_api::import_backup),
@@ -301,7 +305,7 @@ pub fn build_router_with_managers(
 }
 
 async fn request_timeout_middleware(req: Request, next: Next) -> Response {
-    if req.uri().path() == "/api/logs/ws" {
+    if req.uri().path() == "/api/logs/ws" || req.uri().path() == "/api/ws" {
         return next.run(req).await;
     }
     let timeout = if req.uri().path() == "/api/update/apply" {
@@ -385,14 +389,18 @@ async fn health(State(state): State<RouterState>) -> Json<HealthResponse> {
     })
 }
 
-async fn get_stats(State(state): State<RouterState>) -> Json<StatsResponse> {
+pub(crate) fn build_stats_response(state: &RouterState) -> StatsResponse {
     let cache_stats = state.app.pipeline.cache().stats();
-    Json(StatsResponse {
+    StatsResponse {
         stats: state.app.storage.stats_snapshot(),
         filter: state.app.pipeline.filter().stats(),
         cache_entries: cache_stats.entries,
         cache_stats,
-    })
+    }
+}
+
+async fn get_stats(State(state): State<RouterState>) -> Json<StatsResponse> {
+    Json(build_stats_response(&state))
 }
 
 async fn get_logs(
@@ -443,13 +451,8 @@ async fn reset_stats(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let cache_stats = state.app.pipeline.cache().stats();
-    Ok(Json(StatsResponse {
-        stats: state.app.storage.stats_snapshot(),
-        filter: state.app.pipeline.filter().stats(),
-        cache_entries: cache_stats.entries,
-        cache_stats,
-    }))
+    state.events.notify_stats();
+    Ok(Json(build_stats_response(&state)))
 }
 
 async fn get_rules(
@@ -487,6 +490,7 @@ async fn update_rules(
     subscriptions::rebuild_filter_engine_async(&state.app.storage, &state.app.pipeline)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.events.notify_stats();
     let filter_stats = state.app.pipeline.filter().stats();
     Ok(Json(RulesPayload {
         rules_text: payload.rules_text,

@@ -562,7 +562,7 @@ pub async fn update_auth(
     }))
 }
 
-fn extract_token(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn extract_token(headers: &HeaderMap) -> Option<String> {
     if let Some(auth_val) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

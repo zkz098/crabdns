@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crabdns_core::{
     ClientGroup, ClientProfile, Config, DnsRewriteEntry, PersistedCacheEntry, QueryEvent,
-    QueryOutcome, QueryProtocol,
+    QueryOutcome,
 };
 
 pub mod client_stats;
@@ -23,8 +23,8 @@ use models::{
     KEY_TIMESERIES, MAX_LOG_SCAN, PersistedCounters, TIMESERIES_BUCKETS, TIMESERIES_RETENTION_MS,
 };
 pub use models::{
-    FilterSubscription, LogsFilter, Result, StatsSnapshot, StorageError, StorageRuntimeMetrics,
-    TimeSeriesPoint, TopItem,
+    CompiledLogsFilter, FilterSubscription, LogsFilter, Result, StatsSnapshot, StorageError,
+    StorageRuntimeMetrics, TimeSeriesPoint, TopItem,
 };
 use tokio::sync::Mutex;
 pub struct StorageEngine {
@@ -266,27 +266,7 @@ impl StorageEngine {
         filter: &LogsFilter<'_>,
     ) -> Result<Vec<QueryEvent>> {
         let mut results = Vec::with_capacity(limit.min(500));
-        let needle = filter
-            .search
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_ascii_lowercase);
-        let outcome_expected = filter.outcome.map(str::trim).filter(|s| !s.is_empty());
-        let proto_expected = filter
-            .protocol
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_ascii_lowercase);
-        let qtype_expected = filter
-            .qtype
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_ascii_uppercase);
-        let client_expected = filter
-            .client
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_ascii_lowercase);
+        let compiled = filter.compile();
 
         for (scanned, guard) in self.logs.iter().rev().enumerate() {
             if scanned >= MAX_LOG_SCAN {
@@ -296,29 +276,7 @@ impl StorageEngine {
             let Ok(event) = serde_json::from_slice::<QueryEvent>(&val) else {
                 continue;
             };
-            if let Some(ref q) = needle
-                && !event_matches_search(&event, q)
-            {
-                continue;
-            }
-            if let Some(expected) = outcome_expected
-                && outcome_label(&event.outcome) != expected
-            {
-                continue;
-            }
-            if let Some(ref proto) = proto_expected
-                && protocol_label(event.protocol) != proto
-            {
-                continue;
-            }
-            if let Some(ref qt) = qtype_expected
-                && !event.qtype.eq_ignore_ascii_case(qt)
-            {
-                continue;
-            }
-            if let Some(ref cli) = client_expected
-                && !event_matches_client(&event, cli)
-            {
+            if !compiled.matches(&event) {
                 continue;
             }
             results.push(event);
@@ -741,57 +699,6 @@ fn encode_log_key(ts_ms: u64, seq: u64) -> [u8; 16] {
     key[0..8].copy_from_slice(&ts_ms.to_be_bytes());
     key[8..16].copy_from_slice(&seq.to_be_bytes());
     key
-}
-
-fn protocol_label(protocol: QueryProtocol) -> &'static str {
-    match protocol {
-        QueryProtocol::Udp => "udp",
-        QueryProtocol::Tcp => "tcp",
-        QueryProtocol::Dot => "dot",
-        QueryProtocol::Doq => "doq",
-        QueryProtocol::Doh => "doh",
-        QueryProtocol::Doh3 => "doh3",
-    }
-}
-
-fn event_matches_search(event: &QueryEvent, needle: &str) -> bool {
-    event.domain.to_ascii_lowercase().contains(needle)
-        || event.client_ip.contains(needle)
-        || event
-            .client_name
-            .as_deref()
-            .is_some_and(|n| n.to_ascii_lowercase().contains(needle))
-        || event
-            .matched_list
-            .as_deref()
-            .is_some_and(|l| l.to_ascii_lowercase().contains(needle))
-        || event
-            .answers
-            .iter()
-            .any(|a| a.to_ascii_lowercase().contains(needle))
-        || protocol_label(event.protocol).contains(needle)
-}
-
-fn event_matches_client(event: &QueryEvent, client_needle: &str) -> bool {
-    event.client_ip.to_ascii_lowercase().contains(client_needle)
-        || event
-            .client_name
-            .as_deref()
-            .is_some_and(|n| n.to_ascii_lowercase().contains(client_needle))
-        || event
-            .client_id
-            .as_deref()
-            .is_some_and(|id| id.to_ascii_lowercase().contains(client_needle))
-}
-
-fn outcome_label(outcome: &QueryOutcome) -> &'static str {
-    match outcome {
-        QueryOutcome::Forwarded => "forwarded",
-        QueryOutcome::Cached => "cached",
-        QueryOutcome::Blocked => "blocked",
-        QueryOutcome::Rewritten => "rewritten",
-        QueryOutcome::Error => "error",
-    }
 }
 
 #[cfg(test)]

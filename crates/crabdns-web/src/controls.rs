@@ -18,7 +18,7 @@ use crate::subscriptions::{ApiError, rebuild_filter_engine_async};
 const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
 const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct BlockingStatusResponse {
     pub paused: bool,
@@ -102,6 +102,7 @@ pub async fn pause_blocking(
     Json(payload): Json<PauseBlockingPayload>,
 ) -> Json<BlockingStatusResponse> {
     state.app.pipeline.pause_blocking(payload.duration_secs);
+    state.events.notify_blocking();
     let (paused, remaining_secs) = state.app.pipeline.blocking_status();
     Json(BlockingStatusResponse {
         paused,
@@ -111,6 +112,7 @@ pub async fn pause_blocking(
 
 pub async fn resume_blocking(State(state): State<RouterState>) -> Json<BlockingStatusResponse> {
     state.app.pipeline.resume_blocking();
+    state.events.notify_blocking();
     let (paused, remaining_secs) = state.app.pipeline.blocking_status();
     Json(BlockingStatusResponse {
         paused,
@@ -130,6 +132,7 @@ pub async fn flush_cache(State(state): State<RouterState>) -> Json<OkResponse> {
             tracing::warn!(error = %err, "clear persisted dns cache task panicked");
         }
     }
+    state.events.notify_stats();
     Json(OkResponse { status: "ok" })
 }
 
@@ -182,6 +185,7 @@ pub async fn quick_rule(
         .await
         .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.app.pipeline.cache().flush();
+    state.events.notify_stats();
 
     let filter_stats = state.app.pipeline.filter().stats();
     Ok(Json(QuickRuleResponse {

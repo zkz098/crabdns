@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::*;
 use crate::models::MAX_STAT_KEYS;
 use chrono::Utc;
+use crabdns_core::QueryProtocol;
 use tokio::sync::{broadcast, mpsc};
 
 #[test]
@@ -210,4 +211,72 @@ fn test_bounded_count_map_decays_and_admits_new_hot_keys() {
     let top = map.top_n(5);
     assert!(top.iter().any(|item| item.name == "hot-old.test"));
     assert!(top.iter().any(|item| item.name == "hot-new.test"));
+}
+
+#[test]
+fn test_compiled_logs_filter_matches_all_dimensions() {
+    let event = QueryEvent {
+        timestamp: Utc::now(),
+        client_ip: "192.168.10.25".to_string(),
+        client_name: Some("MacBook-Pro".to_string()),
+        client_id: Some("laptop-1".to_string()),
+        profile_id: None,
+        protocol: QueryProtocol::Doh,
+        domain: "Ads.Tracker.Example".to_string(),
+        qtype: "AAAA".to_string(),
+        outcome: QueryOutcome::Blocked,
+        matched_rule: Some("||tracker.example^".to_string()),
+        matched_list: Some("EasyList".to_string()),
+        upstream: None,
+        elapsed_us: 15,
+        rcode: "NOERROR".to_string(),
+        answers: vec!["0.0.0.0".to_string()],
+    };
+
+    assert!(LogsFilter::default().compile().matches(&event));
+
+    let full_match = LogsFilter {
+        search: Some("  tracker "),
+        outcome: Some("BLOCKED"),
+        protocol: Some("DoH"),
+        qtype: Some("aaaa"),
+        client: Some("laptop-1"),
+    }
+    .compile();
+    assert!(full_match.matches(&event));
+
+    let wrong_search = LogsFilter {
+        search: Some("missing.test"),
+        ..LogsFilter::default()
+    }
+    .compile();
+    assert!(!wrong_search.matches(&event));
+
+    let wrong_outcome = LogsFilter {
+        outcome: Some("forwarded"),
+        ..LogsFilter::default()
+    }
+    .compile();
+    assert!(!wrong_outcome.matches(&event));
+
+    let wrong_protocol = LogsFilter {
+        protocol: Some("udp"),
+        ..LogsFilter::default()
+    }
+    .compile();
+    assert!(!wrong_protocol.matches(&event));
+
+    let wrong_qtype = LogsFilter {
+        qtype: Some("A"),
+        ..LogsFilter::default()
+    }
+    .compile();
+    assert!(!wrong_qtype.matches(&event));
+
+    let wrong_client = LogsFilter {
+        client: Some("10.0.0.1"),
+        ..LogsFilter::default()
+    }
+    .compile();
+    assert!(!wrong_client.matches(&event));
 }

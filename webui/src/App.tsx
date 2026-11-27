@@ -41,6 +41,9 @@ import type { UpdateStatusResponse } from "./types/UpdateStatusResponse";
 import type { UpstreamCapabilities } from "./types/UpstreamCapabilities";
 import type { UpstreamStatus } from "./types/UpstreamStatus";
 import type { UpstreamStrategy } from "./types/UpstreamStrategy";
+import type { WsLogFilter } from "./types/WsLogFilter";
+import type { WsTopic } from "./types/WsTopic";
+import { createWsEventClient } from "./wsClient";
 
 export default function App() {
   const [tab, setTab] = createSignal<TabKey>("dashboard");
@@ -188,6 +191,26 @@ export default function App() {
   const [authPassword, setAuthPassword] = createSignal("");
   const [authMessage, setAuthMessage] = createSignal("");
   const [authIsError, setAuthIsError] = createSignal(false);
+  const [pageVisible, setPageVisible] = createSignal(
+    typeof document === "undefined" ? true : document.visibilityState !== "hidden",
+  );
+  const [appliedLogFilter, setAppliedLogFilter] = createSignal<WsLogFilter>({
+    search: null,
+    outcome: null,
+    protocol: null,
+    qtype: null,
+    client: null,
+  });
+
+  function currentLogFilter(): WsLogFilter {
+    return {
+      search: search().trim() || null,
+      outcome: outcomeFilter().trim() || null,
+      protocol: protocolFilter().trim() || null,
+      qtype: qtypeFilter().trim() || null,
+      client: clientFilter().trim() || null,
+    };
+  }
 
   async function fetchSetupStatus(): Promise<boolean> {
     try {
@@ -237,6 +260,7 @@ export default function App() {
   }
 
   async function fetchLogs() {
+    setAppliedLogFilter(currentLogFilter());
     const params = new URLSearchParams({ limit: "200" });
     if (search()) params.set("search", search());
     if (outcomeFilter()) params.set("outcome", outcomeFilter());
@@ -439,12 +463,20 @@ export default function App() {
     }
   }
 
+  const shouldConnectWs = createMemo(
+    () =>
+      setupChecked() &&
+      !setupStatus()?.setup_required &&
+      authChecked() &&
+      (!authEnabled() || authenticated()),
+  );
+
   const shouldPollUpdateProgress = createMemo(
     () => updateAction() === "apply" || Boolean(updateStatus()?.busy),
   );
 
   createEffect(() => {
-    if (!shouldPollUpdateProgress()) return;
+    if (!shouldConnectWs() || !shouldPollUpdateProgress() || wsConnected()) return;
     let inFlight = false;
     const timer = setInterval(async () => {
       if (inFlight) return;
@@ -454,7 +486,7 @@ export default function App() {
       } finally {
         inFlight = false;
       }
-    }, 250);
+    }, 500);
     onCleanup(() => clearInterval(timer));
   });
 
@@ -944,18 +976,12 @@ export default function App() {
     }
   }
 
-  let cfCdnPollTimer: ReturnType<typeof setInterval> | null = null;
-
   async function fetchCfCdnStatus() {
     try {
       const res = await fetch("/api/cf-cdn/status");
       if (res.ok) {
         const data: CfCdnStatus = await res.json();
         setCfCdnStatus(data);
-        if (!data.testing && cfCdnPollTimer !== null) {
-          clearInterval(cfCdnPollTimer);
-          cfCdnPollTimer = null;
-        }
       }
     } catch {
       // ignore
@@ -968,23 +994,18 @@ export default function App() {
       if (res.ok) {
         const data: CfCdnStatus = await res.json();
         setCfCdnStatus(data);
-        if (cfCdnPollTimer !== null) {
-          clearInterval(cfCdnPollTimer);
-        }
-        cfCdnPollTimer = setInterval(() => {
-          void fetchCfCdnStatus();
-        }, 1500);
       }
     } catch {
       // ignore
     }
   }
 
-  onCleanup(() => {
-    if (cfCdnPollTimer !== null) {
-      clearInterval(cfCdnPollTimer);
-      cfCdnPollTimer = null;
-    }
+  createEffect(() => {
+    if (!shouldConnectWs() || !cfCdnStatus()?.testing || wsConnected()) return;
+    const timer = setInterval(() => {
+      void fetchCfCdnStatus();
+    }, 1500);
+    onCleanup(() => clearInterval(timer));
   });
 
   async function issueAcmeCertificate() {
@@ -1439,7 +1460,7 @@ export default function App() {
   function handleSelectTab(next: TabKey) {
     setTab(next);
     if (next === "dashboard") {
-      fetchStats();
+      if (!wsConnected()) fetchStats();
       fetchClients();
     } else if (next === "logs") {
       fetchLogs();
@@ -1454,7 +1475,10 @@ export default function App() {
       fetchConfig();
       fetchUpstreamHealth();
       fetchTlsStatus();
-      fetchUpdateStatus();
+      if (!wsConnected()) {
+        fetchUpdateStatus();
+        fetchCfCdnStatus();
+      }
     }
   }
 
@@ -1472,6 +1496,76 @@ export default function App() {
     fetchUpdateStatus();
   }
 
+  const desiredWsTopics = createMemo<WsTopic[]>(() => {
+    if (!shouldConnectWs() || !pageVisible()) return [];
+    const topics: WsTopic[] = ["blocking"];
+    const activeTab = tab();
+    if (activeTab === "dashboard") {
+      topics.push("stats");
+    }
+    if (activeTab === "logs") {
+      topics.push("logs");
+    }
+    if (activeTab === "settings" || updateAction() !== null || Boolean(updateStatus()?.busy)) {
+      topics.push("update");
+    }
+    if (activeTab === "settings" || Boolean(cfCdnStatus()?.testing)) {
+      topics.push("cf_cdn");
+    }
+    return topics;
+  });
+
+  const wsClient = createWsEventClient({
+    onOpen: () => setWsConnected(true),
+    onClose: () => setWsConnected(false),
+    onAuthExpired: () => {
+      setWsConnected(false);
+      void fetchAuthStatus();
+    },
+    onLogsBatch: (batch) => {
+      setLogs((prev) => [...[...batch].reverse(), ...prev].slice(0, 200));
+    },
+    onStats: (next) => setStats(next),
+    onBlocking: (next) => setBlockingStatus(next),
+    onUpdate: (next) => setUpdateStatus(next),
+    onCfCdn: (next) => setCfCdnStatus(next),
+  });
+
+  createEffect(() => {
+    if (shouldConnectWs()) {
+      wsClient.connect();
+    } else {
+      wsClient.disconnect();
+      setWsConnected(false);
+    }
+  });
+
+  createEffect(() => {
+    if (!shouldConnectWs()) return;
+    wsClient.setSubscription(desiredWsTopics(), appliedLogFilter());
+  });
+
+  let wasPageVisible = pageVisible();
+  createEffect(() => {
+    const visible = pageVisible();
+    const becameVisible = !wasPageVisible && visible;
+    wasPageVisible = visible;
+    if (becameVisible && shouldConnectWs() && tab() === "logs") {
+      void fetchLogs();
+    }
+  });
+
+  createEffect(() => {
+    if (!shouldConnectWs() || wsConnected() || !pageVisible()) return;
+    const timer = setInterval(() => {
+      void fetchBlockingStatus();
+      if (tab() === "dashboard") {
+        void fetchStats();
+      }
+    }, 5000);
+    onCleanup(() => clearInterval(timer));
+  });
+
   onMount(() => {
     void fetchSetupStatus().then((needsSetup) => {
       if (needsSetup) return;
@@ -1482,47 +1576,18 @@ export default function App() {
       });
     });
 
-    const timer = setInterval(() => {
-      if (authenticated() || !authEnabled()) {
-        fetchStats();
-        fetchBlockingStatus();
-      }
-    }, 3000);
-    let ws: WebSocket | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let disposed = false;
-
-    function connectWs() {
-      if (disposed) return;
-      const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-      ws = new WebSocket(`${wsProto}//${location.host}/api/logs/ws`);
-      ws.onopen = () => setWsConnected(true);
-      ws.onclose = () => {
-        setWsConnected(false);
-        if (!disposed) {
-          reconnectTimer = setTimeout(connectWs, 3000);
-        }
-      };
-      ws.onerror = () => {
-        setWsConnected(false);
-      };
-      ws.onmessage = (msg) => {
-        try {
-          const event: QueryEvent = JSON.parse(msg.data);
-          setLogs((prev) => [event, ...prev].slice(0, 200));
-        } catch {
-          // ignore malformed ws message
-        }
-      };
+    const handleVisibilityChange = () => {
+      setPageVisible(document.visibilityState !== "hidden");
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
     }
 
-    connectWs();
-
     onCleanup(() => {
-      disposed = true;
-      clearInterval(timer);
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      ws?.close();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
+      wsClient.disconnect();
     });
   });
 

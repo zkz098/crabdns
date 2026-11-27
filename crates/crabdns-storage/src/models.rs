@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crabdns_core::{QueryEvent, QueryOutcome, QueryProtocol};
 use dashmap::DashMap;
 use foldhash::fast::RandomState;
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,126 @@ pub struct LogsFilter<'a> {
     pub protocol: Option<&'a str>,
     pub qtype: Option<&'a str>,
     pub client: Option<&'a str>,
+}
+
+impl LogsFilter<'_> {
+    /// Compiles string filter options once for repeated matching against [`QueryEvent`] values.
+    #[must_use]
+    pub fn compile(&self) -> CompiledLogsFilter {
+        CompiledLogsFilter {
+            needle: normalize_filter_lower(self.search),
+            outcome: normalize_filter_lower(self.outcome),
+            protocol: normalize_filter_lower(self.protocol),
+            qtype: self
+                .qtype
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_ascii_uppercase),
+            client: normalize_filter_lower(self.client),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompiledLogsFilter {
+    pub needle: Option<String>,
+    pub outcome: Option<String>,
+    pub protocol: Option<String>,
+    pub qtype: Option<String>,
+    pub client: Option<String>,
+}
+
+impl CompiledLogsFilter {
+    /// Returns `true` when `event` satisfies all active filter criteria.
+    #[must_use]
+    pub fn matches(&self, event: &QueryEvent) -> bool {
+        if let Some(ref q) = self.needle
+            && !event_matches_search(event, q)
+        {
+            return false;
+        }
+        if let Some(ref expected) = self.outcome
+            && outcome_label(&event.outcome) != expected
+        {
+            return false;
+        }
+        if let Some(ref proto) = self.protocol
+            && protocol_label(event.protocol) != proto
+        {
+            return false;
+        }
+        if let Some(ref qt) = self.qtype
+            && !event.qtype.eq_ignore_ascii_case(qt)
+        {
+            return false;
+        }
+        if let Some(ref cli) = self.client
+            && !event_matches_client(event, cli)
+        {
+            return false;
+        }
+        true
+    }
+}
+
+fn normalize_filter_lower(val: Option<&str>) -> Option<String> {
+    val.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn protocol_label(protocol: QueryProtocol) -> &'static str {
+    match protocol {
+        QueryProtocol::Udp => "udp",
+        QueryProtocol::Tcp => "tcp",
+        QueryProtocol::Dot => "dot",
+        QueryProtocol::Doq => "doq",
+        QueryProtocol::Doh => "doh",
+        QueryProtocol::Doh3 => "doh3",
+    }
+}
+
+fn event_matches_search(event: &QueryEvent, needle: &str) -> bool {
+    event.domain.to_ascii_lowercase().contains(needle)
+        || event.client_ip.to_ascii_lowercase().contains(needle)
+        || event
+            .client_name
+            .as_deref()
+            .is_some_and(|n| n.to_ascii_lowercase().contains(needle))
+        || event
+            .matched_list
+            .as_deref()
+            .is_some_and(|l| l.to_ascii_lowercase().contains(needle))
+        || event
+            .answers
+            .iter()
+            .any(|a| a.to_ascii_lowercase().contains(needle))
+        || protocol_label(event.protocol).contains(needle)
+}
+
+fn event_matches_client(event: &QueryEvent, client_needle: &str) -> bool {
+    event
+        .client_ip
+        .to_ascii_lowercase()
+        .contains(client_needle)
+        || event
+            .client_name
+            .as_deref()
+            .is_some_and(|n| n.to_ascii_lowercase().contains(client_needle))
+        || event
+            .client_id
+            .as_deref()
+            .is_some_and(|id| id.to_ascii_lowercase().contains(client_needle))
+}
+
+fn outcome_label(outcome: &QueryOutcome) -> &'static str {
+    match outcome {
+        QueryOutcome::Forwarded => "forwarded",
+        QueryOutcome::Cached => "cached",
+        QueryOutcome::Blocked => "blocked",
+        QueryOutcome::Rewritten => "rewritten",
+        QueryOutcome::Error => "error",
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

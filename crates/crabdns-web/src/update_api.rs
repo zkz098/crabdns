@@ -383,6 +383,8 @@ struct UpdateSnapshot {
     last_error: Option<String>,
 }
 
+const PROGRESS_NOTIFY_INTERVAL_MS: u64 = 150;
+
 pub struct UpdateManager {
     busy: AtomicBool,
     downloaded_bytes: AtomicU64,
@@ -390,11 +392,15 @@ pub struct UpdateManager {
     snapshot: Mutex<UpdateSnapshot>,
     config_override: Mutex<Option<UpdateConfig>>,
     restart_tx: tokio::sync::watch::Sender<bool>,
+    status_tx: tokio::sync::watch::Sender<u64>,
+    last_progress_notify_ms: AtomicU64,
+    created_at: std::time::Instant,
 }
 
 impl Default for UpdateManager {
     fn default() -> Self {
         let (restart_tx, _) = tokio::sync::watch::channel(false);
+        let (status_tx, _) = tokio::sync::watch::channel(0);
         Self {
             busy: AtomicBool::new(false),
             downloaded_bytes: AtomicU64::new(0),
@@ -402,6 +408,9 @@ impl Default for UpdateManager {
             snapshot: Mutex::new(UpdateSnapshot::default()),
             config_override: Mutex::new(None),
             restart_tx,
+            status_tx,
+            last_progress_notify_ms: AtomicU64::new(0),
+            created_at: std::time::Instant::now(),
         }
     }
 }
@@ -412,6 +421,7 @@ impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
         self.0.reset_progress();
         self.0.busy.store(false, Ordering::SeqCst);
+        self.0.notify_status_changed();
     }
 }
 
@@ -424,6 +434,15 @@ impl UpdateManager {
     #[must_use]
     pub fn subscribe_restart(&self) -> tokio::sync::watch::Receiver<bool> {
         self.restart_tx.subscribe()
+    }
+
+    #[must_use]
+    pub fn subscribe_status(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.status_tx.subscribe()
+    }
+
+    fn notify_status_changed(&self) {
+        self.status_tx.send_modify(|rev| *rev = rev.wrapping_add(1));
     }
 
     pub fn trigger_restart(&self) {
@@ -470,27 +489,45 @@ impl UpdateManager {
     }
 
     fn set_phase(&self, phase: UpdatePhase) {
-        let mut snap = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snap.phase = phase;
+        {
+            let mut snap = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snap.phase = phase;
+        }
+        self.notify_status_changed();
     }
 
     fn begin_download(&self, expected_total: u64) {
         self.downloaded_bytes.store(0, Ordering::Relaxed);
         self.total_bytes.store(expected_total, Ordering::Relaxed);
-        let mut snap = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snap.phase = UpdatePhase::Downloading;
+        self.last_progress_notify_ms.store(0, Ordering::Relaxed);
+        {
+            let mut snap = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snap.phase = UpdatePhase::Downloading;
+        }
+        self.notify_status_changed();
     }
 
     fn update_download_progress(&self, downloaded: u64, total: Option<u64>) {
         self.downloaded_bytes.store(downloaded, Ordering::Relaxed);
         if let Some(t) = total.filter(|&v| v > 0) {
             self.total_bytes.store(t, Ordering::Relaxed);
+        }
+        let now_ms = u64::try_from(self.created_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let prev = self.last_progress_notify_ms.load(Ordering::Relaxed);
+        let is_complete = total.is_some_and(|t| downloaded >= t);
+        if (is_complete || prev == 0 || now_ms.saturating_sub(prev) >= PROGRESS_NOTIFY_INTERVAL_MS)
+            && self
+                .last_progress_notify_ms
+                .compare_exchange(prev, now_ms.max(1), Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.notify_status_changed();
         }
     }
 
@@ -499,42 +536,54 @@ impl UpdateManager {
         if total > 0 {
             self.downloaded_bytes.store(total, Ordering::Relaxed);
         }
-        let mut snap = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snap.phase = UpdatePhase::Installing;
+        {
+            let mut snap = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snap.phase = UpdatePhase::Installing;
+        }
+        self.notify_status_changed();
     }
 
     fn record_check_success(&self, pending: Option<AvailableUpdate>) {
-        let mut snap = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snap.pending = pending;
-        snap.last_checked_at = Some(Utc::now());
-        snap.last_error = None;
+        {
+            let mut snap = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snap.pending = pending;
+            snap.last_checked_at = Some(Utc::now());
+            snap.last_error = None;
+        }
+        self.notify_status_changed();
     }
 
     fn record_error(&self, err: String, update_checked_at: bool) {
-        let mut snap = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if update_checked_at {
-            snap.last_checked_at = Some(Utc::now());
+        {
+            let mut snap = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if update_checked_at {
+                snap.last_checked_at = Some(Utc::now());
+            }
+            snap.last_error = Some(err);
         }
-        snap.last_error = Some(err);
+        self.notify_status_changed();
     }
 
     fn record_apply_success(&self) {
-        let mut snap = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snap.pending = None;
-        snap.restart_pending = true;
-        snap.last_error = None;
+        {
+            let mut snap = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snap.pending = None;
+            snap.restart_pending = true;
+            snap.last_error = None;
+        }
+        self.notify_status_changed();
     }
 
     fn cached_pending(&self) -> Option<AvailableUpdate> {

@@ -287,6 +287,7 @@ pub struct CfCdnManager {
     runtime: ArcSwap<CfCdnRuntime>,
     testing: AtomicBool,
     run_lock: tokio::sync::Mutex<()>,
+    status_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl Default for CfCdnManager {
@@ -297,11 +298,21 @@ impl Default for CfCdnManager {
 
 impl CfCdnManager {
     pub fn new() -> Self {
+        let (status_tx, _) = tokio::sync::watch::channel(0);
         Self {
             runtime: ArcSwap::from_pointee(CfCdnRuntime::default()),
             testing: AtomicBool::new(false),
             run_lock: tokio::sync::Mutex::new(()),
+            status_tx,
         }
+    }
+
+    pub fn subscribe_status(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.status_tx.subscribe()
+    }
+
+    fn notify_status_changed(&self) {
+        self.status_tx.send_modify(|rev| *rev = rev.wrapping_add(1));
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -309,7 +320,7 @@ impl CfCdnManager {
     }
 
     pub fn is_testing(&self) -> bool {
-        self.testing.load(Ordering::Relaxed)
+        self.testing.load(Ordering::SeqCst)
     }
 
     pub fn status(&self) -> CfCdnStatus {
@@ -358,17 +369,20 @@ impl CfCdnManager {
             status,
         };
         self.runtime.store(Arc::new(next));
+        self.notify_status_changed();
     }
 
     /// Runs the two-phase Cloudflare CDN speed test (IPv4, and IPv6 if enabled)
     /// and atomically updates the active optimal IPs.
     pub async fn run_speedtest(&self) -> CfCdnStatus {
         let _guard = self.run_lock.lock().await;
-        self.testing.store(true, Ordering::Relaxed);
+        self.testing.store(true, Ordering::SeqCst);
+        self.notify_status_changed();
 
         let res = self.run_speedtest_inner().await;
 
-        self.testing.store(false, Ordering::Relaxed);
+        self.testing.store(false, Ordering::SeqCst);
+        self.notify_status_changed();
         res
     }
 
