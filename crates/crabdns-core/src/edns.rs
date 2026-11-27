@@ -156,6 +156,7 @@ pub fn set_dnssec_ok(msg: &mut Message) {
 }
 
 pub const EDNS_OPTION_EDE: u16 = 15;
+pub const EDE_STALE_ANSWER: u16 = 3;
 pub const EDE_DNSSEC_BOGUS: u16 = 6;
 pub const EDE_BLOCKED: u16 = 15;
 pub const EDE_FILTERED: u16 = 17;

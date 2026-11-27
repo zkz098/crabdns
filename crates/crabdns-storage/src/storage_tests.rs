@@ -280,3 +280,44 @@ fn test_compiled_logs_filter_matches_all_dimensions() {
     .compile();
     assert!(!wrong_client.matches(&event));
 }
+
+#[test]
+fn test_fjall_presets_and_disk_quota() {
+    use crate::models::{FjallPreset, resolve_auto_profile};
+    use crabdns_core::StorageProfile;
+
+    assert_eq!(
+        resolve_auto_profile(true, Some(16_384)),
+        StorageProfile::Performance
+    );
+    assert_eq!(
+        resolve_auto_profile(false, Some(2_048)),
+        StorageProfile::Balanced
+    );
+    assert_eq!(
+        resolve_auto_profile(true, Some(512)),
+        StorageProfile::Embedded
+    );
+
+    let perf = FjallPreset::from_profile(StorageProfile::Performance);
+    let emb = FjallPreset::from_profile(StorageProfile::Embedded);
+    assert!(perf.cache_bytes > emb.cache_bytes);
+    assert!(perf.max_journal_bytes > emb.max_journal_bytes);
+    assert!(perf.worker_threads >= emb.worker_threads);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = StorageEngine::open_with_profile(dir.path(), StorageProfile::Balanced)
+        .expect("open balanced storage");
+    assert_eq!(
+        storage.effective_storage_profile(),
+        StorageProfile::Balanced
+    );
+    assert!(storage.available_disk_bytes().is_some());
+    assert_eq!(
+        storage
+            .prune_with_disk_quota(64 * 1024 * 1024, 1)
+            .expect("prune quota"),
+        0
+    );
+    assert!(!storage.is_disk_pressure_active());
+}

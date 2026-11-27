@@ -85,6 +85,7 @@ pub struct DnsPipeline {
     pub(crate) svcb_strip_hints: AtomicBool,
     pub(crate) cf_cdn: Arc<CfCdnManager>,
     pub(crate) ede_enabled: AtomicBool,
+    pub(crate) serve_stale_enabled: AtomicBool,
     pub(crate) dns_cookies: DnsCookieEngine,
     pub(crate) max_udp_payload_size: AtomicU16,
     pub(crate) rrl: ResponseRateLimiter,
@@ -160,6 +161,7 @@ impl DnsPipeline {
             svcb_strip_hints: AtomicBool::new(false),
             cf_cdn: Arc::new(CfCdnManager::new()),
             ede_enabled: AtomicBool::new(true),
+            serve_stale_enabled: AtomicBool::new(true),
             dns_cookies: DnsCookieEngine::new(),
             max_udp_payload_size: AtomicU16::new(DEFAULT_MAX_UDP_PAYLOAD),
             rrl: ResponseRateLimiter::default(),
@@ -540,6 +542,10 @@ impl DnsPipeline {
         self.dnssec_enabled.store(enabled, Ordering::Relaxed);
     }
 
+    pub fn dnssec_validator(&self) -> &Arc<DnssecValidator> {
+        &self.dnssec_validator
+    }
+
     pub fn reload_dnssec_anchors(
         &self,
         trust_anchor_lines: &[String],
@@ -668,6 +674,14 @@ impl DnsPipeline {
 
     pub fn set_ede_enabled(&self, enabled: bool) {
         self.ede_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn serve_stale_enabled(&self) -> bool {
+        self.serve_stale_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_serve_stale_enabled(&self, enabled: bool) {
+        self.serve_stale_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub fn set_dns_cookies(&self, enabled: bool, require_valid: bool) {

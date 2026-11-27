@@ -180,6 +180,11 @@ fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
     config.upstream_timeout_ms = saved_cfg.upstream_timeout_ms;
     config.log_retention_hours = saved_cfg.log_retention_hours;
     config.log_max_disk_mb = saved_cfg.log_max_disk_mb;
+    config.storage_profile = saved_cfg.storage_profile;
+    config.disk_min_free_mb = saved_cfg.disk_min_free_mb;
+    config.serve_stale_enabled = saved_cfg.serve_stale_enabled;
+    config.dnssec_strict_clock = saved_cfg.dnssec_strict_clock;
+    config.dnssec_auto_rollover = saved_cfg.dnssec_auto_rollover;
     config.block_mode = saved_cfg.block_mode;
     config.allow_cidrs = saved_cfg.allow_cidrs;
     config.deny_cidrs = saved_cfg.deny_cidrs;
@@ -331,6 +336,13 @@ fn configure_pipeline(
         cfg.ecs_ipv6_prefix,
     )?;
     pipeline.set_dnssec_enabled(cfg.dnssec_enabled);
+    pipeline
+        .dnssec_validator()
+        .set_strict_clock(cfg.dnssec_strict_clock);
+    pipeline
+        .dnssec_validator()
+        .set_auto_rollover(cfg.dnssec_auto_rollover);
+    pipeline.set_serve_stale_enabled(cfg.serve_stale_enabled);
     if let Err(err) = pipeline.reload_dnssec_anchors(&cfg.dnssec_trust_anchors, &cfg.dnssec_ntas) {
         tracing::warn!(error = %err, "failed to load configured DNSSEC trust anchors/NTAs; using defaults");
     }
@@ -683,7 +695,10 @@ fn spawn_background_tasks(
 
 #[allow(clippy::too_many_lines)]
 pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
-    let storage = Arc::new(StorageEngine::open(&config.data_dir)?);
+    let storage = Arc::new(StorageEngine::open_with_profile(
+        &config.data_dir,
+        config.storage_profile,
+    )?);
 
     if let Some(saved_cfg) = storage.load_config()? {
         merge_saved_config(&mut config, saved_cfg);

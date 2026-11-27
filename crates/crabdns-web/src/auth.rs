@@ -7,7 +7,7 @@ use aws_lc_rs::pbkdf2;
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use axum::Json;
 use axum::extract::{ConnectInfo, Extension, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
@@ -324,6 +324,75 @@ pub async fn require_auth(State(state): State<RouterState>, req: Request, next: 
         Json(serde_json::json!({ "error": "Unauthorized" })),
     )
         .into_response()
+}
+
+fn has_bearer_auth(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.trim().len() > 7 && s.trim()[..7].eq_ignore_ascii_case("bearer "))
+}
+
+fn extract_authority_from_url(raw: &str) -> Option<&str> {
+    let rest = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))?;
+    Some(rest.split(['/', '?', '#']).next().unwrap_or(""))
+}
+
+fn is_csrf_origin_valid(headers: &HeaderMap) -> bool {
+    if let Some(sec_fetch) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        let val = sec_fetch.trim();
+        if !val.eq_ignore_ascii_case("same-origin") && !val.eq_ignore_ascii_case("none") {
+            return false;
+        }
+    }
+
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    else {
+        return false;
+    };
+
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        return extract_authority_from_url(origin.trim())
+            .is_some_and(|auth| auth.eq_ignore_ascii_case(host));
+    }
+
+    if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
+        return extract_authority_from_url(referer.trim())
+            .is_some_and(|auth| auth.eq_ignore_ascii_case(host));
+    }
+
+    false
+}
+
+/// Enforces strict same-origin CSRF verification for state-changing requests authenticated
+/// via browser session cookies (Bearer token API clients are exempt).
+pub async fn csrf_protection(
+    State(state): State<RouterState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let method = req.method();
+    if matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    let cfg = state.app.config.load();
+    if !cfg.web_auth_enabled || has_bearer_auth(req.headers()) {
+        return next.run(req).await;
+    }
+    if !is_csrf_origin_valid(req.headers()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "CSRF check failed: untrusted request origin" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 pub async fn auth_status(

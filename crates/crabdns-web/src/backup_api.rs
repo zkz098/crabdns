@@ -162,6 +162,12 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         acme_http_listen: cfg.acme_http_listen.map(|a| a.to_string()),
         acme_renew_before_days: Some(cfg.acme_renew_before_days),
         cf_cdn: Some(cfg.cf_cdn.clone()),
+        storage_profile: Some(cfg.storage_profile),
+        disk_min_free_mb: Some(cfg.disk_min_free_mb),
+        serve_stale_enabled: Some(cfg.serve_stale_enabled),
+        dnssec_strict_clock: Some(cfg.dnssec_strict_clock),
+        dnssec_auto_rollover: Some(cfg.dnssec_auto_rollover),
+        confirm_timeout_secs: None,
     }
 }
 
@@ -608,6 +614,11 @@ pub(crate) fn apply_compiled_to_pipeline(
     pipe.set_block_mode(next.block_mode);
     pipe.set_cname_cloaking(next.cname_cloaking_blocking);
     pipe.set_dnssec_enabled(next.dnssec_enabled);
+    pipe.dnssec_validator()
+        .set_strict_clock(next.dnssec_strict_clock);
+    pipe.dnssec_validator()
+        .set_auto_rollover(next.dnssec_auto_rollover);
+    pipe.set_serve_stale_enabled(next.serve_stale_enabled);
     let _ = pipe.reload_dnssec_anchors(&next.dnssec_trust_anchors, &next.dnssec_ntas);
     pipe.set_hosts_enabled(next.hosts_enabled);
     pipe.set_dhcp_leases_enabled(next.dhcp_leases_enabled);

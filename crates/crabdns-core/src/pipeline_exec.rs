@@ -12,8 +12,8 @@ use crate::clients::{ClientRegistry, ResolvedClientPolicy};
 use crate::config::BlockMode;
 use crate::cookies::CookieCheck;
 use crate::edns::{
-    EDE_BLOCKED, EDE_DNSSEC_BOGUS, EDE_NO_REACHABLE_AUTHORITY, EDE_PROHIBITED, EcsConfig,
-    apply_ecs_to_message, has_dnssec_ok, resolve_ecs_subnet, set_dnssec_ok,
+    EDE_BLOCKED, EDE_DNSSEC_BOGUS, EDE_NO_REACHABLE_AUTHORITY, EDE_PROHIBITED, EDE_STALE_ANSWER,
+    EcsConfig, apply_ecs_to_message, has_dnssec_ok, resolve_ecs_subnet, set_dnssec_ok,
 };
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision};
@@ -863,6 +863,21 @@ impl DnsPipeline {
                 Err(resp)
             }
             Err(ExchangeError::UpstreamFailed(err)) => {
+                if self.serve_stale_enabled.load(Ordering::Relaxed)
+                    && let Some(stale_bytes) =
+                        self.cache.load().get_stale_fallback(&cache_key, request.id)
+                {
+                    tracing::warn!(domain = %meta.domain, error = %err, "all upstreams failed; serving RFC 8767 stale answer");
+                    let resp_with_ede = self.maybe_attach_ede(
+                        request,
+                        stale_bytes,
+                        EDE_STALE_ANSWER,
+                        Some("Stale answer served after upstream failure"),
+                    );
+                    let parsed = Message::from_vec(&resp_with_ede).ok();
+                    guard.complete(Ok((resp_with_ede.clone(), "cache:stale".to_string())));
+                    return Ok((resp_with_ede, "cache:stale".to_string(), parsed));
+                }
                 tracing::warn!(domain = %meta.domain, error = %err, "all upstreams failed");
                 guard.complete(Err(err));
                 self.emit_log(

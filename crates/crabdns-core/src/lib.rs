@@ -52,7 +52,8 @@ pub use clients::{
 };
 pub use config::{
     AcmeChallengeType, BlockMode, CompiledUpstreamPolicy, Config, ResponseIpRule,
-    SplitDnsMatchMode, SplitDnsRule, UpstreamGroup, UpstreamPolicy, UpstreamStrategy,
+    SplitDnsMatchMode, SplitDnsRule, StorageProfile, UpstreamGroup, UpstreamPolicy,
+    UpstreamStrategy,
 };
 pub use cookies::{CookieCheck, DnsCookieEngine};
 pub use device_names::{

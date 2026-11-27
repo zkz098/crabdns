@@ -33,6 +33,17 @@ pub enum AcmeChallengeType {
     Dns01Local,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum StorageProfile {
+    #[default]
+    Auto,
+    Embedded,
+    Balanced,
+    Performance,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Config {
@@ -208,6 +219,16 @@ pub struct Config {
     pub acme_renew_before_days: u32,
     #[serde(default)]
     pub cf_cdn: CfCdnConfig,
+    #[serde(default)]
+    pub storage_profile: StorageProfile,
+    #[serde(default = "default_disk_min_free_mb")]
+    pub disk_min_free_mb: u64,
+    #[serde(default = "default_true")]
+    pub serve_stale_enabled: bool,
+    #[serde(default)]
+    pub dnssec_strict_clock: bool,
+    #[serde(default)]
+    pub dnssec_auto_rollover: bool,
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -303,6 +324,10 @@ fn default_acme_directory_url() -> String {
 
 fn default_acme_renew_before_days() -> u32 {
     30
+}
+
+fn default_disk_min_free_mb() -> u64 {
+    128
 }
 
 fn default_dhcp_leases_domain() -> String {
@@ -411,6 +436,11 @@ impl Default for Config {
             acme_http_listen: None,
             acme_renew_before_days: default_acme_renew_before_days(),
             cf_cdn: CfCdnConfig::default(),
+            storage_profile: StorageProfile::default(),
+            disk_min_free_mb: default_disk_min_free_mb(),
+            serve_stale_enabled: true,
+            dnssec_strict_clock: false,
+            dnssec_auto_rollover: false,
         }
     }
 }

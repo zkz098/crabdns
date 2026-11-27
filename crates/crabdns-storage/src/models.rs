@@ -1,6 +1,7 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crabdns_core::{QueryEvent, QueryOutcome, QueryProtocol};
+use crabdns_core::{QueryEvent, QueryOutcome, QueryProtocol, StorageProfile};
 use dashmap::DashMap;
 use foldhash::fast::RandomState;
 use serde::{Deserialize, Serialize};
@@ -216,12 +217,121 @@ pub(crate) const HOUR_MS: u64 = 3_600_000;
 pub(crate) const TIMESERIES_BUCKETS: usize = 24;
 pub(crate) const TIMESERIES_RETENTION_MS: u64 = 48 * HOUR_MS;
 
-pub(crate) const FJALL_CACHE_BYTES: u64 = 4 * 1024 * 1024;
-pub(crate) const FJALL_MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const FJALL_MAX_CACHED_FILES: usize = 64;
-pub(crate) const FJALL_WORKER_THREADS: usize = 2;
-pub(crate) const FJALL_LOGS_MEMTABLE_BYTES: u64 = 4 * 1024 * 1024;
-pub(crate) const FJALL_SMALL_MEMTABLE_BYTES: u64 = 2 * 1024 * 1024;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FjallPreset {
+    pub effective_profile: StorageProfile,
+    pub cache_bytes: u64,
+    pub max_journal_bytes: u64,
+    pub max_cached_files: usize,
+    pub worker_threads: usize,
+    pub logs_memtable_bytes: u64,
+    pub small_memtable_bytes: u64,
+}
+
+impl FjallPreset {
+    #[must_use]
+    pub fn from_profile(profile: StorageProfile) -> Self {
+        let effective = resolve_storage_profile(profile);
+        let cpu_threads =
+            std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+        match effective {
+            StorageProfile::Embedded | StorageProfile::Auto => Self {
+                effective_profile: StorageProfile::Embedded,
+                cache_bytes: 4 * 1024 * 1024,
+                max_journal_bytes: 64 * 1024 * 1024,
+                max_cached_files: 64,
+                worker_threads: 2,
+                logs_memtable_bytes: 4 * 1024 * 1024,
+                small_memtable_bytes: 2 * 1024 * 1024,
+            },
+            StorageProfile::Balanced => Self {
+                effective_profile: StorageProfile::Balanced,
+                cache_bytes: 64 * 1024 * 1024,
+                max_journal_bytes: 256 * 1024 * 1024,
+                max_cached_files: 256,
+                worker_threads: cpu_threads.clamp(2, 4),
+                logs_memtable_bytes: 16 * 1024 * 1024,
+                small_memtable_bytes: 4 * 1024 * 1024,
+            },
+            StorageProfile::Performance => Self {
+                effective_profile: StorageProfile::Performance,
+                cache_bytes: 256 * 1024 * 1024,
+                max_journal_bytes: 1024 * 1024 * 1024,
+                max_cached_files: 1024,
+                worker_threads: (cpu_threads / 2).clamp(4, 8),
+                logs_memtable_bytes: 64 * 1024 * 1024,
+                small_memtable_bytes: 16 * 1024 * 1024,
+            },
+        }
+    }
+}
+
+#[must_use]
+pub fn resolve_storage_profile(profile: StorageProfile) -> StorageProfile {
+    if profile != StorageProfile::Auto {
+        return profile;
+    }
+    let total_mem_mib = detect_total_memory_mib();
+    resolve_auto_profile(cfg!(target_arch = "x86_64"), total_mem_mib)
+}
+
+#[must_use]
+pub fn resolve_auto_profile(is_x86_64: bool, total_mem_mib: Option<u64>) -> StorageProfile {
+    let Some(mem_mib) = total_mem_mib else {
+        return StorageProfile::Embedded;
+    };
+    if is_x86_64 && mem_mib >= 4096 {
+        StorageProfile::Performance
+    } else if mem_mib >= 1024 {
+        StorageProfile::Balanced
+    } else {
+        StorageProfile::Embedded
+    }
+}
+
+fn detect_total_memory_mib() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
+}
+
+/// Returns available free bytes on the filesystem containing `path`, if determinable.
+#[must_use]
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        let probe_path = if path.exists() {
+            path
+        } else {
+            path.parent().filter(|p| p.exists())?
+        };
+        let output = std::process::Command::new("df")
+            .arg("-Pk")
+            .arg(probe_path)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let data_line = stdout.lines().nth(1)?;
+        let cols: Vec<&str> = data_line.split_whitespace().collect();
+        // POSIX df -Pk columns: Filesystem 1024-blocks Used Available Capacity Mounted-on
+        let avail_kib: u64 = cols.get(3)?.parse().ok()?;
+        Some(avail_kib.saturating_mul(1024))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 pub(crate) const MAX_STAT_KEYS: usize = 10_000;
 pub(crate) const MAX_LOG_SCAN: usize = 50_000;
 pub(crate) const BATCH_CHUNK_SIZE: usize = 1_024;
@@ -306,6 +416,7 @@ pub struct StorageRuntimeMetrics {
     pub log_batches_retried: u64,
     pub log_batches_degraded_dropped: u64,
     pub log_disk_degraded: bool,
+    pub disk_pressure_active: bool,
     pub log_flush_total_us: u64,
     pub log_pruned_total: u64,
 }

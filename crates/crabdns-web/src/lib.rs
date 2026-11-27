@@ -1,9 +1,10 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use axum::extract::{DefaultBodyLimit, Query, Request, State};
-use axum::http::{Method, StatusCode, Uri, header};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Query, Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
@@ -67,6 +68,7 @@ pub struct RouterState {
     pub acme: Arc<acme_api::AcmeManager>,
     pub events: Arc<ws::WsEventHub>,
     pub subscription_progress: Arc<subscriptions::SubscriptionProgressManager>,
+    pub config_confirm: Arc<config_history_api::ConfigConfirmManager>,
 }
 
 impl RouterState {
@@ -167,6 +169,7 @@ pub fn build_router_with_managers(
         acme,
         events: Arc::new(ws::WsEventHub::default()),
         subscription_progress: Arc::new(subscriptions::SubscriptionProgressManager::new()),
+        config_confirm: Arc::new(config_history_api::ConfigConfirmManager::default()),
     };
 
     let protected_api = Router::new()
@@ -186,6 +189,14 @@ pub fn build_router_with_managers(
         .route(
             "/api/config/rollback/{id}",
             post(config_history_api::rollback_config),
+        )
+        .route(
+            "/api/config/confirm",
+            post(config_history_api::confirm_config),
+        )
+        .route(
+            "/api/config/pending-confirm",
+            get(config_history_api::get_pending_confirm),
         )
         .route("/api/rules", get(get_rules).put(update_rules))
         .route("/api/rules/quick", post(controls::quick_rule))
@@ -276,10 +287,15 @@ pub fn build_router_with_managers(
     #[cfg(all(feature = "prof-jemalloc", unix))]
     let protected_api = protected_api.route("/debug/pprof/heap", get(metrics::pprof_heap));
 
-    let protected_api = protected_api.layer(middleware::from_fn_with_state(
-        router_state.clone(),
-        auth::require_auth,
-    ));
+    let protected_api = protected_api
+        .layer(middleware::from_fn_with_state(
+            router_state.clone(),
+            auth::csrf_protection,
+        ))
+        .layer(middleware::from_fn_with_state(
+            router_state.clone(),
+            auth::require_auth,
+        ));
 
     let doh_cors = CorsLayer::new()
         .allow_origin(Any)
@@ -310,8 +326,54 @@ pub fn build_router_with_managers(
         .route("/api/auth/logout", post(auth::logout))
         .merge(protected_api)
         .fallback(serve_spa)
+        .layer(middleware::from_fn_with_state(
+            router_state.clone(),
+            security_headers_middleware,
+        ))
         .layer(middleware::from_fn(request_timeout_middleware))
         .with_state(router_state)
+}
+
+async fn security_headers_middleware(
+    State(state): State<RouterState>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let cfg = state.app.config.load();
+    let is_https =
+        auth::is_https_request(&cfg.trusted_proxies, connect_info.as_ref(), req.headers());
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    if !path.starts_with("/dns-query") {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            ),
+        );
+    }
+    if is_https {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
+    }
+    resp
 }
 
 async fn request_timeout_middleware(req: Request, next: Next) -> Response {

@@ -8,8 +8,8 @@ use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
     AccessController, AcmeChallengeType, BlockMode, CfCdnConfig, ClientRegistry, Config, DdrConfig,
     DhcpLeaseTable, Dns64Config, DnssecNta, EcsConfig, HostsTable, PrivatePtrRouter,
-    SafeSearchConfig, SplitDnsMatchMode, SplitDnsRule, SplitUpstreamRouter, UpstreamGroup,
-    UpstreamGroupRegistry, UpstreamPool, UpstreamStrategy,
+    SafeSearchConfig, SplitDnsMatchMode, SplitDnsRule, SplitUpstreamRouter, StorageProfile,
+    UpstreamGroup, UpstreamGroupRegistry, UpstreamPool, UpstreamStrategy,
     dnssec_anchors::{normalize_nta_entries, parse_trust_anchors},
 };
 use serde::{Deserialize, Serialize};
@@ -109,6 +109,12 @@ pub struct ConfigResponse {
     pub acme_http_listen: Option<String>,
     pub acme_renew_before_days: u32,
     pub cf_cdn: CfCdnConfig,
+    pub storage_profile: StorageProfile,
+    #[ts(type = "number")]
+    pub disk_min_free_mb: u64,
+    pub serve_stale_enabled: bool,
+    pub dnssec_strict_clock: bool,
+    pub dnssec_auto_rollover: bool,
 }
 
 impl From<&Config> for ConfigResponse {
@@ -195,6 +201,11 @@ impl From<&Config> for ConfigResponse {
             acme_http_listen: cfg.acme_http_listen.map(|addr| addr.to_string()),
             acme_renew_before_days: cfg.acme_renew_before_days,
             cf_cdn: cfg.cf_cdn.clone(),
+            storage_profile: cfg.storage_profile,
+            disk_min_free_mb: cfg.disk_min_free_mb,
+            serve_stale_enabled: cfg.serve_stale_enabled,
+            dnssec_strict_clock: cfg.dnssec_strict_clock,
+            dnssec_auto_rollover: cfg.dnssec_auto_rollover,
         }
     }
 }
@@ -348,6 +359,20 @@ pub struct ConfigUpdatePayload {
     pub acme_renew_before_days: Option<u32>,
     #[serde(default)]
     pub cf_cdn: Option<CfCdnConfig>,
+    #[serde(default)]
+    pub storage_profile: Option<StorageProfile>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub disk_min_free_mb: Option<u64>,
+    #[serde(default)]
+    pub serve_stale_enabled: Option<bool>,
+    #[serde(default)]
+    pub dnssec_strict_clock: Option<bool>,
+    #[serde(default)]
+    pub dnssec_auto_rollover: Option<bool>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub confirm_timeout_secs: Option<u64>,
 }
 
 pub async fn get_config(State(state): State<RouterState>) -> Json<ConfigResponse> {
@@ -786,23 +811,49 @@ pub async fn update_config(
     if let Some(cf_cdn) = payload.cf_cdn {
         next.cf_cdn = cf_cdn;
     }
+    if let Some(storage_profile) = payload.storage_profile {
+        next.storage_profile = storage_profile;
+    }
+    if let Some(disk_min_free_mb) = payload.disk_min_free_mb {
+        next.disk_min_free_mb = disk_min_free_mb;
+    }
+    if let Some(serve_stale_enabled) = payload.serve_stale_enabled {
+        next.serve_stale_enabled = serve_stale_enabled;
+    }
+    if let Some(dnssec_strict_clock) = payload.dnssec_strict_clock {
+        next.dnssec_strict_clock = dnssec_strict_clock;
+    }
+    if let Some(dnssec_auto_rollover) = payload.dnssec_auto_rollover {
+        next.dnssec_auto_rollover = dnssec_auto_rollover;
+    }
     apply_acme_updates(&mut next, acme_updates)?;
 
     // Phase 2: Persist config first, then atomically swap all runtime state.
     let storage = Arc::clone(&state.app.storage);
     let to_save = next.clone();
     let prev_snapshot = current.clone();
-    tokio::task::spawn_blocking(move || -> crabdns_storage::Result<()> {
-        if storage.list_config_history()?.is_empty() {
-            let _ = storage.record_config_snapshot(&prev_snapshot, "initial");
-        }
-        storage.save_config(&to_save)?;
-        let _ = storage.record_config_snapshot(&to_save, "settings_update");
-        Ok(())
-    })
-    .await
-    .map_err(internal_error)?
-    .map_err(internal_error)?;
+    let confirm_timeout_secs = payload.confirm_timeout_secs;
+    let rollback_snapshot_id =
+        tokio::task::spawn_blocking(move || -> crabdns_storage::Result<Option<String>> {
+            let rollback_id = if confirm_timeout_secs.is_some() {
+                Some(
+                    storage
+                        .record_config_snapshot(&prev_snapshot, "pre_confirm")?
+                        .id,
+                )
+            } else {
+                if storage.list_config_history()?.is_empty() {
+                    let _ = storage.record_config_snapshot(&prev_snapshot, "initial");
+                }
+                None
+            };
+            storage.save_config(&to_save)?;
+            let _ = storage.record_config_snapshot(&to_save, "settings_update");
+            Ok(rollback_id)
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(internal_error)?;
 
     let pipe = &state.app.pipeline;
     pipe.swap_acl(next_acl);
@@ -822,6 +873,11 @@ pub async fn update_config(
     pipe.set_block_mode(block_mode);
     pipe.set_cname_cloaking(cname_cloaking_blocking);
     pipe.set_dnssec_enabled(dnssec_enabled);
+    pipe.dnssec_validator()
+        .set_strict_clock(next.dnssec_strict_clock);
+    pipe.dnssec_validator()
+        .set_auto_rollover(next.dnssec_auto_rollover);
+    pipe.set_serve_stale_enabled(next.serve_stale_enabled);
     let _ = pipe.reload_dnssec_anchors(&dnssec_trust_anchors, &dnssec_ntas);
     pipe.set_hosts_enabled(hosts_enabled);
     pipe.set_dhcp_leases_enabled(dhcp_leases_enabled);
@@ -882,6 +938,11 @@ pub async fn update_config(
     crate::split_dns_sync::maybe_spawn_split_dns_sync(&state, &next);
     let response = ConfigResponse::from(&next);
     state.app.config.store(Arc::new(next));
+    if let (Some(timeout_secs), Some(snapshot_id)) = (confirm_timeout_secs, rollback_snapshot_id) {
+        state
+            .config_confirm
+            .schedule(state.clone(), snapshot_id, timeout_secs);
+    }
     Ok(Json(response))
 }
 

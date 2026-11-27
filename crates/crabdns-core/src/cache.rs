@@ -267,9 +267,40 @@ impl DnsCache {
             return Some((entry, true, needs_refresh));
         }
 
+        if elapsed <= entry.ttl.saturating_add(self.stale_grace) {
+            // Keep expired entries within `stale_grace` so RFC 8767 serve-stale can
+            // fall back to them when all upstream servers fail.
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+
         self.inner.invalidate(key);
         self.misses.fetch_add(1, Ordering::Relaxed);
         None
+    }
+
+    /// RFC 8767 serve-stale fallback: returns a stale cached response (with TTL clamped to
+    /// `STALE_RESPONSE_TTL_SECS`) if the entry is still within `stale_grace`, regardless of
+    /// whether optimistic caching is enabled.
+    pub fn get_stale_fallback(&self, key: &CacheKey, query_id: u16) -> Option<Vec<u8>> {
+        let entry = self.inner.get(key)?;
+        let elapsed = entry.inserted_at.elapsed();
+        if elapsed > entry.ttl.saturating_add(self.stale_grace) {
+            self.inner.invalidate(key);
+            return None;
+        }
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        self.optimistic_hits.fetch_add(1, Ordering::Relaxed);
+        let mut out = Vec::with_capacity(entry.wire_bytes.len());
+        out.extend_from_slice(&entry.wire_bytes);
+        patch_tx_id(&mut out, query_id);
+        patch_wire_ttls(
+            &mut out,
+            &entry.ttl_offsets,
+            0,
+            Some(STALE_RESPONSE_TTL_SECS),
+        );
+        Some(out)
     }
 
     pub fn insert(&self, key: CacheKey, wire_bytes: Vec<u8>, ttl_secs: u32) {
@@ -698,5 +729,43 @@ mod tests {
             )),
         ));
         assert_eq!(compute_response_cache_ttl(&nodata_msg), Some(25));
+    }
+
+    #[test]
+    fn test_serve_stale_fallback_when_optimistic_disabled() {
+        let cache = DnsCache::with_options(16, false, 1, 300, false);
+        let key = CacheKey {
+            qname: "fallback.example.".to_string(),
+            qtype: 1,
+            qclass: 1,
+            ecs_subnet: None,
+            dnssec_do: false,
+            upstream_scope: None,
+        };
+        use hickory_proto::op::{MessageType, OpCode, Query};
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::{Name, RData, Record, RecordType};
+
+        let mut msg = Message::new(0x1111, MessageType::Response, OpCode::Query);
+        let name = Name::from_ascii("fallback.example.").unwrap();
+        msg.add_query(Query::query(name.clone(), RecordType::A));
+        msg.add_answer(Record::from_rdata(
+            name,
+            1,
+            RData::A(A(std::net::Ipv4Addr::new(93, 184, 216, 34))),
+        ));
+        let wire = msg.to_vec().unwrap();
+        cache.insert(key.clone(), wire, 1);
+
+        std::thread::sleep(Duration::from_millis(1150));
+        // Strict cache lookup returns None when optimistic is false
+        assert!(cache.get(&key, 0x4444).is_none());
+        // RFC 8767 serve-stale fallback still serves the entry with STALE_RESPONSE_TTL_SECS (30)
+        let stale_wire = cache
+            .get_stale_fallback(&key, 0x5555)
+            .expect("stale fallback should exist within grace window");
+        let parsed = Message::from_vec(&stale_wire).unwrap();
+        assert_eq!(parsed.id, 0x5555);
+        assert_eq!(parsed.answers[0].ttl, 30);
     }
 }

@@ -48,7 +48,7 @@ pub fn spawn_log_prune_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = delay_interval(Duration::from_secs(600));
+        let mut interval = delay_interval(Duration::from_secs(120));
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
@@ -60,10 +60,11 @@ pub fn spawn_log_prune_task(
                     let cfg_now = config.load();
                     let retention_hours = cfg_now.log_retention_hours;
                     let max_disk_bytes = cfg_now.log_max_disk_mb.max(1).saturating_mul(BYTES_PER_MIB);
+                    let min_free_bytes = cfg_now.disk_min_free_mb.saturating_mul(BYTES_PER_MIB);
                     let st = Arc::clone(&storage);
                     match tokio::task::spawn_blocking(move || {
                         let expired = prune_logs_once(&st, retention_hours)?;
-                        let oversized = st.prune_oversized_logs(max_disk_bytes)?;
+                        let oversized = st.prune_with_disk_quota(max_disk_bytes, min_free_bytes)?;
                         Ok::<usize, anyhow::Error>(expired + oversized)
                     })
                     .await

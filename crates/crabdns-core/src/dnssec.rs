@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use foldhash::fast::RandomState;
 use hickory_proto::dnssec::rdata::{DNSKEY, DNSSECRData, DS, RRSIG};
-use hickory_proto::dnssec::{TrustAnchors, Verifier};
+use hickory_proto::dnssec::{PublicKey, PublicKeyBuf, TrustAnchors, Verifier};
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use moka::sync::Cache;
@@ -20,6 +20,14 @@ const ZONE_CACHE_TTL: Duration = Duration::from_hours(1);
 const MIN_ZONE_CACHE_TTL_SECS: u32 = 60;
 const MAX_ZONE_CACHE_TTL_SECS: u32 = 3600;
 const MIN_PLAUSIBLE_UNIX_SECS: u64 = 1_700_000_000;
+const RFC5011_ADD_HOLD_DOWN_SECS: i64 = 30 * 86_400;
+
+#[derive(Debug, Clone)]
+struct Rfc5011PendingAnchor {
+    public_key_bytes: Vec<u8>,
+    algorithm: hickory_proto::dnssec::Algorithm,
+    first_seen_unix_secs: i64,
+}
 
 #[derive(Debug, Clone)]
 enum ZoneState {
@@ -42,10 +50,14 @@ pub enum ValidationOutcome {
 
 pub struct DnssecValidator {
     trust_anchors: ArcSwap<TrustAnchors>,
+    revoked_anchors: ArcSwap<Vec<Vec<u8>>>,
+    pending_anchors: Mutex<Vec<Rfc5011PendingAnchor>>,
     ntas: ArcSwap<NtaList>,
     zone_cache: Cache<String, ZoneCacheEntry, RandomState>,
     zone_inflight: Arc<Singleflight<String, Option<Vec<DNSKEY>>>>,
     unsynced_clock_warned: AtomicBool,
+    strict_clock: AtomicBool,
+    auto_rollover: AtomicBool,
 }
 
 impl Default for DnssecValidator {
@@ -62,11 +74,33 @@ impl DnssecValidator {
             .build_with_hasher(RandomState::default());
         Self {
             trust_anchors: ArcSwap::from_pointee(trust_anchors),
+            revoked_anchors: ArcSwap::from_pointee(Vec::new()),
+            pending_anchors: Mutex::new(Vec::new()),
             ntas: ArcSwap::from_pointee(NtaList::default()),
             zone_cache,
             zone_inflight: Arc::new(Singleflight::new()),
             unsynced_clock_warned: AtomicBool::new(false),
+            strict_clock: AtomicBool::new(false),
+            auto_rollover: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_strict_clock(&self, enabled: bool) {
+        self.strict_clock.store(enabled, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn is_strict_clock(&self) -> bool {
+        self.strict_clock.load(Ordering::Relaxed)
+    }
+
+    pub fn set_auto_rollover(&self, enabled: bool) {
+        self.auto_rollover.store(enabled, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn is_auto_rollover(&self) -> bool {
+        self.auto_rollover.load(Ordering::Relaxed)
     }
 
     /// Atomically reloads root trust anchors and RFC 7646 Negative Trust Anchors,
@@ -119,6 +153,12 @@ impl DnssecValidator {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         if raw_unix_secs < MIN_PLAUSIBLE_UNIX_SECS {
+            if self.strict_clock.load(Ordering::Relaxed) {
+                return Err(CoreError::Protocol(
+                    "DNSSEC validation failed: system clock unsynchronized (strict clock mode)"
+                        .to_string(),
+                ));
+            }
             if !self.unsynced_clock_warned.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
                     unix_secs = raw_unix_secs,
@@ -368,9 +408,16 @@ impl DnssecValidator {
         }
 
         let anchors = self.trust_anchors.load();
+        let revoked = self.revoked_anchors.load();
         let trusted_ksks: Vec<DNSKEY> = keys
             .iter()
-            .filter(|k| anchors.contains(k.public_key()))
+            .filter(|k| {
+                !k.revoke()
+                    && anchors.contains(k.public_key())
+                    && !revoked
+                        .iter()
+                        .any(|r| r.as_slice() == k.public_key().public_bytes())
+            })
             .cloned()
             .collect();
         if trusted_ksks.is_empty() {
@@ -404,6 +451,90 @@ impl DnssecValidator {
             .unwrap_or(MAX_ZONE_CACHE_TTL_SECS);
         self.put_cached_zone(".".to_string(), ZoneState::Secure(keys.clone()), ttl);
         Ok(keys)
+    }
+
+    /// Evaluates validated root `DNSKEY` records according to RFC 5011 automated trust anchor
+    /// update rules (REVOKE bit for immediate revocation, 30-day add hold-down for new SEP KSKs).
+    /// Returns `true` if the active trust anchor set changed.
+    pub fn process_root_dnskeys_rfc5011(&self, keys: &[DNSKEY], now_unix_secs: i64) -> bool {
+        let mut changed = false;
+        let current_anchors = self.trust_anchors.load();
+        let mut next_anchors = (**current_anchors).clone();
+        let mut next_revoked = (**self.revoked_anchors.load()).clone();
+
+        for key in keys {
+            let pk_bytes = key.public_key().public_bytes().to_vec();
+            if key.revoke() {
+                if current_anchors.contains(key.public_key())
+                    && !next_revoked.iter().any(|r| r == &pk_bytes)
+                {
+                    next_revoked.push(pk_bytes.clone());
+                    changed = true;
+                    tracing::warn!(
+                        key_tag = key.calculate_key_tag().unwrap_or(0),
+                        "RFC 5011: root trust anchor revoked by REVOKE flag"
+                    );
+                }
+                if let Ok(mut pending) = self.pending_anchors.lock() {
+                    pending.retain(|p| p.public_key_bytes != pk_bytes);
+                }
+                continue;
+            }
+
+            if !(key.zone_key() && key.secure_entry_point())
+                || current_anchors.contains(key.public_key())
+                || next_revoked.iter().any(|r| r == &pk_bytes)
+            {
+                continue;
+            }
+
+            if let Ok(mut pending) = self.pending_anchors.lock() {
+                if let Some(entry) = pending.iter().find(|p| p.public_key_bytes == pk_bytes) {
+                    if now_unix_secs.saturating_sub(entry.first_seen_unix_secs)
+                        >= RFC5011_ADD_HOLD_DOWN_SECS
+                    {
+                        let alg = entry.algorithm;
+                        let buf = PublicKeyBuf::new(pk_bytes.clone(), alg);
+                        next_anchors.insert(&buf);
+                        pending.retain(|p| p.public_key_bytes != pk_bytes);
+                        changed = true;
+                        tracing::info!(
+                            key_tag = key.calculate_key_tag().unwrap_or(0),
+                            "RFC 5011: promoted new root SEP KSK after hold-down"
+                        );
+                    }
+                } else {
+                    pending.push(Rfc5011PendingAnchor {
+                        public_key_bytes: pk_bytes,
+                        algorithm: key.algorithm(),
+                        first_seen_unix_secs: now_unix_secs,
+                    });
+                }
+            }
+        }
+
+        if changed {
+            self.trust_anchors.store(Arc::new(next_anchors));
+            self.revoked_anchors.store(Arc::new(next_revoked));
+            self.zone_cache.invalidate_all();
+        }
+        changed
+    }
+
+    /// Queries the root zone `.` DNSKEY RRset via `upstream`, validates it against current
+    /// trust anchors, and runs RFC 5011 trust anchor rollover checks.
+    pub async fn probe_and_update_root_anchors(
+        &self,
+        upstream: &UpstreamPool,
+        now_unix_secs: i64,
+    ) -> Result<bool> {
+        if !self.is_auto_rollover() {
+            return Ok(false);
+        }
+        let now_secs = u32::try_from(now_unix_secs.max(0)).unwrap_or(u32::MAX);
+        self.zone_cache.invalidate(".");
+        let keys = self.ensure_root_keys(upstream, now_secs).await?;
+        Ok(self.process_root_dnskeys_rfc5011(&keys, now_unix_secs))
     }
 
     async fn validate_child_zone(

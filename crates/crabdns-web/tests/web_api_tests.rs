@@ -1877,3 +1877,159 @@ async fn test_split_dns_conditional_sync_status_and_interval() {
         serde_json::from_slice(&good.bytes().await.expect("bytes")).expect("json");
     assert_eq!(body["split_dns_refresh_interval_secs"], 3600);
 }
+
+#[tokio::test]
+async fn test_security_headers_csrf_and_commit_confirm() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
+    let config = Arc::new(ArcSwap::from_pointee(Config {
+        data_dir: dir.path().to_path_buf(),
+        ..Config::default()
+    }));
+    let filter = Arc::new(FilterEngine::new(&[]));
+    let cache = Arc::new(DnsCache::new(64, false));
+    let upstream = Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
+    let pipeline = Arc::new(DnsPipeline::new(filter, cache, upstream, None));
+    let (live_tx, _) = broadcast::channel(16);
+    let app = build_router(AppState {
+        config,
+        pipeline,
+        storage,
+        live_tx,
+        tls_reloader: None,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // Enable auth
+    let enable_res = client
+        .put(format!("{base}/api/auth/settings"))
+        .header("content-type", "application/json")
+        .body(r#"{"enabled":true,"username":"admin","password":"s3cret-pass"}"#)
+        .send()
+        .await
+        .expect("enable auth");
+    assert_eq!(enable_res.status(), StatusCode::OK);
+
+    // 1. Security headers present on /api/health
+    let health_res = client
+        .get(format!("{base}/api/health"))
+        .send()
+        .await
+        .expect("health");
+    assert_eq!(health_res.status(), StatusCode::OK);
+    assert_eq!(
+        health_res
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        health_res
+            .headers()
+            .get("x-frame-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("DENY")
+    );
+    assert!(health_res.headers().contains_key("content-security-policy"));
+
+    // Login to get both cookie and bearer token
+    let login_res = client
+        .post(format!("{base}/api/auth/login"))
+        .header("content-type", "application/json")
+        .body(r#"{"username":"admin","password":"s3cret-pass"}"#)
+        .send()
+        .await
+        .expect("login");
+    assert_eq!(login_res.status(), StatusCode::OK);
+    let cookie = login_res
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .expect("set-cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let login_json: auth::LoginResponse =
+        serde_json::from_slice(&login_res.bytes().await.expect("bytes")).expect("json");
+
+    // 2. Cookie-authenticated state-changing request without Origin/Referer is rejected by CSRF guard
+    let csrf_blocked = client
+        .post(format!("{base}/api/cache/flush"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("csrf blocked");
+    assert_eq!(csrf_blocked.status(), StatusCode::FORBIDDEN);
+
+    // Cross-site Origin is rejected
+    let csrf_cross = client
+        .post(format!("{base}/api/cache/flush"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .send()
+        .await
+        .expect("csrf cross");
+    assert_eq!(csrf_cross.status(), StatusCode::FORBIDDEN);
+
+    // Same-origin Cookie request succeeds
+    let csrf_ok = client
+        .post(format!("{base}/api/cache/flush"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .header(reqwest::header::ORIGIN, format!("http://{addr}"))
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await
+        .expect("csrf ok");
+    assert_eq!(csrf_ok.status(), StatusCode::OK);
+
+    // 3. Commit-Confirm config update + confirm endpoint
+    let update_body = serde_json::json!({
+        "upstreams": ["udp://1.1.1.1:53"],
+        "cache_size": 2048,
+        "optimistic_cache": true,
+        "upstream_timeout_ms": 2000,
+        "log_retention_hours": 24,
+        "confirm_timeout_secs": 30
+    });
+    let update_res = client
+        .put(format!("{base}/api/config"))
+        .header("authorization", format!("Bearer {}", login_json.token))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&update_body).unwrap())
+        .send()
+        .await
+        .expect("update config");
+    assert_eq!(update_res.status(), StatusCode::OK);
+
+    let pending_bytes = client
+        .get(format!("{base}/api/config/pending-confirm"))
+        .header("authorization", format!("Bearer {}", login_json.token))
+        .send()
+        .await
+        .expect("pending")
+        .bytes()
+        .await
+        .expect("bytes");
+    let pending: serde_json::Value = serde_json::from_slice(&pending_bytes).expect("json");
+    assert_eq!(pending["pending"], true);
+
+    let confirmed_bytes = client
+        .post(format!("{base}/api/config/confirm"))
+        .header("authorization", format!("Bearer {}", login_json.token))
+        .send()
+        .await
+        .expect("confirm")
+        .bytes()
+        .await
+        .expect("bytes");
+    let confirmed: serde_json::Value = serde_json::from_slice(&confirmed_bytes).expect("json");
+    assert_eq!(confirmed["confirmed"], true);
+}

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crabdns_core::{
     ClientGroup, ClientProfile, Config, DnsRewriteEntry, PersistedCacheEntry, QueryEvent,
-    QueryOutcome,
+    QueryOutcome, StorageProfile,
 };
 
 pub mod client_stats;
@@ -16,11 +16,10 @@ pub use config_history::{ConfigSnapshotMeta, SplitDnsListMeta};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 pub use log_sink::spawn_log_sink;
 use models::{
-    BATCH_CHUNK_SIZE, BoundedCountMap, FJALL_CACHE_BYTES, FJALL_LOGS_MEMTABLE_BYTES,
-    FJALL_MAX_CACHED_FILES, FJALL_MAX_JOURNAL_BYTES, FJALL_SMALL_MEMTABLE_BYTES,
-    FJALL_WORKER_THREADS, HOUR_MS, KEY_CLIENT_GROUPS, KEY_CLIENTS, KEY_COUNTERS, KEY_CUSTOM_RULES,
-    KEY_CUSTOM_RULES_ENABLED, KEY_DNS_REWRITES, KEY_RUNTIME_CONFIG, KEY_SUBSCRIPTIONS,
-    KEY_TIMESERIES, MAX_LOG_SCAN, PersistedCounters, TIMESERIES_BUCKETS, TIMESERIES_RETENTION_MS,
+    BATCH_CHUNK_SIZE, BoundedCountMap, FjallPreset, HOUR_MS, KEY_CLIENT_GROUPS, KEY_CLIENTS,
+    KEY_COUNTERS, KEY_CUSTOM_RULES, KEY_CUSTOM_RULES_ENABLED, KEY_DNS_REWRITES, KEY_RUNTIME_CONFIG,
+    KEY_SUBSCRIPTIONS, KEY_TIMESERIES, MAX_LOG_SCAN, PersistedCounters, TIMESERIES_BUCKETS,
+    TIMESERIES_RETENTION_MS, available_disk_bytes,
 };
 pub use models::{
     CompiledLogsFilter, FilterSubscription, LogsFilter, Result, StatsSnapshot, StorageError,
@@ -28,6 +27,8 @@ pub use models::{
 };
 use tokio::sync::Mutex;
 pub struct StorageEngine {
+    data_dir: PathBuf,
+    effective_profile: StorageProfile,
     db: Database,
     logs: Keyspace,
     meta: Keyspace,
@@ -53,29 +54,35 @@ pub struct StorageEngine {
     pub(crate) log_batches_retried: AtomicU64,
     pub(crate) log_batches_degraded_dropped: AtomicU64,
     pub(crate) log_disk_degraded: AtomicBool,
+    pub(crate) disk_pressure_active: AtomicBool,
     pub(crate) log_flush_total_us: AtomicU64,
     log_pruned_total: AtomicU64,
 }
 
 impl StorageEngine {
     pub fn open(data_dir: &Path) -> Result<Self> {
+        Self::open_with_profile(data_dir, StorageProfile::Auto)
+    }
+
+    pub fn open_with_profile(data_dir: &Path, profile: StorageProfile) -> Result<Self> {
+        let preset = FjallPreset::from_profile(profile);
         let db = Database::builder(data_dir.join("fjall"))
-            .cache_size(FJALL_CACHE_BYTES)
-            .max_journaling_size(FJALL_MAX_JOURNAL_BYTES)
-            .max_cached_files(Some(FJALL_MAX_CACHED_FILES))
-            .worker_threads(FJALL_WORKER_THREADS)
+            .cache_size(preset.cache_bytes)
+            .max_journaling_size(preset.max_journal_bytes)
+            .max_cached_files(Some(preset.max_cached_files))
+            .worker_threads(preset.worker_threads)
             .open()?;
         let logs = db.keyspace("logs", || {
-            KeyspaceCreateOptions::default().max_memtable_size(FJALL_LOGS_MEMTABLE_BYTES)
+            KeyspaceCreateOptions::default().max_memtable_size(preset.logs_memtable_bytes)
         })?;
         let meta = db.keyspace("meta", || {
-            KeyspaceCreateOptions::default().max_memtable_size(FJALL_SMALL_MEMTABLE_BYTES)
+            KeyspaceCreateOptions::default().max_memtable_size(preset.small_memtable_bytes)
         })?;
         let sub_contents = db.keyspace("sub_contents", || {
-            KeyspaceCreateOptions::default().max_memtable_size(FJALL_SMALL_MEMTABLE_BYTES)
+            KeyspaceCreateOptions::default().max_memtable_size(preset.small_memtable_bytes)
         })?;
         let dns_cache = db.keyspace("dns_cache", || {
-            KeyspaceCreateOptions::default().max_memtable_size(FJALL_SMALL_MEMTABLE_BYTES)
+            KeyspaceCreateOptions::default().max_memtable_size(preset.small_memtable_bytes)
         })?;
 
         let persisted = match meta.get(KEY_COUNTERS)? {
@@ -93,6 +100,8 @@ impl StorageEngine {
         };
 
         Ok(Self {
+            data_dir: data_dir.to_path_buf(),
+            effective_profile: preset.effective_profile,
             db,
             logs,
             meta,
@@ -118,9 +127,25 @@ impl StorageEngine {
             log_batches_retried: AtomicU64::new(0),
             log_batches_degraded_dropped: AtomicU64::new(0),
             log_disk_degraded: AtomicBool::new(false),
+            disk_pressure_active: AtomicBool::new(false),
             log_flush_total_us: AtomicU64::new(0),
             log_pruned_total: AtomicU64::new(0),
         })
+    }
+
+    #[must_use]
+    pub fn effective_storage_profile(&self) -> StorageProfile {
+        self.effective_profile
+    }
+
+    #[must_use]
+    pub fn is_disk_pressure_active(&self) -> bool {
+        self.disk_pressure_active.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn available_disk_bytes(&self) -> Option<u64> {
+        available_disk_bytes(&self.data_dir)
     }
 
     pub fn runtime_metrics(&self) -> StorageRuntimeMetrics {
@@ -130,6 +155,7 @@ impl StorageEngine {
             log_batches_retried: self.log_batches_retried.load(Ordering::Relaxed),
             log_batches_degraded_dropped: self.log_batches_degraded_dropped.load(Ordering::Relaxed),
             log_disk_degraded: self.log_disk_degraded.load(Ordering::Relaxed),
+            disk_pressure_active: self.disk_pressure_active.load(Ordering::Relaxed),
             log_flush_total_us: self.log_flush_total_us.load(Ordering::Relaxed),
             log_pruned_total: self.log_pruned_total.load(Ordering::Relaxed),
         }
@@ -608,6 +634,33 @@ impl StorageEngine {
             );
         }
         Ok(removed)
+    }
+
+    /// Evaluates both the configured `max_disk_bytes` cap and filesystem free space (`min_free_bytes`).
+    /// When available disk space drops below `min_free_bytes`, activates disk pressure mode and
+    /// aggressively tightens the log quota by half until space recovers or logs are drained.
+    pub fn prune_with_disk_quota(&self, max_disk_bytes: u64, min_free_bytes: u64) -> Result<usize> {
+        let mut effective_cap = max_disk_bytes;
+        if min_free_bytes > 0
+            && let Some(free) = self.available_disk_bytes()
+        {
+            if free < min_free_bytes {
+                self.disk_pressure_active.store(true, Ordering::Relaxed);
+                let current_logs = self.logs.disk_space();
+                let deficit = min_free_bytes.saturating_sub(free);
+                let target = current_logs.saturating_sub(deficit).min(current_logs / 2);
+                effective_cap = effective_cap.min(target);
+                tracing::warn!(
+                    free_bytes = free,
+                    min_free_bytes,
+                    effective_cap,
+                    "low disk space detected; tightening log quota and pausing non-essential log writes"
+                );
+            } else {
+                self.disk_pressure_active.store(false, Ordering::Relaxed);
+            }
+        }
+        self.prune_oversized_logs(effective_cap)
     }
 
     pub fn clear_subscription_contents(&self) -> Result<()> {

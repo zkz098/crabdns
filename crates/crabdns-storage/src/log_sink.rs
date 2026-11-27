@@ -194,7 +194,7 @@ async fn flush_buffer(
     }
     let batch = std::mem::replace(buffer, Vec::with_capacity(FLUSH_BATCH_CAPACITY));
 
-    if backoff.is_in_backoff(Instant::now()) {
+    if backoff.is_in_backoff(Instant::now()) || storage.is_disk_pressure_active() {
         storage.record_in_memory_only(&batch);
         storage
             .log_batches_degraded_dropped
