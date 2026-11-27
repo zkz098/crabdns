@@ -2,6 +2,7 @@ import { Show } from "solid-js";
 import { t } from "../../i18n";
 import type { AcmeChallengeType } from "../../types/AcmeChallengeType";
 import { InfoTooltip } from "../InfoTooltip";
+import { SelectMenu, type SelectOption } from "../SelectMenu";
 import {
   MONO_INPUT_CLASS,
   SettingsCard,
@@ -10,6 +11,11 @@ import {
   ToggleRow,
 } from "./SettingsControls";
 import type { SettingsViewProps } from "./types";
+
+const ACME_CHALLENGE_OPTIONS: SelectOption<AcmeChallengeType>[] = [
+  { value: "http01", label: () => t("settingsAcmeChallengeHttp01") },
+  { value: "dns01_local", label: () => t("settingsAcmeChallengeDns01") },
+];
 
 export function NetworkTlsSettingsSection(props: SettingsViewProps) {
   const hasTlsListener = () =>
@@ -239,16 +245,14 @@ export function NetworkTlsSettingsSection(props: SettingsViewProps) {
               <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
                 {t("settingsAcmeChallengeLabel")}
               </label>
-              <select
+              <SelectMenu
+                size="md"
                 value={props.acmeChallengeType}
-                onChange={(e) =>
-                  props.onAcmeChallengeTypeChange(e.currentTarget.value as AcmeChallengeType)
-                }
-                class="w-full h-9 bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-2.5 text-xs text-[#171717] dark:text-[#ededed] outline-none"
-              >
-                <option value="http01">{t("settingsAcmeChallengeHttp01")}</option>
-                <option value="dns01_local">{t("settingsAcmeChallengeDns01")}</option>
-              </select>
+                options={ACME_CHALLENGE_OPTIONS}
+                onChange={props.onAcmeChallengeTypeChange}
+                class="w-full"
+                triggerClass="text-xs font-normal"
+              />
             </div>
             <div>
               <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">

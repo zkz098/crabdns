@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { t, toggleLocale } from "../i18n";
 import { theme, toggleTheme } from "../theme";
 import type { BlockingStatusResponse } from "../types/BlockingStatusResponse";
@@ -26,6 +26,30 @@ const NAV_ITEMS: Array<{ key: TabKey; label: () => string; icon: string }> = [
 
 export function Header(props: HeaderProps) {
   const [pauseMenuOpen, setPauseMenuOpen] = createSignal(false);
+  let pauseContainerRef: HTMLDivElement | undefined;
+
+  createEffect(() => {
+    if (!pauseMenuOpen()) return;
+
+    const handlePointerDown = (e: PointerEvent) => {
+      if (pauseContainerRef && !pauseContainerRef.contains(e.target as Node)) {
+        setPauseMenuOpen(false);
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setPauseMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    });
+  });
 
   const formatRemaining = (secs: number | null | undefined) => {
     if (secs === null || secs === undefined) return "";
@@ -99,9 +123,16 @@ export function Header(props: HeaderProps) {
             <Show
               when={props.blockingStatus?.paused}
               fallback={
-                <div class="relative">
+                <div
+                  ref={(el) => {
+                    pauseContainerRef = el;
+                  }}
+                  class="relative"
+                >
                   <button
                     type="button"
+                    aria-haspopup="menu"
+                    aria-expanded={pauseMenuOpen()}
                     onClick={() => setPauseMenuOpen((v) => !v)}
                     class="h-8 px-2.5 rounded-lg text-xs font-medium bg-white dark:bg-[#111111] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] text-[#171717] dark:text-[#ededed] border border-[#eaeaea] dark:border-[#262626] flex items-center gap-1.5 cursor-pointer transition-all duration-200 active:scale-[0.96]"
                   >
@@ -109,34 +140,40 @@ export function Header(props: HeaderProps) {
                     <span class="hidden sm:inline">{t("blockingPauseBtn")}</span>
                   </button>
                   <Show when={pauseMenuOpen()}>
-                    <div class="absolute right-0 mt-1.5 w-40 rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#111111] shadow-lg p-1 z-50">
+                    <div
+                      role="menu"
+                      class="animate-dropdown-in absolute right-0 mt-1.5 w-40 rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white/95 dark:bg-[#0a0a0a]/95 backdrop-blur-xl shadow-lg shadow-black/5 dark:shadow-black/40 p-1 z-50"
+                    >
                       <button
                         type="button"
+                        role="menuitem"
                         onClick={() => {
                           setPauseMenuOpen(false);
                           props.onPauseBlocking?.(300);
                         }}
-                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] bg-transparent border-0 cursor-pointer"
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] bg-transparent border-0 cursor-pointer transition-colors"
                       >
                         {t("blockingPause5m")}
                       </button>
                       <button
                         type="button"
+                        role="menuitem"
                         onClick={() => {
                           setPauseMenuOpen(false);
                           props.onPauseBlocking?.(1800);
                         }}
-                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] bg-transparent border-0 cursor-pointer"
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-[#171717] dark:text-[#ededed] hover:bg-[#f4f4f5] dark:hover:bg-[#1a1a1a] bg-transparent border-0 cursor-pointer transition-colors"
                       >
                         {t("blockingPause30m")}
                       </button>
                       <button
                         type="button"
+                        role="menuitem"
                         onClick={() => {
                           setPauseMenuOpen(false);
                           props.onPauseBlocking?.(null);
                         }}
-                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 bg-transparent border-0 cursor-pointer"
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 bg-transparent border-0 cursor-pointer transition-colors"
                       >
                         {t("blockingPauseForever")}
                       </button>

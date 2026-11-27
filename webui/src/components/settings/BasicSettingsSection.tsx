@@ -2,15 +2,27 @@ import { t } from "../../i18n";
 import type { BlockMode } from "../../types/BlockMode";
 import type { UpstreamStrategy } from "../../types/UpstreamStrategy";
 import { InfoTooltip } from "../InfoTooltip";
+import { SelectMenu, type SelectOption } from "../SelectMenu";
 import { UpstreamList } from "../UpstreamList";
 import {
   NUMBER_INPUT_CLASS,
-  SELECT_CLASS,
   SettingsCard,
   SettingsSectionHeader,
   TEXTAREA_MONO_CLASS,
 } from "./SettingsControls";
 import type { SettingsViewProps } from "./types";
+
+const STRATEGY_OPTIONS: SelectOption<UpstreamStrategy>[] = [
+  { value: "failover", label: () => t("settingsStrategyFailover") },
+  { value: "parallel", label: () => t("settingsStrategyParallel") },
+  { value: "least_latency", label: () => t("settingsStrategyLeastLatency") },
+];
+
+const BLOCK_MODE_OPTIONS: SelectOption<BlockMode>[] = [
+  { value: "zero_ip", label: () => t("settingsBlockZeroIp") },
+  { value: "nx_domain", label: () => t("settingsBlockNxDomain") },
+  { value: "no_data", label: () => t("settingsBlockNoData") },
+];
 
 export function BasicSettingsSection(props: SettingsViewProps) {
   return (
@@ -51,17 +63,14 @@ export function BasicSettingsSection(props: SettingsViewProps) {
               <span>{t("settingsStrategyLabel")}</span>
               <InfoTooltip text={t("tooltipStrategy")} align="left" />
             </label>
-            <select
+            <SelectMenu
+              variant="subtle"
+              size="md"
               value={props.upstreamStrategy}
-              onChange={(e) =>
-                props.onUpstreamStrategyChange(e.currentTarget.value as UpstreamStrategy)
-              }
-              class={SELECT_CLASS}
-            >
-              <option value="failover">{t("settingsStrategyFailover")}</option>
-              <option value="parallel">{t("settingsStrategyParallel")}</option>
-              <option value="least_latency">{t("settingsStrategyLeastLatency")}</option>
-            </select>
+              options={STRATEGY_OPTIONS}
+              onChange={props.onUpstreamStrategyChange}
+              class="w-full"
+            />
           </div>
 
           <div>
@@ -69,15 +78,14 @@ export function BasicSettingsSection(props: SettingsViewProps) {
               <span>{t("settingsBlockModeLabel")}</span>
               <InfoTooltip text={t("tooltipBlockMode")} align="right" />
             </label>
-            <select
+            <SelectMenu
+              variant="subtle"
+              size="md"
               value={props.blockMode}
-              onChange={(e) => props.onBlockModeChange(e.currentTarget.value as BlockMode)}
-              class={SELECT_CLASS}
-            >
-              <option value="zero_ip">{t("settingsBlockZeroIp")}</option>
-              <option value="nx_domain">{t("settingsBlockNxDomain")}</option>
-              <option value="no_data">{t("settingsBlockNoData")}</option>
-            </select>
+              options={BLOCK_MODE_OPTIONS}
+              onChange={props.onBlockModeChange}
+              class="w-full"
+            />
           </div>
 
           <div>

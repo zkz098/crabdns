@@ -943,6 +943,8 @@ export function ClientsView(props: ClientsViewProps) {
                 />
               </div>
               <SelectMenu
+                size="sm"
+                align="right"
                 value={discoveredSort()}
                 options={DISCOVERED_SORT_OPTIONS}
                 onChange={setDiscoveredSort}

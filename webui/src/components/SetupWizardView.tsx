@@ -5,6 +5,13 @@ import type { SetupCompletePayload } from "../types/SetupCompletePayload";
 import type { SetupStatusResponse } from "../types/SetupStatusResponse";
 import type { UpstreamCapabilities } from "../types/UpstreamCapabilities";
 import { PortPrecheckPanel } from "./PortPrecheckPanel";
+import { SelectMenu, type SelectOption } from "./SelectMenu";
+
+const BLOCK_MODE_OPTIONS: SelectOption<BlockMode>[] = [
+  { value: "zero_ip", label: () => t("settingsBlockZeroIp") },
+  { value: "nx_domain", label: () => t("settingsBlockNxDomain") },
+  { value: "no_data", label: () => t("settingsBlockNoData") },
+];
 
 interface SetupWizardViewProps {
   status: SetupStatusResponse;
@@ -333,15 +340,14 @@ export function SetupWizardView(props: SetupWizardViewProps) {
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
               <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2 flex items-center justify-between gap-2">
                 <span class="text-xs font-medium">{t("settingsBlockModeLabel")}</span>
-                <select
+                <SelectMenu
+                  size="sm"
+                  align="right"
                   value={blockMode()}
-                  onChange={(e) => setBlockMode(e.currentTarget.value as BlockMode)}
-                  class="bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded px-2 py-1 text-xs outline-none"
-                >
-                  <option value="zero_ip">0.0.0.0 / :: (zero_ip)</option>
-                  <option value="nx_domain">NXDOMAIN (nx_domain)</option>
-                  <option value="no_data">NODATA (no_data)</option>
-                </select>
+                  options={BLOCK_MODE_OPTIONS}
+                  onChange={setBlockMode}
+                  class="w-48 shrink-0"
+                />
               </div>
               <label class="flex items-center gap-2.5 text-xs font-medium rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2.5 cursor-pointer select-none">
                 <input

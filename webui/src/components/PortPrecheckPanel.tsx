@@ -3,6 +3,7 @@ import { t } from "../i18n";
 import type { PortCheckItem } from "../types/PortCheckItem";
 import type { PortCheckRequest } from "../types/PortCheckRequest";
 import type { PortCheckResponse } from "../types/PortCheckResponse";
+import { SelectMenu, type SelectOption } from "./SelectMenu";
 
 interface PortPrecheckPanelProps {
   listenDns: string;
@@ -13,6 +14,14 @@ interface PortPrecheckPanelProps {
 }
 
 type ProtoKey = "dns" | "web" | "web_tls" | "dot" | "doq";
+
+const PROTO_OPTIONS: SelectOption<ProtoKey>[] = [
+  { value: "dns", label: () => t("portCheckProtoDns") },
+  { value: "web", label: () => t("portCheckProtoWeb") },
+  { value: "web_tls", label: () => t("portCheckProtoWebTls") },
+  { value: "dot", label: () => t("portCheckProtoDot") },
+  { value: "doq", label: () => t("portCheckProtoDoq") },
+];
 
 const PROTO_PLACEHOLDERS: Record<ProtoKey, string> = {
   dns: "0.0.0.0:53",
@@ -104,21 +113,16 @@ export function PortPrecheckPanel(props: PortPrecheckPanelProps) {
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
-        <select
+        <SelectMenu
+          size="sm"
           value={proto()}
-          onChange={(e) => {
-            const next = e.currentTarget.value as ProtoKey;
+          options={PROTO_OPTIONS}
+          onChange={(next) => {
             setProto(next);
             setAddr(PROTO_PLACEHOLDERS[next]);
           }}
-          class="h-8 bg-white dark:bg-[#0a0a0a] border border-[#eaeaea] dark:border-[#262626] rounded-lg px-2.5 text-xs outline-none"
-        >
-          <option value="dns">{t("portCheckProtoDns")}</option>
-          <option value="web">{t("portCheckProtoWeb")}</option>
-          <option value="web_tls">{t("portCheckProtoWebTls")}</option>
-          <option value="dot">{t("portCheckProtoDot")}</option>
-          <option value="doq">{t("portCheckProtoDoq")}</option>
-        </select>
+          class="w-44 shrink-0"
+        />
         <input
           type="text"
           value={addr()}

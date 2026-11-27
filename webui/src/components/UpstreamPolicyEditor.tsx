@@ -2,6 +2,20 @@ import { Show, createSignal } from "solid-js";
 import { t } from "../i18n";
 import type { UpstreamPolicy } from "../types/UpstreamPolicy";
 import type { UpstreamStrategy } from "../types/UpstreamStrategy";
+import { SelectMenu, type SelectOption } from "./SelectMenu";
+
+const TRI_OPTIONS: SelectOption[] = [
+  { value: "", label: () => t("upstreamPolicyInherit") },
+  { value: "true", label: () => t("upstreamPolicyEnable"), dotClass: "bg-emerald-500" },
+  { value: "false", label: () => t("upstreamPolicyDisable"), dotClass: "bg-rose-500" },
+];
+
+const STRATEGY_OPTIONS: SelectOption[] = [
+  { value: "", label: () => t("upstreamPolicyInherit") },
+  { value: "failover", label: "Failover" },
+  { value: "parallel", label: "Parallel" },
+  { value: "least_latency", label: "Least Latency" },
+];
 
 export function emptyUpstreamPolicy(): UpstreamPolicy {
   return {};
@@ -78,15 +92,14 @@ export function UpstreamPolicyEditor(props: UpstreamPolicyEditorProps) {
   ) => (
     <div>
       <label class="block text-[11px] text-[#666666] dark:text-[#a1a1aa] mb-1">{label}</label>
-      <select
+      <SelectMenu
+        size="xs"
         value={triValue(value)}
-        onChange={(e) => onSet(parseTriValue(e.currentTarget.value))}
-        class="w-full h-7 bg-white dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-md px-2 text-xs text-[#171717] dark:text-[#ededed] outline-none"
-      >
-        <option value="">{t("upstreamPolicyInherit")}</option>
-        <option value="true">{t("upstreamPolicyEnable")}</option>
-        <option value="false">{t("upstreamPolicyDisable")}</option>
-      </select>
+        options={TRI_OPTIONS}
+        onChange={(raw) => onSet(parseTriValue(raw))}
+        class="w-full"
+        triggerClass="dark:bg-[#000000]"
+      />
     </div>
   );
 
@@ -136,21 +149,18 @@ export function UpstreamPolicyEditor(props: UpstreamPolicyEditorProps) {
               <label class="block text-[11px] text-[#666666] dark:text-[#a1a1aa] mb-1">
                 {t("upstreamPolicyStrategy")}
               </label>
-              <select
+              <SelectMenu
+                size="xs"
                 value={props.policy.upstream_strategy ?? ""}
-                onChange={(e) => {
-                  const val = e.currentTarget.value;
+                options={STRATEGY_OPTIONS}
+                onChange={(val) => {
                   update({
                     upstream_strategy: val === "" ? null : (val as UpstreamStrategy),
                   });
                 }}
-                class="w-full h-7 bg-white dark:bg-[#000000] border border-[#eaeaea] dark:border-[#262626] rounded-md px-2 text-xs text-[#171717] dark:text-[#ededed] outline-none"
-              >
-                <option value="">{t("upstreamPolicyInherit")}</option>
-                <option value="failover">Failover</option>
-                <option value="parallel">Parallel</option>
-                <option value="least_latency">Least Latency</option>
-              </select>
+                class="w-full"
+                triggerClass="dark:bg-[#000000]"
+              />
             </div>
             <div>
               <label class="block text-[11px] text-[#666666] dark:text-[#a1a1aa] mb-1">
