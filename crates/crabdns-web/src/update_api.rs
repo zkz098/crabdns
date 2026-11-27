@@ -180,6 +180,21 @@ pub fn current_pkg_version() -> Result<semver::Version, String> {
         .map_err(|e| format!("invalid CARGO_PKG_VERSION: {e}"))
 }
 
+/// Build a dedicated HTTP client for update manifest checks and artifact downloads.
+///
+/// Uses short connect/read timeouts so stalled connections fail promptly, while allowing up to
+/// 300 seconds total for downloading larger release binaries.
+#[must_use]
+pub fn build_update_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(format!("crabdns/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .unwrap_or_default()
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -648,13 +663,14 @@ pub async fn check_update(
     })?;
     let data_dir = state.app.config.load().data_dir.clone();
 
-    match check_for_update_with_config(&state.http_client_private, &data_dir, &cfg).await {
+    match check_for_update_with_config(&state.update_http_client, &data_dir, &cfg).await {
         Ok(found) => {
             state.updater.record_check_success(found);
             drop(busy_guard);
             Ok(Json(state.updater.status_snapshot()))
         }
         Err(err) => {
+            tracing::warn!(error = %err, "update check failed");
             state.updater.record_error(err.clone(), true);
             Err((
                 StatusCode::BAD_GATEWAY,
@@ -689,7 +705,7 @@ pub async fn apply_update(
         u
     } else {
         state.updater.set_phase(UpdatePhase::Checking);
-        match check_for_update_with_config(&state.http_client_private, &data_dir, &cfg).await {
+        match check_for_update_with_config(&state.update_http_client, &data_dir, &cfg).await {
             Ok(Some(u)) => {
                 state.updater.record_check_success(Some(u.clone()));
                 u
@@ -702,6 +718,7 @@ pub async fn apply_update(
                 ));
             }
             Err(err) => {
+                tracing::warn!(error = %err, "update check before apply failed");
                 state.updater.record_error(err.clone(), true);
                 return Err((
                     StatusCode::BAD_GATEWAY,
@@ -713,7 +730,7 @@ pub async fn apply_update(
 
     state.updater.begin_download(update.asset_size);
     if let Err(err) = download_and_install_update_with_stage(
-        &state.http_client_private,
+        &state.update_http_client,
         &data_dir,
         &update,
         &cfg,
@@ -726,6 +743,7 @@ pub async fn apply_update(
     )
     .await
     {
+        tracing::warn!(version = %update.version, error = %err, "update download or install failed");
         state.updater.record_error(err.clone(), false);
         return Err((
             StatusCode::BAD_GATEWAY,
