@@ -3,6 +3,7 @@ import { t } from "../i18n";
 import type { SplitDnsRule } from "../types/SplitDnsRule";
 import type { UpstreamPolicy } from "../types/UpstreamPolicy";
 import { InfoTooltip } from "./InfoTooltip";
+import { ToggleSwitch } from "./settings/SettingsControls";
 import {
   UpstreamPolicyEditor,
   emptyUpstreamPolicy,
@@ -255,15 +256,15 @@ export function SplitDnsList(props: SplitDnsListProps) {
           <UpstreamPolicyEditor policy={policy()} onChange={setPolicy} />
 
           <div class="flex flex-wrap items-center justify-between gap-2 pt-1">
-            <label class="flex items-center gap-2 text-xs text-[#171717] dark:text-[#ededed] cursor-pointer">
-              <input
-                type="checkbox"
+            <div class="flex items-center gap-2.5 text-xs text-[#171717] dark:text-[#ededed]">
+              <ToggleSwitch
+                compact
                 checked={fallback()}
-                onChange={(e) => setFallback(e.currentTarget.checked)}
-                class="rounded border-[#eaeaea] dark:border-[#262626]"
+                onChange={setFallback}
+                ariaLabel={t("splitDnsFallbackLabel")}
               />
               <span>{t("splitDnsFallbackLabel")}</span>
-            </label>
+            </div>
             <div class="flex items-center gap-2">
               <button
                 type="button"

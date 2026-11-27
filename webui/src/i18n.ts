@@ -554,12 +554,44 @@ const en = {
   updatePhaseDownloading: "Downloading & verifying update...",
   updatePhaseInstalling: "Extracting & replacing binary...",
 
-  settingsAdvancedTitle: "Advanced Settings",
-  settingsAdvancedSummary:
-    "Bootstrap DNS, Cache TTL & Persistence, Split DNS, ACL & Rate Limiting, ECS / DNSSEC, LAN Integration, SafeSearch / DNS64, and Native TLS",
-  settingsAdvancedExpand: "Show",
-  settingsAdvancedCollapse: "Hide",
-  settingsAdvancedCacheTitle: "Bootstrap DNS & Cache Tuning",
+  settingsSecBasicTitle: "Basic",
+  settingsSecBasicDesc: "Upstreams, strategy, block mode & logs",
+  settingsSecAccelTitle: "Acceleration",
+  settingsSecAccelDesc: "Cache tuning, Cloudflare CDN, ECS & split DNS",
+  settingsSecSecurityTitle: "Security",
+  settingsSecSecurityDesc: "DNSSEC, SafeSearch, ACL, rate limit & auth",
+  settingsSecNetworkTitle: "Network & TLS",
+  settingsSecNetworkDesc: "DoH/TLS/ACME, LAN discovery & DNS64",
+  settingsSecSystemTitle: "System & Setup",
+  settingsSecSystemDesc: "Backup, history, updates, ports & client guide",
+  settingsCardBasicBehaviorTitle: "Resolution & Behavior",
+  settingsCardBasicBehaviorDesc:
+    "Configure upstream scheduling, timeout, blocked response mode, and query log retention.",
+  settingsCardBootstrapTitle: "Bootstrap DNS",
+  settingsCardCacheTitle: "DNS Cache Acceleration",
+  settingsCardCacheDesc:
+    "Tune in-memory cache capacity, TTL bounds, optimistic refresh, hot-domain prefetch, and disk persistence.",
+  settingsCardEcsTitle: "EDNS0 Client Subnet (ECS)",
+  settingsCardEcsDesc:
+    "Send truncated client subnet info to upstreams for geographically closer CDN routing.",
+  settingsCardProtocolSecDesc:
+    "Protect against DNS spoofing, rebinding, CNAME cloaking, amplification, and HTTPS hint bypass.",
+  settingsCardAclDesc:
+    "Restrict which client IP ranges can query this DNS server and cap per-client QPS.",
+  settingsCardAuthDesc:
+    "Protect the Web console and management API with username and password authentication (saved independently).",
+  settingsCardEncryptedDnsTitle: "Encrypted DNS & Discovery",
+  settingsCardEncryptedDnsDesc:
+    "Configure inbound DoH endpoint, DDR auto-upgrade discovery, and DoT/DoQ SNI ClientID routing.",
+  settingsCardLanDesc:
+    "Resolve LAN hostnames via Hosts, DHCP leases, mDNS, and rDNS, and handle private .local/PTR traffic locally.",
+  settingsCardDns64Title: "DNS64 / NAT64 Synthesis",
+  settingsCardDns64Desc: "Synthesize IPv6 AAAA records from IPv4 A records for IPv6-only networks.",
+  settingsLanHostsDhcpTitle: "Hosts & DHCP Resolution",
+  settingsLanDiscoveryTitle: "LAN Discovery & .local Handling",
+  settingsLanPtrTitle: "Private Reverse PTR",
+  settingsUnsavedNote:
+    "Changes across Basic, Acceleration, Security, and Network sections are applied together when you click Save & Apply.",
 
   tooltipUpstreams:
     "Upstream resolvers queried when a domain is not cached or blocked. Supports udp://, tcp://, tls:// (DoT), and https:// (DoH).",
@@ -1184,12 +1216,37 @@ const zhCN: Record<TranslationKey, string> = {
   updatePhaseDownloading: "正在下载并校验更新包...",
   updatePhaseInstalling: "正在解压并替换二进制...",
 
-  settingsAdvancedTitle: "高级设置",
-  settingsAdvancedSummary:
-    "Bootstrap DNS、缓存 TTL 与持久化、分流 DNS、客户端 ACL 与限速、ECS / DNSSEC、局域网集成、安全搜索 / DNS64 与原生 TLS",
-  settingsAdvancedExpand: "展开",
-  settingsAdvancedCollapse: "收起",
-  settingsAdvancedCacheTitle: "Bootstrap DNS 与缓存调优",
+  settingsSecBasicTitle: "基础设置",
+  settingsSecBasicDesc: "上游 DNS、调度策略、拦截模式与日志",
+  settingsSecAccelTitle: "加速优化",
+  settingsSecAccelDesc: "缓存调优、Cloudflare 优选、ECS 与分流",
+  settingsSecSecurityTitle: "安全防护",
+  settingsSecSecurityDesc: "DNSSEC、安全搜索、访问控制与登录认证",
+  settingsSecNetworkTitle: "网络与加密",
+  settingsSecNetworkDesc: "DoH / TLS / ACME、局域网集成与 DNS64",
+  settingsSecSystemTitle: "系统与接入",
+  settingsSecSystemDesc: "备份回滚、系统更新、端口预检与接入引导",
+  settingsCardBasicBehaviorTitle: "解析策略与基础行为",
+  settingsCardBasicBehaviorDesc: "设置上游调度方式、超时时间、拦截响应模式及日志保留时长。",
+  settingsCardBootstrapTitle: "Bootstrap 引导解析",
+  settingsCardCacheTitle: "DNS 缓存加速",
+  settingsCardCacheDesc: "调整内存缓存容量、TTL 范围、乐观刷新、热点预取及磁盘持久化策略。",
+  settingsCardEcsTitle: "EDNS0 客户端子网 (ECS)",
+  settingsCardEcsDesc: "向上游传递截断后的客户端子网信息，获取就近的 CDN 加速节点。",
+  settingsCardProtocolSecDesc: "防范 DNS 劫持、重绑定、CNAME 伪装、放大攻击及 HTTPS 提示绕过。",
+  settingsCardAclDesc: "通过白名单/黑名单 CIDR 控制允许访问的客户端，并限制单客户端查询速率。",
+  settingsCardAuthDesc: "为 Web 控制台与管理 API 启用账号密码登录保护（独立保存生效）。",
+  settingsCardEncryptedDnsTitle: "加密 DNS 接入与自动发现",
+  settingsCardEncryptedDnsDesc:
+    "配置入站 DoH 接口、DDR 加密自动升级发现与 DoT/DoQ SNI 客户端标识。",
+  settingsCardLanDesc:
+    "通过 Hosts、DHCP 租约、mDNS 与 rDNS 解析局域网设备名，并本地处理 .local 与私有 PTR 查询。",
+  settingsCardDns64Title: "DNS64 / NAT64 协议转换",
+  settingsCardDns64Desc: "为纯 IPv6 网络将 IPv4 A 记录合成为 IPv6 AAAA 记录。",
+  settingsLanHostsDhcpTitle: "Hosts 与 DHCP 解析",
+  settingsLanDiscoveryTitle: "局域网发现与 .local 处理",
+  settingsLanPtrTitle: "私有网段反向 PTR",
+  settingsUnsavedNote: "基础、加速、安全与网络分区的修改将在点击「保存并应用」时统一热生效。",
 
   tooltipUpstreams:
     "当域名未命中缓存或规则时用于转发解析的上游服务器。支持 udp://、tcp://、tls://（DoT）和 https://（DoH）。",
