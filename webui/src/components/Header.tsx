@@ -17,6 +17,7 @@ interface HeaderProps {
 
 const NAV_ITEMS: Array<{ key: TabKey; label: () => string; icon: string }> = [
   { key: "dashboard", label: () => t("navDashboard"), icon: "i-ri-dashboard-3-line" },
+  { key: "diagnostics", label: () => t("navDiagnostics"), icon: "i-ri-heart-pulse-line" },
   { key: "logs", label: () => t("navLogs"), icon: "i-ri-terminal-box-line" },
   { key: "rules", label: () => t("navRules"), icon: "i-ri-shield-flash-line" },
   { key: "rewrites", label: () => t("navRewrites"), icon: "i-ri-arrow-left-right-line" },

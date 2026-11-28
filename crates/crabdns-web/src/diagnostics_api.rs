@@ -15,6 +15,8 @@ const UDP_PROBE_COUNT: usize = 8;
 const UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(600);
 const TCP_PROBE_TIMEOUT: Duration = Duration::from_millis(1000);
 const BOOTSTRAP_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+const HIGH_LOOPBACK_LATENCY_MS: u64 = 100;
+const HIGH_UPSTREAM_LATENCY_MS: u64 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +33,7 @@ pub enum DiagnosticStatus {
 pub enum DiagnosticCategory {
     Listener,
     Upstream,
+    Security,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -71,6 +74,7 @@ pub async fn run_system_diagnostics(
         &cfg.upstream_groups,
         &cfg.split_dns,
     );
+    let auth_item = check_webui_auth(cfg.web_auth_enabled, &cfg.web_password_hash);
 
     let items = vec![
         mdns_item,
@@ -79,6 +83,7 @@ pub async fn run_system_diagnostics(
         upstream_item,
         bootstrap_item,
         loop_item,
+        auth_item,
     ];
     let overall = compute_overall_status(&items);
     let checked_at_ms = u64::try_from(
@@ -313,13 +318,29 @@ async fn check_loopback_probe(listen_dns: SocketAddr) -> DiagnosticItem {
     let tcp_label = if tcp_ok { "OK" } else { "FAIL" };
 
     if udp_ok == UDP_PROBE_COUNT && tcp_ok {
-        DiagnosticItem {
-            id: "loopback_probe".to_string(),
-            category: DiagnosticCategory::Listener,
-            status: DiagnosticStatus::Ok,
-            summary: format!("UDP {udp_ok}/{UDP_PROBE_COUNT} · TCP {tcp_label} ({avg_ms} ms)"),
-            detail: Some(format!("Target {target}")),
-            hint: None,
+        if avg_ms >= HIGH_LOOPBACK_LATENCY_MS {
+            DiagnosticItem {
+                id: "loopback_probe".to_string(),
+                category: DiagnosticCategory::Listener,
+                status: DiagnosticStatus::Warn,
+                summary: format!("UDP {udp_ok}/{UDP_PROBE_COUNT} · TCP {tcp_label} ({avg_ms} ms)"),
+                detail: Some(format!(
+                    "Target {target} responded slowly (threshold {HIGH_LOOPBACK_LATENCY_MS} ms)."
+                )),
+                hint: Some(
+                    "Local loopback DNS latency is abnormally high; check CPU load or worker stalls."
+                        .to_string(),
+                ),
+            }
+        } else {
+            DiagnosticItem {
+                id: "loopback_probe".to_string(),
+                category: DiagnosticCategory::Listener,
+                status: DiagnosticStatus::Ok,
+                summary: format!("UDP {udp_ok}/{UDP_PROBE_COUNT} · TCP {tcp_label} ({avg_ms} ms)"),
+                detail: Some(format!("Target {target}")),
+                hint: None,
+            }
         }
     } else {
         let hint = if udp_ok > 0 && udp_ok < UDP_PROBE_COUNT {
@@ -393,13 +414,36 @@ fn check_upstream_health(state: &RouterState) -> DiagnosticItem {
         } else {
             measured.iter().sum::<u64>() / u64::try_from(measured.len()).unwrap_or(1)
         };
-        DiagnosticItem {
-            id: "upstream_health".to_string(),
-            category: DiagnosticCategory::Upstream,
-            status: DiagnosticStatus::Ok,
-            summary: format!("{total}/{total} healthy (avg {avg_lat} ms)"),
-            detail: None,
-            hint: None,
+        let slow_upstreams: Vec<String> = healthy_list
+            .iter()
+            .filter(|s| s.total_requests > 0 && s.ewma_latency_ms >= HIGH_UPSTREAM_LATENCY_MS)
+            .map(|s| format!("{} ({} ms)", s.endpoint, s.ewma_latency_ms))
+            .collect();
+        if !slow_upstreams.is_empty() || avg_lat >= HIGH_UPSTREAM_LATENCY_MS {
+            DiagnosticItem {
+                id: "upstream_health".to_string(),
+                category: DiagnosticCategory::Upstream,
+                status: DiagnosticStatus::Warn,
+                summary: format!("{total}/{total} healthy (slow: avg {avg_lat} ms)"),
+                detail: Some(if slow_upstreams.is_empty() {
+                    format!("Average upstream latency {avg_lat} ms exceeds {HIGH_UPSTREAM_LATENCY_MS} ms.")
+                } else {
+                    format!("High latency: {}", slow_upstreams.join(", "))
+                }),
+                hint: Some(
+                    "Upstream response speed is abnormally slow; check network or switch to lower-latency servers."
+                        .to_string(),
+                ),
+            }
+        } else {
+            DiagnosticItem {
+                id: "upstream_health".to_string(),
+                category: DiagnosticCategory::Upstream,
+                status: DiagnosticStatus::Ok,
+                summary: format!("{total}/{total} healthy (avg {avg_lat} ms)"),
+                detail: None,
+                hint: None,
+            }
         }
     } else if !healthy_list.is_empty() {
         DiagnosticItem {
@@ -590,6 +634,32 @@ fn check_forwarding_loop<'a>(
     }
 }
 
+fn check_webui_auth(web_auth_enabled: bool, web_password_hash: &str) -> DiagnosticItem {
+    if !web_auth_enabled || web_password_hash.trim().is_empty() {
+        DiagnosticItem {
+            id: "webui_auth".to_string(),
+            category: DiagnosticCategory::Security,
+            status: DiagnosticStatus::Warn,
+            summary: "WebUI password not configured".to_string(),
+            detail: Some(
+                "WebUI authentication is disabled or no login password is set.".to_string(),
+            ),
+            hint: Some(
+                "Enable WebUI authentication and set a strong password in Settings.".to_string(),
+            ),
+        }
+    } else {
+        DiagnosticItem {
+            id: "webui_auth".to_string(),
+            category: DiagnosticCategory::Security,
+            status: DiagnosticStatus::Ok,
+            summary: "WebUI authentication enabled".to_string(),
+            detail: None,
+            hint: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,5 +735,18 @@ mod tests {
         let item = check_loopback_probe(addr).await;
         assert_eq!(item.status, DiagnosticStatus::Ok, "{item:?}");
         let _ = tokio::join!(udp_task, tcp_task);
+    }
+
+    #[test]
+    fn test_webui_auth_check() {
+        let disabled = check_webui_auth(false, "");
+        assert_eq!(disabled.status, DiagnosticStatus::Warn);
+        assert_eq!(disabled.category, DiagnosticCategory::Security);
+
+        let empty_hash = check_webui_auth(true, "   ");
+        assert_eq!(empty_hash.status, DiagnosticStatus::Warn);
+
+        let enabled = check_webui_auth(true, "$argon2id$v=19$m=19456,t=2,p=1$abc$def");
+        assert_eq!(enabled.status, DiagnosticStatus::Ok);
     }
 }

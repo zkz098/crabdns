@@ -1,6 +1,5 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { t } from "../i18n";
-import { SystemDiagnosticsCard } from "./SystemDiagnosticsCard";
 import type { StatsResponse } from "../types/StatsResponse";
 import type { TimeSeriesPoint } from "../types/TimeSeriesPoint";
 import type { TopItem } from "../types/TopItem";
@@ -84,9 +83,6 @@ export function DashboardView(props: DashboardViewProps) {
 
       {/* 24-Hour Time-Series Chart */}
       <TimeSeriesChart points={series()} />
-
-      {/* System Health Check */}
-      <SystemDiagnosticsCard />
 
       {/* Query Distribution Bar */}
       <div

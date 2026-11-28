@@ -9,6 +9,7 @@ interface MobileNavProps {
 
 const NAV_ITEMS: Array<{ key: TabKey; label: () => string; icon: string }> = [
   { key: "dashboard", label: () => t("navDashboard"), icon: "i-ri-dashboard-3-line" },
+  { key: "diagnostics", label: () => t("navDiagnostics"), icon: "i-ri-heart-pulse-line" },
   { key: "logs", label: () => t("navLogs"), icon: "i-ri-terminal-box-line" },
   { key: "rules", label: () => t("navRules"), icon: "i-ri-shield-flash-line" },
   { key: "rewrites", label: () => t("navRewrites"), icon: "i-ri-arrow-left-right-line" },
@@ -22,7 +23,7 @@ export function MobileNav(props: MobileNavProps) {
       aria-label="Mobile Navigation"
       class="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-[#eaeaea] dark:border-[#262626] bg-white/90 dark:bg-[#0a0a0a]/90 backdrop-blur-xl pb-[env(safe-area-inset-bottom)]"
     >
-      <div class="grid grid-cols-6 h-15">
+      <div class="grid grid-cols-7 h-15">
         <For each={NAV_ITEMS}>
           {(item) => {
             const active = () => props.tab === item.key;

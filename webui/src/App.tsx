@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { ClientsView } from "./components/ClientsView";
 import { DashboardView } from "./components/DashboardView";
+import { DiagnosticsView } from "./components/DiagnosticsView";
 import { Header } from "./components/Header";
 import { LoginView } from "./components/LoginView";
 import { LogsView } from "./components/LogsView";
@@ -1755,6 +1756,10 @@ export default function App() {
                 onResetStats={resetStats}
                 statsResetMsg={statsResetMsg()}
               />
+            </Show>
+
+            <Show when={tab() === "diagnostics"}>
+              <DiagnosticsView />
             </Show>
 
             <Show when={tab() === "clients"}>
