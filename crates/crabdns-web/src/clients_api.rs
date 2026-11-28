@@ -8,7 +8,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use crabdns_core::{
-    BlockMode, ClientGroup, ClientProfile, ClientRegistry, UpstreamPolicy,
+    BlockMode, ClientGroup, ClientProfile, ClientRegistry, UpstreamPolicy, normalize_service_ids,
     validate_client_identifier,
 };
 use crabdns_storage::{ClientActivityStats, ClientProtocolCounts, TopItem};
@@ -81,6 +81,8 @@ pub struct ClientProfilePayload {
     #[serde(default)]
     pub safesearch_enabled: Option<bool>,
     #[serde(default)]
+    pub blocked_services: Option<Vec<String>>,
+    #[serde(default)]
     pub upstream_policy: UpstreamPolicy,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -106,6 +108,8 @@ pub struct ClientGroupPayload {
     pub cname_cloaking_blocking: Option<bool>,
     #[serde(default)]
     pub safesearch_enabled: Option<bool>,
+    #[serde(default)]
+    pub blocked_services: Option<Vec<String>>,
     #[serde(default)]
     pub upstream_policy: UpstreamPolicy,
 }
@@ -168,6 +172,10 @@ fn normalize_client(id: String, payload: ClientProfilePayload) -> ApiResult<Clie
         upstreams: clean_list(payload.upstreams),
         block_mode: payload.block_mode,
         safesearch_enabled: payload.safesearch_enabled,
+        blocked_services: payload
+            .blocked_services
+            .as_deref()
+            .map(normalize_service_ids),
         upstream_policy: payload.upstream_policy.normalized(),
         tags: clean_list(payload.tags),
     })
@@ -192,6 +200,10 @@ fn normalize_group(id: String, payload: ClientGroupPayload) -> ApiResult<ClientG
         block_mode: payload.block_mode,
         cname_cloaking_blocking: payload.cname_cloaking_blocking,
         safesearch_enabled: payload.safesearch_enabled,
+        blocked_services: payload
+            .blocked_services
+            .as_deref()
+            .map(normalize_service_ids),
         upstream_policy: payload.upstream_policy.normalized(),
     })
 }

@@ -10,7 +10,8 @@ use crate::clients::ResolvedClientPolicy;
 use crate::cookies::CookieCheck;
 use crate::dns64::{build_dns64_response, needs_dns64_synthesis};
 use crate::edns::{
-    EDE_PROHIBITED, attach_ede_to_wire, effective_udp_payload_limit, truncate_dns_response,
+    EDE_BLOCKED, EDE_PROHIBITED, attach_ede_to_wire, effective_udp_payload_limit,
+    truncate_dns_response,
 };
 use crate::error::Result;
 use crate::filter::FilterDecision;
@@ -158,6 +159,43 @@ impl DnsPipeline {
             Some("safesearch".to_string()),
             None,
             "NOERROR",
+            extract_answer_summaries(&resp),
+        );
+        Ok(Some(resp))
+    }
+
+    pub(crate) fn check_blocked_services_interceptor(
+        &self,
+        request: &Message,
+        meta: &LogMeta,
+        policy: Option<&ResolvedClientPolicy>,
+        blocking_disabled: bool,
+        block_mode: crate::config::BlockMode,
+    ) -> Result<Option<Vec<u8>>> {
+        if blocking_disabled {
+            return Ok(None);
+        }
+
+        let matcher = self.blocked_services.load();
+        let client_override = policy.and_then(|p| p.blocked_services.as_deref());
+        let Some(service_id) = matcher.match_domain(&meta.domain, client_override) else {
+            return Ok(None);
+        };
+
+        let (resp, rcode) = build_blocked_response(request, meta.qtype, block_mode)?;
+        let resp = self.maybe_attach_ede(
+            request,
+            resp,
+            EDE_BLOCKED,
+            Some("Blocked by preset service policy"),
+        );
+        self.emit_log(
+            meta,
+            QueryOutcome::Blocked,
+            Some(format!("service:{service_id}")),
+            Some("blocked-services".to_string()),
+            None,
+            rcode,
             extract_answer_summaries(&resp),
         );
         Ok(Some(resp))

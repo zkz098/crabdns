@@ -2,4 +2,4 @@
 import type { BlockMode } from "./BlockMode";
 import type { UpstreamPolicy } from "./UpstreamPolicy";
 
-export type ClientProfile = { id: string, name: string, identifiers: Array<string>, group_id: string | null, blocking_enabled: boolean | null, use_global_rules: boolean | null, custom_rules: string, upstreams: Array<string>, block_mode: BlockMode | null, safesearch_enabled: boolean | null, upstream_policy: UpstreamPolicy, tags: Array<string>, };
+export type ClientProfile = { id: string, name: string, identifiers: Array<string>, group_id: string | null, blocking_enabled: boolean | null, use_global_rules: boolean | null, custom_rules: string, upstreams: Array<string>, block_mode: BlockMode | null, safesearch_enabled: boolean | null, blocked_services: Array<string> | null, upstream_policy: UpstreamPolicy, tags: Array<string>, };

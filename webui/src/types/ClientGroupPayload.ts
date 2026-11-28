@@ -2,4 +2,4 @@
 import type { BlockMode } from "./BlockMode";
 import type { UpstreamPolicy } from "./UpstreamPolicy";
 
-export type ClientGroupPayload = { name: string, description: string, blocking_enabled: boolean, use_global_rules: boolean, custom_rules: string, upstreams: Array<string>, block_mode: BlockMode | null, cname_cloaking_blocking: boolean | null, safesearch_enabled: boolean | null, upstream_policy: UpstreamPolicy, };
+export type ClientGroupPayload = { name: string, description: string, blocking_enabled: boolean, use_global_rules: boolean, custom_rules: string, upstreams: Array<string>, block_mode: BlockMode | null, cname_cloaking_blocking: boolean | null, safesearch_enabled: boolean | null, blocked_services: Array<string> | null, upstream_policy: UpstreamPolicy, };

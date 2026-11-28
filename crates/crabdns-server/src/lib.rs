@@ -61,6 +61,7 @@ pub struct RunningServer {
     dhcp_watch_task: JoinHandle<()>,
     neighbor_watch_task: JoinHandle<()>,
     mdns_watch_task: JoinHandle<()>,
+    llmnr_watch_task: JoinHandle<()>,
     cache_persist_task: JoinHandle<()>,
     log_prune_task: JoinHandle<()>,
     cf_cdn_task: JoinHandle<()>,
@@ -102,6 +103,7 @@ impl RunningServer {
         join_with_timeout(self.dhcp_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.neighbor_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.mdns_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
+        join_with_timeout(self.llmnr_watch_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.cache_persist_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.log_prune_task, GRACEFUL_DRAIN_TIMEOUT).await;
         join_with_timeout(self.cf_cdn_task, GRACEFUL_DRAIN_TIMEOUT).await;
@@ -291,6 +293,7 @@ fn configure_pipeline(
         }
     }
     pipeline.set_mdns_enabled(cfg.mdns_enabled);
+    pipeline.set_llmnr_enabled(cfg.llmnr_enabled);
     pipeline.reload_private_ptr(
         cfg.private_ptr_enabled,
         &cfg.private_ptr_upstreams,
@@ -303,6 +306,8 @@ fn configure_pipeline(
     pipeline.set_block_local_domains(cfg.block_local_domains);
     pipeline.set_suppress_local_domain_logs(cfg.suppress_local_domain_logs);
     pipeline.set_safesearch(cfg.safesearch.clone());
+    pipeline.set_blocked_services(cfg.blocked_services.clone());
+    pipeline.set_recursive(&cfg.recursive, cfg.upstream_timeout_ms)?;
     pipeline.reload_dns64(cfg.dns64_enabled, &cfg.dns64_prefixes)?;
     pipeline.set_svcb_sanitization(cfg.svcb_strip_ech, cfg.svcb_strip_hints);
     pipeline.reload_cf_cdn(cfg.cf_cdn.clone());
@@ -551,6 +556,7 @@ struct BackgroundTasks {
     dhcp_watch: JoinHandle<()>,
     neighbor_watch: JoinHandle<()>,
     mdns_watch: JoinHandle<()>,
+    llmnr_watch: JoinHandle<()>,
     cache_persist: JoinHandle<()>,
     log_prune: JoinHandle<()>,
     cf_cdn_speedtest: JoinHandle<()>,
@@ -602,6 +608,11 @@ fn spawn_background_tasks(
             shutdown_rx.clone(),
         ),
         mdns_watch: tasks::spawn_mdns_listener_task(
+            Arc::clone(&config),
+            Arc::clone(&pipeline),
+            shutdown_rx.clone(),
+        ),
+        llmnr_watch: tasks::spawn_llmnr_listener_task(
             Arc::clone(&config),
             Arc::clone(&pipeline),
             shutdown_rx.clone(),
@@ -763,6 +774,7 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
         dhcp_watch_task: bg.dhcp_watch,
         neighbor_watch_task: bg.neighbor_watch,
         mdns_watch_task: bg.mdns_watch,
+        llmnr_watch_task: bg.llmnr_watch,
         cache_persist_task: bg.cache_persist,
         log_prune_task: bg.log_prune,
         cf_cdn_task: bg.cf_cdn_speedtest,

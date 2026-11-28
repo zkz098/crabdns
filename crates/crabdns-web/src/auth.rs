@@ -3,9 +3,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use argon2::{
-    Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
-};
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use aws_lc_rs::pbkdf2;
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use axum::Json;
@@ -494,8 +492,8 @@ pub async fn login(
     }
 
     let user_ok = payload.username.trim() == cfg.web_username;
-    let password_for_upgrade = (user_ok && cfg.web_password_hash.starts_with("pbkdf2$"))
-        .then(|| payload.password.clone());
+    let password_for_upgrade =
+        (user_ok && cfg.web_password_hash.starts_with("pbkdf2$")).then(|| payload.password.clone());
     let pass_ok = if user_ok {
         let password = payload.password;
         let stored_hash = cfg.web_password_hash.clone();

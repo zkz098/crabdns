@@ -2,33 +2,34 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
 use foldhash::fast::RandomState;
 use hickory_proto::rr::RecordType;
 use tokio::sync::{Notify, Semaphore, mpsc};
 
 use crate::acl::{AccessController, IpNet, parse_cidr_list};
+use crate::blocked_services::BlockedServicesMatcher;
 use crate::cache::{CacheKey, DnsCache};
 use crate::cf_cdn::{CfCdnConfig, CfCdnManager};
-use crate::clients::{
-    ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry, ip_to_ptr_domain,
-};
+use crate::clients::{ClientGroup, ClientNameResolver, ClientProfile, ClientRegistry};
 use crate::clock::monotonic_now_ms;
 use crate::config::{BlockMode, SplitDnsMatchMode, SplitDnsRule, UpstreamGroup, UpstreamStrategy};
 use crate::cookies::DnsCookieEngine;
-use crate::device_names::{DhcpLeaseTable, MdnsNameResolver};
+use crate::device_names::DhcpLeaseTable;
 use crate::dns64::Dns64Config;
 use crate::dnssec::DnssecValidator;
 use crate::edns::{DEFAULT_MAX_UDP_PAYLOAD, EcsConfig};
 use crate::error::Result;
 use crate::filter::{FilterDecision, FilterEngine};
 use crate::filter_rules::FilterQueryContext;
-use crate::lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter};
+use crate::lan::{DdrConfig, HostsTable, PrivatePtrRouter};
+use crate::llmnr::LlmnrNameResolver;
+use crate::mdns::MdnsNameResolver;
 use crate::neighbor::NeighborTable;
+use crate::recursor::BuiltinRecursor;
 use crate::rrl::{ResponseRateLimiter, RrlConfig};
 use crate::safesearch::SafeSearchConfig;
-use crate::security::is_private_or_special_ip;
 use crate::singleflight::Singleflight;
 use crate::split_dns::SplitUpstreamRouter;
 use crate::upstream::UpstreamPool;
@@ -74,6 +75,9 @@ pub struct DnsPipeline {
     pub(crate) mdns_enabled: AtomicBool,
     pub(crate) mdns_resolver: Arc<MdnsNameResolver>,
     pub(crate) mdns_notify: Arc<Notify>,
+    pub(crate) llmnr_enabled: AtomicBool,
+    pub(crate) llmnr_resolver: Arc<LlmnrNameResolver>,
+    pub(crate) llmnr_notify: Arc<Notify>,
     pub(crate) private_ptr_router: ArcSwap<PrivatePtrRouter>,
     pub(crate) block_local_domains: AtomicBool,
     pub(crate) suppress_local_domain_logs: AtomicBool,
@@ -81,6 +85,7 @@ pub struct DnsPipeline {
     pub(crate) dns_rebinding_protection: AtomicBool,
     pub(crate) block_any_queries: AtomicBool,
     pub(crate) safesearch: ArcSwap<SafeSearchConfig>,
+    pub(crate) blocked_services: ArcSwap<BlockedServicesMatcher>,
     pub(crate) dns64: ArcSwap<Dns64Config>,
     pub(crate) svcb_strip_ech: AtomicBool,
     pub(crate) svcb_strip_hints: AtomicBool,
@@ -90,6 +95,7 @@ pub struct DnsPipeline {
     pub(crate) dns_cookies: DnsCookieEngine,
     pub(crate) max_udp_payload_size: AtomicU16,
     pub(crate) rrl: ResponseRateLimiter,
+    pub(crate) recursor: ArcSwapOption<BuiltinRecursor>,
     pub(crate) acme_dns_challenges: Arc<DashMap<String, Vec<String>, RandomState>>,
     pub(crate) latency: QueryLatencyHistogram,
     counters: ServerRuntimeCounters,
@@ -151,6 +157,9 @@ impl DnsPipeline {
             mdns_enabled: AtomicBool::new(false),
             mdns_resolver: Arc::new(MdnsNameResolver::new()),
             mdns_notify: Arc::new(Notify::new()),
+            llmnr_enabled: AtomicBool::new(false),
+            llmnr_resolver: Arc::new(LlmnrNameResolver::new()),
+            llmnr_notify: Arc::new(Notify::new()),
             private_ptr_router: ArcSwap::from_pointee(PrivatePtrRouter::default()),
             block_local_domains: AtomicBool::new(false),
             suppress_local_domain_logs: AtomicBool::new(false),
@@ -158,6 +167,7 @@ impl DnsPipeline {
             dns_rebinding_protection: AtomicBool::new(false),
             block_any_queries: AtomicBool::new(false),
             safesearch: ArcSwap::from_pointee(SafeSearchConfig::default()),
+            blocked_services: ArcSwap::from_pointee(BlockedServicesMatcher::default()),
             dns64: ArcSwap::from_pointee(Dns64Config::default()),
             svcb_strip_ech: AtomicBool::new(false),
             svcb_strip_hints: AtomicBool::new(false),
@@ -167,6 +177,7 @@ impl DnsPipeline {
             dns_cookies: DnsCookieEngine::new(),
             max_udp_payload_size: AtomicU16::new(DEFAULT_MAX_UDP_PAYLOAD),
             rrl: ResponseRateLimiter::default(),
+            recursor: ArcSwapOption::empty(),
             acme_dns_challenges: Arc::new(DashMap::with_hasher(RandomState::default())),
             latency: QueryLatencyHistogram::default(),
             counters: ServerRuntimeCounters::default(),
@@ -255,70 +266,6 @@ impl DnsPipeline {
                 p.group_id.clone(),
             )
         })
-    }
-
-    pub(crate) fn resolve_unconfigured_client_name(
-        &self,
-        ip: IpAddr,
-    ) -> (Option<String>, &'static str) {
-        if self.hosts_enabled.load(Ordering::Relaxed)
-            && let Some(HostsMatch::Ptr(name)) = self
-                .hosts_table
-                .load()
-                .lookup(&ip_to_ptr_domain(ip), RecordType::PTR)
-        {
-            return (Some(name), "hosts");
-        }
-
-        if self.dhcp_leases_enabled.load(Ordering::Relaxed)
-            && let Some(name) = self.dhcp_leases.load().lookup(ip)
-        {
-            return (Some(name.to_string()), "dhcp");
-        }
-
-        if self.mdns_enabled.load(Ordering::Relaxed) {
-            match self.mdns_resolver.lookup_cached(ip) {
-                Some(Some(name)) => return (Some(name), "mdns"),
-                Some(None) => {}
-                None => {
-                    if is_private_or_special_ip(ip) {
-                        self.mdns_resolver.spawn_lookup_if_needed(ip);
-                    }
-                }
-            }
-        }
-
-        match self.name_resolver.lookup_cached(ip) {
-            Some(Some(name)) => return (Some(name), "rdns"),
-            Some(None) => return (None, "unknown"),
-            None => {}
-        }
-
-        if self.rdns_enabled.load(Ordering::Relaxed)
-            && let Some(pool) = self.rdns_upstream_for(ip)
-        {
-            self.name_resolver.spawn_rdns_if_needed(ip, pool);
-        }
-        (None, "unknown")
-    }
-
-    fn rdns_upstream_for(&self, ip: IpAddr) -> Option<Arc<UpstreamPool>> {
-        if !is_private_or_special_ip(ip)
-            || ip.is_loopback()
-            || ip.is_unspecified()
-            || ip.is_multicast()
-        {
-            return None;
-        }
-        let ptr_router = self.private_ptr_router.load();
-        if let Some(pool) = &ptr_router.pool {
-            return Some(Arc::clone(pool));
-        }
-        if ptr_router.enabled {
-            return None;
-        }
-        let upstream = self.upstream.load_full();
-        upstream.has_private_endpoint().then_some(upstream)
     }
 
     pub fn evaluate_filter_for_client(

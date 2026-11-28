@@ -598,6 +598,7 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
             block_mode: None,
             cname_cloaking_blocking: None,
             safesearch_enabled: None,
+            blocked_services: None,
             upstream_policy: crabdns_core::UpstreamPolicy::default(),
         }])
         .expect("save groups");
@@ -613,6 +614,7 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
             upstreams: Vec::new(),
             block_mode: None,
             safesearch_enabled: None,
+            blocked_services: None,
             upstream_policy: crabdns_core::UpstreamPolicy::default(),
             tags: vec!["tablet".to_string()],
         }])

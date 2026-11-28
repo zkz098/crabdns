@@ -429,6 +429,7 @@ async fn test_client_split_precedence_and_policy_merge() {
                 upstreams: vec![format!("udp://{client_addr}")],
                 block_mode: None,
                 safesearch_enabled: None,
+                blocked_services: None,
                 upstream_policy: UpstreamPolicy {
                     disable_ipv6: Some(true),
                     ..Default::default()
@@ -707,6 +708,7 @@ async fn test_multidim_matching_exclusions_keyword_regexp_and_disable_ipv6() {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
+                blocked_services: None,
                 upstream_policy: UpstreamPolicy::default(),
                 tags: vec!["streaming".to_string()],
             }],
@@ -721,6 +723,7 @@ async fn test_multidim_matching_exclusions_keyword_regexp_and_disable_ipv6() {
                 block_mode: None,
                 cname_cloaking_blocking: None,
                 safesearch_enabled: None,
+                blocked_services: None,
                 upstream_policy: UpstreamPolicy::default(),
             }],
             500,

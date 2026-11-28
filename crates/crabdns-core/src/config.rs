@@ -4,9 +4,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::blocked_services::BlockedServicesConfig;
 use crate::cf_cdn::CfCdnConfig;
 use crate::dnssec_anchors::DnssecNta;
 use crate::error::{CoreError, Result};
+use crate::recursor::RecursiveConfig;
 use crate::safesearch::SafeSearchConfig;
 
 pub use crate::split_dns_config::{
@@ -167,6 +169,8 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub mdns_enabled: bool,
     #[serde(default)]
+    pub llmnr_enabled: bool,
+    #[serde(default)]
     pub private_ptr_enabled: bool,
     #[serde(default)]
     pub private_ptr_upstreams: Vec<String>,
@@ -190,6 +194,8 @@ pub struct RuntimeConfig {
     pub rdns_enabled: bool,
     #[serde(default)]
     pub safesearch: SafeSearchConfig,
+    #[serde(default)]
+    pub blocked_services: BlockedServicesConfig,
     #[serde(default)]
     pub dns64_enabled: bool,
     #[serde(default = "default_dns64_prefixes")]
@@ -240,6 +246,8 @@ pub struct RuntimeConfig {
     pub dnssec_strict_clock: bool,
     #[serde(default)]
     pub dnssec_auto_rollover: bool,
+    #[serde(default)]
+    pub recursive: RecursiveConfig,
 }
 
 /// Top-level `CrabDNS` configuration combining [`BootstrapConfig`] and [`RuntimeConfig`].
@@ -448,6 +456,7 @@ impl Default for RuntimeConfig {
             dhcp_leases_forward_enabled: false,
             dhcp_leases_domain: default_dhcp_leases_domain(),
             mdns_enabled: false,
+            llmnr_enabled: false,
             private_ptr_enabled: false,
             private_ptr_upstreams: Vec::new(),
             block_local_domains: false,
@@ -460,6 +469,7 @@ impl Default for RuntimeConfig {
             trusted_forwarders: Vec::new(),
             rdns_enabled: true,
             safesearch: SafeSearchConfig::default(),
+            blocked_services: BlockedServicesConfig::default(),
             dns64_enabled: false,
             dns64_prefixes: default_dns64_prefixes(),
             svcb_strip_ech: false,
@@ -485,6 +495,7 @@ impl Default for RuntimeConfig {
             serve_stale_enabled: true,
             dnssec_strict_clock: false,
             dnssec_auto_rollover: false,
+            recursive: RecursiveConfig::default(),
         }
     }
 }

@@ -417,6 +417,13 @@ export function NetworkTlsSettingsSection(props: SettingsViewProps) {
               onChange={props.onMdnsEnabledChange}
             />
             <ToggleRow
+              label={t("settingsLlmnrLabel")}
+              tooltip={t("tooltipLlmnr")}
+              tooltipAlign="right"
+              checked={props.llmnrEnabled}
+              onChange={props.onLlmnrEnabledChange}
+            />
+            <ToggleRow
               label={t("settingsRdnsLabel")}
               tooltip={t("tooltipRdns")}
               tooltipAlign="right"

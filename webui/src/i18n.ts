@@ -439,6 +439,14 @@ const en = {
   settingsAcmeIssuedOk: "ACME certificate issued and loaded.",
   settingsRdnsLabel: "Async Reverse DNS (rDNS) Lookup for LAN Clients",
   settingsSafeSearchTitle: "SafeSearch & Response Adaptation",
+  settingsBlockedServicesTitle: "Preset Blocked Services",
+  settingsBlockedServicesDesc:
+    "Block popular apps and platforms with one click globally or per client group.",
+  settingsBlockedServicesEnabled: "Enable Preset Blocked Services",
+  settingsBlockedServicesSelectAll: "Select All",
+  settingsBlockedServicesClear: "Clear",
+  clientsBlockedServicesInherit: "Inherit",
+  clientsBlockedServicesCustom: "Custom",
   settingsSafeSearchDesc:
     "Force SafeSearch on major search engines and YouTube, enable DNS64 synthesis for IPv6-only networks, or strip ECH/IP hints from HTTPS/SVCB records.",
   settingsSafeSearchEnabled: "Enable SafeSearch",
@@ -555,6 +563,9 @@ const en = {
   settingsDhcpLeasesDomainLabel: "DHCP Local Domain Suffix",
   settingsDhcpLeasesPathLabel: "DHCP Leases Path (dnsmasq / ISC / Kea)",
   settingsMdnsLabel: "Discover LAN Hostnames via mDNS (.local)",
+  settingsLlmnrLabel: "Discover & Resolve LAN Hostnames via LLMNR",
+  tooltipLlmnr:
+    "Listen and query Link-Local Multicast Name Resolution (UDP 5355) for single-label Windows/LAN hostnames.",
   settingsSniHostnamesLabel: "DoT / DoQ SNI ClientID Base Hostnames (one per line)",
 
   rewritesTitle: "DNS Rewrites",
@@ -627,6 +638,7 @@ const en = {
   clientsSourceHosts: "Hosts",
   clientsSourceDhcp: "DHCP",
   clientsSourceMdns: "mDNS",
+  clientsSourceLlmnr: "LLMNR",
   clientsSourceRdns: "rDNS",
   clientsSourceUnknown: "Unresolved",
 
@@ -706,6 +718,18 @@ const en = {
   settingsCardBasicBehaviorDesc:
     "Configure upstream scheduling, timeout, blocked response mode, and query log retention.",
   settingsCardBootstrapTitle: "Bootstrap DNS",
+  settingsRecursiveTitle: "Built-in Recursive Resolver",
+  settingsRecursiveDesc:
+    "Resolve global DNS queries directly from IANA root servers without third-party public resolvers (Split DNS and client overrides still apply).",
+  settingsRecursiveEnabled: "Enable Built-in Recursive Resolver",
+  settingsRecursiveQnameLabel: "QNAME Minimization (RFC 9156)",
+  settingsRecursiveQnameRelaxed: "Relaxed (Recommended)",
+  settingsRecursiveQnameStrict: "Strict",
+  settingsRecursiveDnssecLabel: "Recursor DNSSEC Validation",
+  settingsRecursiveCaseRandLabel: "0x20 Case Randomization",
+  settingsRecursiveProbeBtn: "Test Root Reachability",
+  settingsRecursiveProbing: "Probing Root Servers...",
+  settingsRecursiveProbeSummary: "Reachable",
   settingsCardCacheTitle: "DNS Cache Acceleration",
   settingsCardCacheDesc:
     "Tune in-memory cache capacity, TTL bounds, optimistic refresh, hot-domain prefetch, and disk persistence.",
@@ -1244,6 +1268,13 @@ const zhCN: Record<TranslationKey, string> = {
   settingsAcmeIssuedOk: "ACME 证书签发并热加载成功。",
   settingsRdnsLabel: "启用局域网客户端异步反向 DNS (rDNS) 主机名解析",
   settingsSafeSearchTitle: "SafeSearch 安全搜索与响应适配",
+  settingsBlockedServicesTitle: "预设服务拦截",
+  settingsBlockedServicesDesc: "一键拦截常见应用与平台（支持全局及按客户端/分组覆盖）。",
+  settingsBlockedServicesEnabled: "启用预设服务拦截",
+  settingsBlockedServicesSelectAll: "全选",
+  settingsBlockedServicesClear: "清空",
+  clientsBlockedServicesInherit: "继承上级",
+  clientsBlockedServicesCustom: "自定义",
   settingsSafeSearchDesc:
     "为搜索引擎与 YouTube 强制开启 SafeSearch，为纯 IPv6 网络启用 DNS64 合成，或清洗 HTTPS/SVCB 记录中的 ECH 与 IP Hint。",
   settingsSafeSearchEnabled: "启用 SafeSearch",
@@ -1357,6 +1388,9 @@ const zhCN: Record<TranslationKey, string> = {
   settingsDhcpLeasesDomainLabel: "DHCP 本地域名后缀",
   settingsDhcpLeasesPathLabel: "DHCP Lease 文件路径（dnsmasq / ISC / Kea）",
   settingsMdnsLabel: "启用 mDNS (.local) 局域网设备名发现",
+  settingsLlmnrLabel: "启用 LLMNR 局域网单标签主机名发现与解析",
+  tooltipLlmnr:
+    "监听并按需发起 LLMNR (UDP 5355) 组播查询，用于发现和解析 Windows/局域网单标签主机名。",
   settingsSniHostnamesLabel: "DoT / DoQ SNI ClientID 根域名（每行一个）",
 
   rewritesTitle: "DNS 重写管理",
@@ -1428,6 +1462,7 @@ const zhCN: Record<TranslationKey, string> = {
   clientsSourceHosts: "Hosts",
   clientsSourceDhcp: "DHCP",
   clientsSourceMdns: "mDNS",
+  clientsSourceLlmnr: "LLMNR",
   clientsSourceRdns: "rDNS",
   clientsSourceUnknown: "未解析",
 
@@ -1506,6 +1541,18 @@ const zhCN: Record<TranslationKey, string> = {
   settingsCardBasicBehaviorTitle: "解析策略与基础行为",
   settingsCardBasicBehaviorDesc: "设置上游调度方式、超时时间、拦截响应模式及日志保留时长。",
   settingsCardBootstrapTitle: "Bootstrap 引导解析",
+  settingsRecursiveTitle: "内置递归解析器",
+  settingsRecursiveDesc:
+    "直接从 IANA 根服务器迭代解析全球域名，无需依赖第三方公共 DNS（Split DNS 与客户端策略覆盖仍优先生效）。",
+  settingsRecursiveEnabled: "启用内置递归解析器",
+  settingsRecursiveQnameLabel: "QNAME 最小化 (RFC 9156)",
+  settingsRecursiveQnameRelaxed: "宽松模式（推荐）",
+  settingsRecursiveQnameStrict: "严格模式",
+  settingsRecursiveDnssecLabel: "递归器 DNSSEC 验证",
+  settingsRecursiveCaseRandLabel: "0x20 大小写随机化",
+  settingsRecursiveProbeBtn: "测试根服务器可达性",
+  settingsRecursiveProbing: "正在探测根服务器...",
+  settingsRecursiveProbeSummary: "可达",
   settingsCardCacheTitle: "DNS 缓存加速",
   settingsCardCacheDesc: "调整内存缓存容量、TTL 范围、乐观刷新、热点预取及磁盘持久化策略。",
   settingsCardEcsTitle: "EDNS0 客户端子网 (ECS)",

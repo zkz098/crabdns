@@ -56,6 +56,8 @@ pub struct ClientGroup {
     #[serde(default)]
     pub safesearch_enabled: Option<bool>,
     #[serde(default)]
+    pub blocked_services: Option<Vec<String>>,
+    #[serde(default)]
     pub upstream_policy: UpstreamPolicy,
 }
 
@@ -80,6 +82,8 @@ pub struct ClientProfile {
     pub block_mode: Option<BlockMode>,
     #[serde(default)]
     pub safesearch_enabled: Option<bool>,
+    #[serde(default)]
+    pub blocked_services: Option<Vec<String>>,
     #[serde(default)]
     pub upstream_policy: UpstreamPolicy,
     #[serde(default)]
@@ -148,6 +152,7 @@ pub struct ResolvedClientPolicy {
     pub block_mode: Option<BlockMode>,
     pub cname_cloaking_blocking: Option<bool>,
     pub safesearch_enabled: Option<bool>,
+    pub blocked_services: Option<Vec<String>>,
     pub client_filter: Option<Arc<FilterEngine>>,
     pub group_filter: Option<Arc<FilterEngine>>,
     pub upstream_pool: Option<(String, Arc<UpstreamPool>)>,
@@ -395,6 +400,10 @@ fn build_resolved_policy(
     let safesearch_enabled = client
         .safesearch_enabled
         .or_else(|| group_ref.and_then(|g| g.safesearch_enabled));
+    let blocked_services = client
+        .blocked_services
+        .clone()
+        .or_else(|| group_ref.and_then(|g| g.blocked_services.clone()));
 
     let client_filter = (!client.custom_rules.trim().is_empty()).then(|| {
         Arc::new(FilterEngine::from_named_text(
@@ -447,6 +456,7 @@ fn build_resolved_policy(
         block_mode,
         cname_cloaking_blocking,
         safesearch_enabled,
+        blocked_services,
         client_filter,
         group_filter,
         upstream_pool,
@@ -623,6 +633,7 @@ mod tests {
             block_mode: Some(BlockMode::NxDomain),
             cname_cloaking_blocking: Some(false),
             safesearch_enabled: None,
+            blocked_services: None,
             upstream_policy: UpstreamPolicy::default(),
         }];
         let clients = vec![
@@ -637,6 +648,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
+                blocked_services: None,
                 upstream_policy: UpstreamPolicy::default(),
                 tags: Vec::new(),
             },
@@ -651,6 +663,7 @@ mod tests {
                 upstreams: vec!["udp://1.1.1.1:53".to_string()],
                 block_mode: Some(BlockMode::NoData),
                 safesearch_enabled: None,
+                blocked_services: None,
                 upstream_policy: UpstreamPolicy::default(),
                 tags: vec!["work".to_string()],
             },
@@ -714,6 +727,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
+                blocked_services: None,
                 upstream_policy: UpstreamPolicy::default(),
                 tags: Vec::new(),
             },
@@ -728,6 +742,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
+                blocked_services: None,
                 upstream_policy: UpstreamPolicy::default(),
                 tags: Vec::new(),
             },

@@ -10,7 +10,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use crabdns_core::{
-    CacheStats, Config, DnsPipeline, FilterStats, QueryEvent, UpstreamCapabilities, UpstreamStatus,
+    BlockedServiceInfo, CacheStats, Config, DnsPipeline, FilterStats, QueryEvent, RootProbeReport,
+    UpstreamCapabilities, UpstreamStatus, list_blocked_services, probe_root_servers,
     probe_upstreams as probe_upstream_caps,
 };
 use crabdns_storage::{LogsFilter, StatsSnapshot, StorageEngine};
@@ -25,6 +26,7 @@ pub mod auth;
 pub mod backup_api;
 pub mod clients_api;
 pub mod config_api;
+mod config_helpers;
 pub mod config_history_api;
 pub mod controls;
 pub mod diagnostics_api;
@@ -203,6 +205,7 @@ pub fn build_router_with_managers(
         .route("/api/rules", get(get_rules).put(update_rules))
         .route("/api/rules/quick", post(controls::quick_rule))
         .route("/api/rules/test", post(controls::test_rule))
+        .route("/api/blocked-services", get(get_blocked_services))
         .route(
             "/api/rewrites",
             get(rewrites_api::list_rewrites).post(rewrites_api::create_rewrite),
@@ -274,6 +277,7 @@ pub fn build_router_with_managers(
             get(get_upstream_health).post(probe_upstreams),
         )
         .route("/api/upstreams/probe", post(probe_upstream_capabilities))
+        .route("/api/recursive/probe", post(probe_recursive_roots))
         .route("/api/auth/settings", put(auth::update_auth))
         .route("/api/update/status", get(update_api::get_update_status))
         .route("/api/update/check", post(update_api::check_update))
@@ -458,6 +462,16 @@ async fn probe_upstream_capabilities(
     Ok(Json(results))
 }
 
+async fn probe_recursive_roots(State(state): State<RouterState>) -> Json<RootProbeReport> {
+    let timeout_ms = state
+        .app
+        .config
+        .load()
+        .upstream_timeout_ms
+        .clamp(500, 3_000);
+    Json(probe_root_servers(timeout_ms).await)
+}
+
 async fn health(State(state): State<RouterState>) -> Json<HealthResponse> {
     let filter_stats = state.app.pipeline.filter().stats();
     Json(HealthResponse {
@@ -479,6 +493,10 @@ pub(crate) fn build_stats_response(state: &RouterState) -> StatsResponse {
 
 async fn get_stats(State(state): State<RouterState>) -> Json<StatsResponse> {
     Json(build_stats_response(&state))
+}
+
+async fn get_blocked_services() -> Json<Vec<BlockedServiceInfo>> {
+    Json(list_blocked_services())
 }
 
 async fn get_logs(

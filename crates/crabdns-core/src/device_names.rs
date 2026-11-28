@@ -1,37 +1,14 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
 
-use dashmap::DashMap;
-use dashmap::mapref::entry::Entry;
 use foldhash::fast::RandomState;
-use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-use hickory_proto::rr::{Name, RData, RecordType};
-use moka::sync::Cache;
-use tokio::net::UdpSocket;
-use tokio::sync::Semaphore;
+use hickory_proto::rr::RecordType;
 
-use crate::clients::ip_to_ptr_domain;
 use crate::error::Result;
 use crate::lan::{HostsMatch, parse_ptr_ip};
+use crate::mdns::clean_hostname;
 use crate::neighbor::normalize_mac;
-use crate::upstream::next_tx_id;
-
-const MDNS_CACHE_CAPACITY: u64 = 4096;
-const MDNS_CACHE_TTL: Duration = Duration::from_mins(15);
-const MDNS_QUERY_TIMEOUT: Duration = Duration::from_millis(700);
-const MAX_INFLIGHT_MDNS: usize = 16;
-const MAX_PASSIVE_MDNS_ENTRIES: usize = 4096;
-const MDNS_V4_ADDR: SocketAddr =
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353));
-const MDNS_V6_ADDR: SocketAddr = SocketAddr::V6(SocketAddrV6::new(
-    Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb),
-    5353,
-    0,
-    0,
-));
 
 pub const DEFAULT_DHCP_LEASES_PATH: &str = "/var/lib/misc/dnsmasq.leases";
 pub const OPENWRT_DHCP_LEASES_PATH: &str = "/tmp/dhcp.leases";
@@ -387,199 +364,9 @@ impl IscLeaseBlock {
     }
 }
 
-fn clean_hostname(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().trim_end_matches('.').trim();
-    if trimmed.is_empty() || trimmed == "*" || trimmed == "?" {
-        return None;
-    }
-    if trimmed.parse::<IpAddr>().is_ok() {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
-pub struct MdnsNameResolver {
-    passive: Arc<DashMap<IpAddr, String, RandomState>>,
-    active_cache: Cache<IpAddr, Option<String>, RandomState>,
-    inflight: Arc<DashMap<IpAddr, (), RandomState>>,
-    limiter: Arc<Semaphore>,
-}
-
-struct MdnsInflightGuard {
-    inflight: Arc<DashMap<IpAddr, (), RandomState>>,
-    ip: IpAddr,
-}
-
-impl Drop for MdnsInflightGuard {
-    fn drop(&mut self) {
-        self.inflight.remove(&self.ip);
-    }
-}
-
-impl Default for MdnsNameResolver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MdnsNameResolver {
-    pub fn new() -> Self {
-        let active_cache = Cache::builder()
-            .max_capacity(MDNS_CACHE_CAPACITY)
-            .time_to_live(MDNS_CACHE_TTL)
-            .build_with_hasher(RandomState::default());
-        Self {
-            passive: Arc::new(DashMap::with_hasher(RandomState::default())),
-            active_cache,
-            inflight: Arc::new(DashMap::with_hasher(RandomState::default())),
-            limiter: Arc::new(Semaphore::new(MAX_INFLIGHT_MDNS)),
-        }
-    }
-
-    pub fn lookup_cached(&self, ip: IpAddr) -> Option<Option<String>> {
-        if let Some(name) = self.passive.get(&ip) {
-            return Some(Some(name.value().clone()));
-        }
-        self.active_cache.get(&ip)
-    }
-
-    pub fn record_discovered(&self, ip: IpAddr, hostname: &str) {
-        if let Some(clean) = clean_hostname(hostname) {
-            if self.passive.len() >= MAX_PASSIVE_MDNS_ENTRIES && !self.passive.contains_key(&ip) {
-                return;
-            }
-            self.passive.insert(ip, clean.clone());
-            self.active_cache.insert(ip, Some(clean));
-        }
-    }
-
-    pub fn ingest_mdns_packet(&self, wire: &[u8]) {
-        let Ok(msg) = Message::from_vec(wire) else {
-            return;
-        };
-        for record in msg.answers.iter().chain(msg.additionals.iter()) {
-            match &record.data {
-                RData::A(a) => {
-                    let host = record.name.to_utf8();
-                    self.record_discovered(IpAddr::V4(a.0), &host);
-                }
-                RData::AAAA(aaaa) => {
-                    let host = record.name.to_utf8();
-                    self.record_discovered(IpAddr::V6(aaaa.0), &host);
-                }
-                RData::PTR(ptr) => {
-                    let owner = record.name.to_utf8();
-                    if let Some(ip) = parse_ptr_owner_ip(&owner) {
-                        self.record_discovered(ip, &ptr.to_utf8());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    pub fn spawn_lookup_if_needed(&self, ip: IpAddr) {
-        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-            return;
-        }
-        if self.passive.contains_key(&ip) || self.active_cache.contains_key(&ip) {
-            return;
-        }
-        let Ok(permit) = Arc::clone(&self.limiter).try_acquire_owned() else {
-            return;
-        };
-        let Entry::Vacant(vacant) = self.inflight.entry(ip) else {
-            return;
-        };
-        vacant.insert(());
-
-        let cache = self.active_cache.clone();
-        let guard = MdnsInflightGuard {
-            inflight: Arc::clone(&self.inflight),
-            ip,
-        };
-        tokio::spawn(async move {
-            let _permit = permit;
-            let _guard = guard;
-            let resolved = query_mdns_ptr(ip).await;
-            cache.insert(ip, resolved);
-        });
-    }
-}
-
-fn parse_ptr_owner_ip(owner: &str) -> Option<IpAddr> {
-    let clean = owner.trim().trim_end_matches('.').to_ascii_lowercase();
-    if let Some(v4_part) = clean.strip_suffix(".in-addr.arpa") {
-        let parts: Vec<&str> = v4_part.split('.').collect();
-        if parts.len() == 4 {
-            let d: u8 = parts[0].parse().ok()?;
-            let c: u8 = parts[1].parse().ok()?;
-            let b: u8 = parts[2].parse().ok()?;
-            let a: u8 = parts[3].parse().ok()?;
-            return Some(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
-        }
-    }
-    if let Some(v6_part) = clean.strip_suffix(".ip6.arpa") {
-        let nibbles: Vec<&str> = v6_part.split('.').collect();
-        if nibbles.len() == 32 {
-            let mut bytes = [0_u8; 16];
-            for (idx, chunk) in nibbles.rchunks_exact(2).enumerate() {
-                let high = u8::from_str_radix(chunk[0], 16).ok()?;
-                let low = u8::from_str_radix(chunk[1], 16).ok()?;
-                bytes[idx] = (high << 4) | low;
-            }
-            return Some(IpAddr::V6(Ipv6Addr::from(bytes)));
-        }
-    }
-    None
-}
-
-async fn query_mdns_ptr(ip: IpAddr) -> Option<String> {
-    let ptr_domain = format!("{}.", ip_to_ptr_domain(ip));
-    let name = Name::from_ascii(&ptr_domain).ok()?;
-    let tx_id = next_tx_id();
-    let mut msg = Message::new(tx_id, MessageType::Query, OpCode::Query);
-    msg.add_query(Query::query(name, RecordType::PTR));
-    let wire = msg.to_vec().ok()?;
-
-    let (bind_addr, target): (SocketAddr, SocketAddr) = match ip {
-        IpAddr::V4(_) => (
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
-            MDNS_V4_ADDR,
-        ),
-        IpAddr::V6(_) => (
-            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
-            MDNS_V6_ADDR,
-        ),
-    };
-
-    let sock = UdpSocket::bind(bind_addr).await.ok()?;
-    sock.send_to(&wire, target).await.ok()?;
-
-    let mut buf = [0_u8; 1500];
-    let (len, _) = tokio::time::timeout(MDNS_QUERY_TIMEOUT, sock.recv_from(&mut buf))
-        .await
-        .ok()?
-        .ok()?;
-    let resp = Message::from_vec(&buf[..len]).ok()?;
-    if resp.response_code != ResponseCode::NoError {
-        return None;
-    }
-    for answer in &resp.answers {
-        if let RData::PTR(ptr) = &answer.data
-            && let Some(host) = clean_hostname(&ptr.to_utf8())
-        {
-            return Some(host);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hickory_proto::rr::Record;
-    use hickory_proto::rr::rdata::{A, PTR};
 
     #[test]
     fn test_parse_dnsmasq_leases() {
@@ -626,33 +413,6 @@ lease 192.168.2.11 {
             Some("workstation.lan")
         );
         assert_eq!(kea_table.lookup("10.0.0.26".parse().unwrap()), None);
-    }
-
-    #[test]
-    fn test_mdns_packet_ingestion() {
-        let resolver = MdnsNameResolver::new();
-        let mut msg = Message::new(0, MessageType::Response, OpCode::Query);
-        msg.add_answer(Record::from_rdata(
-            Name::from_ascii("printer.local.").unwrap(),
-            120,
-            RData::A(A(Ipv4Addr::new(192, 168, 1, 88))),
-        ));
-        msg.add_answer(Record::from_rdata(
-            Name::from_ascii("99.1.168.192.in-addr.arpa.").unwrap(),
-            120,
-            RData::PTR(PTR(Name::from_ascii("apple-tv.local.").unwrap())),
-        ));
-        let wire = msg.to_vec().unwrap();
-        resolver.ingest_mdns_packet(&wire);
-
-        assert_eq!(
-            resolver.lookup_cached("192.168.1.88".parse().unwrap()),
-            Some(Some("printer.local".to_string()))
-        );
-        assert_eq!(
-            resolver.lookup_cached("192.168.1.99".parse().unwrap()),
-            Some(Some("apple-tv.local".to_string()))
-        );
     }
 
     #[test]

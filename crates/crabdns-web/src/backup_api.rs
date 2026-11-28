@@ -128,6 +128,7 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         dhcp_leases_forward_enabled: Some(cfg.dhcp_leases_forward_enabled),
         dhcp_leases_domain: Some(cfg.dhcp_leases_domain.clone()),
         mdns_enabled: Some(cfg.mdns_enabled),
+        llmnr_enabled: Some(cfg.llmnr_enabled),
         sni_client_id_hostnames: Some(cfg.sni_client_id_hostnames.clone()),
         private_ptr_enabled: Some(cfg.private_ptr_enabled),
         private_ptr_upstreams: Some(cfg.private_ptr_upstreams.clone()),
@@ -143,6 +144,7 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         tls_key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
         rdns_enabled: Some(cfg.rdns_enabled),
         safesearch: Some(cfg.safesearch.clone()),
+        blocked_services: Some(cfg.blocked_services.clone()),
         dns64_enabled: Some(cfg.dns64_enabled),
         dns64_prefixes: Some(cfg.dns64_prefixes.clone()),
         svcb_strip_ech: Some(cfg.svcb_strip_ech),
@@ -168,6 +170,7 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         serve_stale_enabled: Some(cfg.serve_stale_enabled),
         dnssec_strict_clock: Some(cfg.dnssec_strict_clock),
         dnssec_auto_rollover: Some(cfg.dnssec_auto_rollover),
+        recursive: Some(cfg.recursive.clone()),
         confirm_timeout_secs: None,
     }
 }
@@ -450,6 +453,7 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
         };
     }
     next.mdns_enabled = payload.mdns_enabled.unwrap_or(current.mdns_enabled);
+    next.llmnr_enabled = payload.llmnr_enabled.unwrap_or(current.llmnr_enabled);
     if let Some(v) = payload.sni_client_id_hostnames {
         next.sni_client_id_hostnames = clean_string_list(v);
     }
@@ -485,6 +489,9 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
     if let Some(safesearch) = payload.safesearch {
         next.safesearch = safesearch;
     }
+    if let Some(blocked_services) = payload.blocked_services {
+        next.blocked_services = blocked_services;
+    }
     next.dns64_enabled = payload.dns64_enabled.unwrap_or(current.dns64_enabled);
     if let Some(prefixes) = payload.dns64_prefixes {
         next.dns64_prefixes = clean_string_list(prefixes);
@@ -509,6 +516,9 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
     next.rrl_slip = payload.rrl_slip.unwrap_or(current.rrl_slip);
     next.rrl_window_secs = payload.rrl_window_secs.unwrap_or(current.rrl_window_secs);
     if let Some(cf_cdn) = payload.cf_cdn {
+        if let Some(recursive) = payload.recursive {
+            next.recursive = recursive;
+        }
         next.cf_cdn = cf_cdn;
     }
 }
@@ -633,12 +643,17 @@ pub(crate) fn apply_compiled_to_pipeline(
         next.dhcp_leases_domain.clone(),
     );
     pipe.set_mdns_enabled(next.mdns_enabled);
+    pipe.set_llmnr_enabled(next.llmnr_enabled);
     pipe.set_dns_rebinding_protection(next.dns_rebinding_protection);
     pipe.set_block_any_queries(next.block_any_queries);
     pipe.set_block_local_domains(next.block_local_domains);
     pipe.set_suppress_local_domain_logs(next.suppress_local_domain_logs);
     pipe.set_rdns_enabled(next.rdns_enabled);
     pipe.set_safesearch(next.safesearch.clone());
+    pipe.set_blocked_services(next.blocked_services.clone());
+    if let Err(err) = pipe.set_recursive(&next.recursive, next.upstream_timeout_ms) {
+        tracing::warn!(error = %err, "failed to apply recursive resolver config from backup");
+    }
     let _ = pipe.reload_dns64(next.dns64_enabled, &next.dns64_prefixes);
     pipe.set_svcb_sanitization(next.svcb_strip_ech, next.svcb_strip_hints);
     pipe.reload_cf_cdn(next.cf_cdn.clone());

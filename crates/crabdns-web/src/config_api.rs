@@ -6,10 +6,11 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use crabdns_core::acl::parse_cidr_list;
 use crabdns_core::{
-    AccessController, AcmeChallengeType, BlockMode, CfCdnConfig, ClientRegistry, Config, DdrConfig,
-    DhcpLeaseTable, Dns64Config, DnssecNta, EcsConfig, HostsTable, PrivatePtrRouter,
-    SafeSearchConfig, SplitDnsMatchMode, SplitDnsRule, SplitUpstreamRouter, StorageProfile,
-    UpstreamGroup, UpstreamGroupRegistry, UpstreamPool, UpstreamStrategy,
+    AccessController, AcmeChallengeType, BlockMode, BlockedServicesConfig, CfCdnConfig,
+    ClientRegistry, DdrConfig, DhcpLeaseTable, Dns64Config, DnssecNta, EcsConfig, HostsTable,
+    PrivatePtrRouter, RecursiveConfig, SafeSearchConfig, SplitDnsMatchMode, SplitDnsRule,
+    SplitUpstreamRouter, StorageProfile, UpstreamGroup, UpstreamGroupRegistry, UpstreamPool,
+    UpstreamStrategy,
     dnssec_anchors::{normalize_nta_entries, parse_trust_anchors},
 };
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,7 @@ pub struct ConfigResponse {
     pub dhcp_leases_forward_enabled: bool,
     pub dhcp_leases_domain: String,
     pub mdns_enabled: bool,
+    pub llmnr_enabled: bool,
     pub private_ptr_enabled: bool,
     pub private_ptr_upstreams: Vec<String>,
     pub block_local_domains: bool,
@@ -89,6 +91,7 @@ pub struct ConfigResponse {
     pub trusted_forwarders: Vec<String>,
     pub rdns_enabled: bool,
     pub safesearch: SafeSearchConfig,
+    pub blocked_services: BlockedServicesConfig,
     pub dns64_enabled: bool,
     pub dns64_prefixes: Vec<String>,
     pub svcb_strip_ech: bool,
@@ -116,100 +119,7 @@ pub struct ConfigResponse {
     pub serve_stale_enabled: bool,
     pub dnssec_strict_clock: bool,
     pub dnssec_auto_rollover: bool,
-}
-
-impl From<&Config> for ConfigResponse {
-    fn from(cfg: &Config) -> Self {
-        Self {
-            listen_dns: cfg.bootstrap.listen_dns.to_string(),
-            listen_web: cfg.bootstrap.listen_web.to_string(),
-            listen_web_tls: cfg.bootstrap.listen_web_tls.map(|addr| addr.to_string()),
-            listen_dot: cfg.bootstrap.listen_dot.map(|addr| addr.to_string()),
-            listen_doq: cfg.bootstrap.listen_doq.map(|addr| addr.to_string()),
-            listen_doh3: cfg.bootstrap.listen_doh3.map(|addr| addr.to_string()),
-            sni_client_id_hostnames: cfg.sni_client_id_hostnames.clone(),
-            tls_cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
-            tls_key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
-            data_dir: cfg.bootstrap.data_dir.display().to_string(),
-            upstreams: cfg.upstreams.clone(),
-            bootstrap_dns: cfg.bootstrap_dns.clone(),
-            upstream_strategy: cfg.upstream_strategy,
-            cache_size: cfg.cache_size,
-            optimistic_cache: cfg.optimistic_cache,
-            cache_min_ttl_secs: cfg.cache_min_ttl_secs,
-            cache_max_ttl_secs: cfg.cache_max_ttl_secs,
-            cache_prefetch_enabled: cfg.cache_prefetch_enabled,
-            cache_persist_enabled: cfg.cache_persist_enabled,
-            upstream_timeout_ms: cfg.upstream_timeout_ms,
-            log_retention_hours: cfg.log_retention_hours,
-            log_max_disk_mb: cfg.log_max_disk_mb,
-            block_mode: cfg.block_mode,
-            allow_cidrs: cfg.allow_cidrs.clone(),
-            deny_cidrs: cfg.deny_cidrs.clone(),
-            rate_limit_qps: cfg.rate_limit_qps,
-            web_auth_enabled: cfg.web_auth_enabled,
-            web_username: cfg.web_username.clone(),
-            split_dns: cfg.split_dns.clone(),
-            upstream_groups: cfg.upstream_groups.clone(),
-            split_dns_match_mode: cfg.split_dns_match_mode,
-            split_dns_before_client_upstreams: cfg.split_dns_before_client_upstreams,
-            split_dns_refresh_interval_secs: cfg.split_dns_refresh_interval_secs,
-            cname_cloaking_blocking: cfg.cname_cloaking_blocking,
-            doh_enabled: cfg.doh_enabled,
-            allow_private_subscriptions: cfg.allow_private_subscriptions,
-            ecs_enabled: cfg.ecs_enabled,
-            ecs_custom_ip: cfg.ecs_custom_ip.clone(),
-            ecs_ipv4_prefix: cfg.ecs_ipv4_prefix,
-            ecs_ipv6_prefix: cfg.ecs_ipv6_prefix,
-            dnssec_enabled: cfg.dnssec_enabled,
-            dnssec_trust_anchors: cfg.dnssec_trust_anchors.clone(),
-            dnssec_ntas: cfg.dnssec_ntas.clone(),
-            hosts_enabled: cfg.hosts_enabled,
-            hosts_path: cfg.hosts_path.clone(),
-            dhcp_leases_enabled: cfg.dhcp_leases_enabled,
-            dhcp_leases_path: cfg.dhcp_leases_path.clone(),
-            dhcp_leases_forward_enabled: cfg.dhcp_leases_forward_enabled,
-            dhcp_leases_domain: cfg.dhcp_leases_domain.clone(),
-            mdns_enabled: cfg.mdns_enabled,
-            private_ptr_enabled: cfg.private_ptr_enabled,
-            private_ptr_upstreams: cfg.private_ptr_upstreams.clone(),
-            block_local_domains: cfg.block_local_domains,
-            suppress_local_domain_logs: cfg.suppress_local_domain_logs,
-            ddr_enabled: cfg.ddr_enabled,
-            ddr_hostname: cfg.ddr_hostname.clone(),
-            dns_rebinding_protection: cfg.dns_rebinding_protection,
-            block_any_queries: cfg.block_any_queries,
-            trusted_proxies: cfg.trusted_proxies.clone(),
-            trusted_forwarders: cfg.trusted_forwarders.clone(),
-            rdns_enabled: cfg.rdns_enabled,
-            safesearch: cfg.safesearch.clone(),
-            dns64_enabled: cfg.dns64_enabled,
-            dns64_prefixes: cfg.dns64_prefixes.clone(),
-            svcb_strip_ech: cfg.svcb_strip_ech,
-            svcb_strip_hints: cfg.svcb_strip_hints,
-            ede_enabled: cfg.ede_enabled,
-            dns_cookies_enabled: cfg.dns_cookies_enabled,
-            dns_cookies_require_valid: cfg.dns_cookies_require_valid,
-            max_udp_payload_size: cfg.max_udp_payload_size,
-            rrl_enabled: cfg.rrl_enabled,
-            rrl_responses_per_second: cfg.rrl_responses_per_second,
-            rrl_slip: cfg.rrl_slip,
-            rrl_window_secs: cfg.rrl_window_secs,
-            acme_enabled: cfg.acme_enabled,
-            acme_domains: cfg.acme_domains.clone(),
-            acme_email: cfg.acme_email.clone(),
-            acme_directory_url: cfg.acme_directory_url.clone(),
-            acme_challenge_type: cfg.acme_challenge_type,
-            acme_http_listen: cfg.acme_http_listen.map(|addr| addr.to_string()),
-            acme_renew_before_days: cfg.acme_renew_before_days,
-            cf_cdn: cfg.cf_cdn.clone(),
-            storage_profile: cfg.storage_profile,
-            disk_min_free_mb: cfg.disk_min_free_mb,
-            serve_stale_enabled: cfg.serve_stale_enabled,
-            dnssec_strict_clock: cfg.dnssec_strict_clock,
-            dnssec_auto_rollover: cfg.dnssec_auto_rollover,
-        }
-    }
+    pub recursive: RecursiveConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -293,6 +203,8 @@ pub struct ConfigUpdatePayload {
     #[serde(default)]
     pub mdns_enabled: Option<bool>,
     #[serde(default)]
+    pub llmnr_enabled: Option<bool>,
+    #[serde(default)]
     pub sni_client_id_hostnames: Option<Vec<String>>,
     #[serde(default)]
     pub private_ptr_enabled: Option<bool>,
@@ -322,6 +234,8 @@ pub struct ConfigUpdatePayload {
     pub rdns_enabled: Option<bool>,
     #[serde(default)]
     pub safesearch: Option<SafeSearchConfig>,
+    #[serde(default)]
+    pub blocked_services: Option<BlockedServicesConfig>,
     #[serde(default)]
     pub dns64_enabled: Option<bool>,
     #[serde(default)]
@@ -374,6 +288,8 @@ pub struct ConfigUpdatePayload {
     pub dnssec_strict_clock: Option<bool>,
     #[serde(default)]
     pub dnssec_auto_rollover: Option<bool>,
+    #[serde(default)]
+    pub recursive: Option<RecursiveConfig>,
     #[serde(default)]
     #[ts(type = "number | null")]
     pub confirm_timeout_secs: Option<u64>,
@@ -435,11 +351,9 @@ fn internal_error(err: impl ToString) -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
-#[allow(clippy::too_many_lines)]
-pub async fn update_config(
-    State(state): State<RouterState>,
-    Json(payload): Json<ConfigUpdatePayload>,
-) -> Result<Json<ConfigResponse>, (StatusCode, Json<serde_json::Value>)> {
+fn validate_update_payload(
+    payload: &ConfigUpdatePayload,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     if payload.cache_size == 0
         || payload.upstream_timeout_ms == 0
         || payload.log_retention_hours == 0
@@ -451,6 +365,15 @@ pub async fn update_config(
             })),
         ));
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn update_config(
+    State(state): State<RouterState>,
+    Json(payload): Json<ConfigUpdatePayload>,
+) -> Result<Json<ConfigResponse>, (StatusCode, Json<serde_json::Value>)> {
+    validate_update_payload(&payload)?;
 
     let _config_guard = state.app.storage.config_lock().lock().await;
     let _client_guard = state.app.storage.client_lock().lock().await;
@@ -547,6 +470,7 @@ pub async fn update_config(
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| current.dhcp_leases_domain.clone());
     let mdns_enabled = payload.mdns_enabled.unwrap_or(current.mdns_enabled);
+    let llmnr_enabled = payload.llmnr_enabled.unwrap_or(current.llmnr_enabled);
     let sni_client_id_hostnames = clean_string_list(
         payload
             .sni_client_id_hostnames
@@ -590,6 +514,13 @@ pub async fn update_config(
     let safesearch = payload
         .safesearch
         .unwrap_or_else(|| current.safesearch.clone());
+    let blocked_services = match payload.blocked_services {
+        Some(mut bs) => {
+            bs.services = crabdns_core::normalize_service_ids(&bs.services);
+            bs
+        }
+        None => current.blocked_services.clone(),
+    };
     let dns64_enabled = payload.dns64_enabled.unwrap_or(current.dns64_enabled);
     let dns64_prefixes = clean_string_list(
         payload
@@ -794,6 +725,7 @@ pub async fn update_config(
     next.dhcp_leases_forward_enabled = dhcp_leases_forward_enabled;
     next.dhcp_leases_domain.clone_from(&dhcp_leases_domain);
     next.mdns_enabled = mdns_enabled;
+    next.llmnr_enabled = llmnr_enabled;
     next.sni_client_id_hostnames = sni_client_id_hostnames;
     next.private_ptr_enabled = private_ptr_enabled;
     next.private_ptr_upstreams = private_ptr_upstreams;
@@ -809,6 +741,7 @@ pub async fn update_config(
     next.tls_key_path = tls_key_path;
     next.rdns_enabled = rdns_enabled;
     next.safesearch = safesearch.clone();
+    next.blocked_services = blocked_services.clone();
     next.dns64_enabled = dns64_enabled;
     next.dns64_prefixes.clone_from(&dns64_prefixes);
     next.svcb_strip_ech = svcb_strip_ech;
@@ -838,6 +771,9 @@ pub async fn update_config(
     }
     if let Some(dnssec_auto_rollover) = payload.dnssec_auto_rollover {
         next.dnssec_auto_rollover = dnssec_auto_rollover;
+    }
+    if let Some(recursive) = payload.recursive {
+        next.recursive = recursive;
     }
     apply_acme_updates(&mut next, acme_updates)?;
 
@@ -896,12 +832,20 @@ pub async fn update_config(
     pipe.set_dhcp_leases_enabled(dhcp_leases_enabled);
     pipe.set_dhcp_leases_forward(dhcp_leases_forward_enabled, dhcp_leases_domain);
     pipe.set_mdns_enabled(mdns_enabled);
+    pipe.set_llmnr_enabled(llmnr_enabled);
     pipe.set_dns_rebinding_protection(dns_rebinding_protection);
     pipe.set_block_any_queries(block_any_queries);
     pipe.set_block_local_domains(block_local_domains);
     pipe.set_suppress_local_domain_logs(suppress_local_domain_logs);
     pipe.set_rdns_enabled(rdns_enabled);
     pipe.set_safesearch(safesearch);
+    pipe.set_blocked_services(blocked_services);
+    if let Err(err) = pipe.set_recursive(&next.recursive, payload.upstream_timeout_ms) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        ));
+    }
     let _ = pipe.reload_dns64(dns64_enabled, &dns64_prefixes);
     pipe.set_svcb_sanitization(svcb_strip_ech, svcb_strip_hints);
     pipe.reload_cf_cdn(next.cf_cdn.clone());

@@ -22,6 +22,7 @@ futures-util.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
 hickory-proto.workspace = true
+hickory-resolver.workspace = true
 http.workspace = true
 moka.workspace = true
 quinn.workspace = true

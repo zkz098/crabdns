@@ -1,10 +1,13 @@
 import type { AcmeChallengeType } from "../../types/AcmeChallengeType";
 import type { AcmeStatusResponse } from "../../types/AcmeStatusResponse";
+import type { BlockedServiceInfo } from "../../types/BlockedServiceInfo";
+import type { BlockedServicesConfig } from "../../types/BlockedServicesConfig";
 import type { BlockMode } from "../../types/BlockMode";
 import type { CfCdnStatus } from "../../types/CfCdnStatus";
 import type { ConfigResponse } from "../../types/ConfigResponse";
 import type { ConfigSnapshotMeta } from "../../types/ConfigSnapshotMeta";
 import type { DnssecNta } from "../../types/DnssecNta";
+import type { RecursiveConfig } from "../../types/RecursiveConfig";
 import type { SafeSearchConfig } from "../../types/SafeSearchConfig";
 import type { SplitDnsMatchMode } from "../../types/SplitDnsMatchMode";
 import type { SplitDnsRule } from "../../types/SplitDnsRule";
@@ -131,6 +134,8 @@ export interface SettingsViewProps {
   onDhcpLeasesDomainChange: (val: string) => void;
   mdnsEnabled: boolean;
   onMdnsEnabledChange: (val: boolean) => void;
+  llmnrEnabled: boolean;
+  onLlmnrEnabledChange: (val: boolean) => void;
   sniClientIdHostnamesText: string;
   onSniClientIdHostnamesChange: (val: string) => void;
   privatePtrEnabled: boolean;
@@ -157,6 +162,11 @@ export interface SettingsViewProps {
   onRdnsEnabledChange: (val: boolean) => void;
   safesearch: SafeSearchConfig;
   onSafesearchChange: (val: SafeSearchConfig) => void;
+  blockedServices: BlockedServicesConfig;
+  onBlockedServicesChange: (val: BlockedServicesConfig) => void;
+  blockedServiceCatalog: BlockedServiceInfo[];
+  recursive: RecursiveConfig;
+  onRecursiveChange: (val: RecursiveConfig) => void;
   dns64Enabled: boolean;
   onDns64EnabledChange: (val: boolean) => void;
   dns64PrefixesText: string;

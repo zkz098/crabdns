@@ -178,6 +178,16 @@ impl DnsPipeline {
         {
             return true;
         }
+        if self.mdns_enabled.load(Ordering::Relaxed)
+            && (is_local_domain(clean) || qtype == RecordType::PTR)
+        {
+            return true;
+        }
+        if self.llmnr_enabled.load(Ordering::Relaxed)
+            && (!clean.contains('.') || qtype == RecordType::PTR)
+        {
+            return true;
+        }
         if self.block_local_domains.load(Ordering::Relaxed) && is_local_domain(clean) {
             return true;
         }
@@ -270,6 +280,16 @@ impl DnsPipeline {
         blocking_disabled: bool,
         explicitly_allowed: bool,
     ) -> bool {
+        if !explicitly_allowed && !blocking_disabled {
+            let matcher = self.blocked_services.load();
+            let client_override = policy.and_then(|p| p.blocked_services.as_deref());
+            if matcher
+                .match_domain(clean_domain, client_override)
+                .is_some()
+            {
+                return true;
+            }
+        }
         if !explicitly_allowed
             && !blocking_disabled
             && matches!(

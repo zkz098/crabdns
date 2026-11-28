@@ -34,6 +34,7 @@ crabdns-web = { path = "crates/crabdns-web" }
 
 tokio = { version = "1", features = ["full"] }
 hickory-proto = { version = "0.26", features = ["dnssec-aws-lc-rs"] }
+hickory-resolver = { version = "0.26", features = ["recursor", "dnssec-aws-lc-rs", "tokio"] }
 moka = { version = "0.12", features = ["sync"] }
 arc-swap = "1"
 fjall = "3"

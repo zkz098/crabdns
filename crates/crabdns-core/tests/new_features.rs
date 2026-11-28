@@ -397,6 +397,7 @@ async fn test_safesearch_dns64_and_svcb_sanitization_pipeline() {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: Some(false),
+                blocked_services: None,
                 upstream_policy: crabdns_core::UpstreamPolicy::default(),
                 tags: Vec::new(),
             }],

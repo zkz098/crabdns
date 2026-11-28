@@ -308,6 +308,15 @@ impl DnsPipeline {
                 .await;
         }
 
+        if route.cache_scope.is_none()
+            && let Some(recursor) = self.recursor.load_full()
+        {
+            return recursor
+                .query_raw(primary_query)
+                .await
+                .map_err(|e| ExchangeError::UpstreamFailed(e.to_string()));
+        }
+
         let primary_res = self
             .exchange_and_validate(&route.pool, primary_query, &meta.domain, primary_flags)
             .await;
@@ -406,6 +415,15 @@ impl DnsPipeline {
                     global_ecs,
                 )
                 .await;
+        }
+
+        if route.cache_scope.is_none()
+            && let Some(recursor) = self.recursor.load_full()
+        {
+            return recursor
+                .query_raw(primary_query)
+                .await
+                .map_err(|e| ExchangeError::UpstreamFailed(e.to_string()));
         }
 
         let primary_res = self

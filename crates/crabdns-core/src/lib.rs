@@ -1,4 +1,5 @@
 pub mod acl;
+pub mod blocked_services;
 pub mod cache;
 pub mod cf_cdn;
 pub mod clients;
@@ -17,13 +18,17 @@ pub mod filter_rules;
 mod filter_trie;
 pub mod ip_set;
 pub mod lan;
+pub mod llmnr;
+pub mod mdns;
 pub mod neighbor;
 pub mod pipeline;
 mod pipeline_cache;
 mod pipeline_exec;
 mod pipeline_fast;
+mod pipeline_local;
 mod pipeline_post;
 mod pipeline_types;
+pub mod recursor;
 pub mod rrl;
 pub mod safesearch;
 pub mod security;
@@ -44,6 +49,10 @@ mod wire;
 mod wire_fast;
 
 pub use acl::{AccessController, AclDecision, IpNet};
+pub use blocked_services::{
+    BlockedServiceInfo, BlockedServicesConfig, BlockedServicesMatcher, list_blocked_services,
+    normalize_service_ids,
+};
 pub use cache::{CacheHit, CacheStats, DnsCache, PersistedCacheEntry};
 pub use cf_cdn::{CfCdnConfig, CfCdnManager, CfCdnStatus, CfCdnTestPhase, CfSpeedTestNode};
 pub use clients::{
@@ -57,8 +66,8 @@ pub use config::{
 };
 pub use cookies::{CookieCheck, DnsCookieEngine};
 pub use device_names::{
-    DEFAULT_DHCP_LEASES_PATH, DhcpLeaseTable, MdnsNameResolver, OPENWRT_DHCP_LEASES_PATH,
-    default_dhcp_leases_path, resolve_dhcp_leases_path,
+    DEFAULT_DHCP_LEASES_PATH, DhcpLeaseTable, OPENWRT_DHCP_LEASES_PATH, default_dhcp_leases_path,
+    resolve_dhcp_leases_path,
 };
 pub use dns64::{DEFAULT_DNS64_PREFIX, Dns64Config, Dns64Prefix};
 pub use dnssec::{DnssecValidator, ValidationOutcome};
@@ -70,12 +79,18 @@ pub use filter_rules::{
     DnsRewriteEntry, DnsRewriteKind, FilterQueryContext, RewriteAction, validate_dns_rewrite,
 };
 pub use lan::{DdrConfig, HostsMatch, HostsTable, PrivatePtrRouter};
+pub use llmnr::LlmnrNameResolver;
+pub use mdns::MdnsNameResolver;
 pub use neighbor::{NeighborTable, PROC_NET_ARP_PATH, normalize_mac};
 pub use pipeline::{
     DnsPipeline, LatencyHistogramSnapshot, PipelineRuntimeMetrics, QueryContext, QueryEvent,
     QueryOutcome, QueryProtocol,
 };
 pub use pipeline_fast::UdpFastOutcome;
+pub use recursor::{
+    BuiltinRecursor, RECURSIVE_UPSTREAM_LABEL, RecursiveConfig, RecursiveQnameMinimization,
+    RootProbeReport, RootServerProbeResult, probe_root_servers,
+};
 pub use rrl::{ResponseRateLimiter, RrlCategory, RrlConfig, RrlDecision};
 pub use safesearch::SafeSearchConfig;
 pub use split_dns::SplitUpstreamRouter;

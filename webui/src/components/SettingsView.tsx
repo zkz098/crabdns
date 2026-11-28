@@ -63,7 +63,7 @@ export function SettingsView(props: SettingsViewProps) {
       props.upstreamsText
         .split("\n")
         .map((s) => s.trim())
-        .filter((s) => s.length > 0).length,
+        .filter((s) => s.length > 0).length + (props.recursive.enabled ? 1 : 0),
   );
 
   const accelCount = createMemo(() =>
@@ -85,6 +85,7 @@ export function SettingsView(props: SettingsViewProps) {
       props.cnameCloakingBlocking,
       props.blockAnyQueries,
       props.safesearch.enabled,
+      props.blockedServices.enabled && props.blockedServices.services.length > 0,
       props.authEnabled,
     ]),
   );
@@ -97,6 +98,7 @@ export function SettingsView(props: SettingsViewProps) {
       props.hostsEnabled,
       props.dhcpLeasesEnabled,
       props.mdnsEnabled,
+      props.llmnrEnabled,
       props.rdnsEnabled,
       props.privatePtrEnabled,
       props.dns64Enabled,

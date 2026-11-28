@@ -341,6 +341,93 @@ export function SecuritySettingsSection(props: SettingsViewProps) {
         </div>
       </SettingsCard>
 
+      {/* Preset Blocked Services */}
+      <SettingsCard
+        icon="i-ri-apps-2-line"
+        title={t("settingsBlockedServicesTitle")}
+        description={t("settingsBlockedServicesDesc")}
+      >
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <ToggleRow
+            label={t("settingsBlockedServicesEnabled")}
+            checked={props.blockedServices.enabled}
+            onChange={(checked) =>
+              props.onBlockedServicesChange({
+                ...props.blockedServices,
+                enabled: checked,
+              })
+            }
+          />
+          <Show when={props.blockedServiceCatalog.length > 0}>
+            <div class="flex items-center gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() =>
+                  props.onBlockedServicesChange({
+                    ...props.blockedServices,
+                    services: props.blockedServiceCatalog.map((s) => s.id),
+                  })
+                }
+                class="px-2 py-1 rounded border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#111111] text-[#666666] dark:text-[#a1a1aa] hover:text-[#171717] dark:hover:text-[#ededed] cursor-pointer"
+              >
+                {t("settingsBlockedServicesSelectAll")}
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  props.onBlockedServicesChange({
+                    ...props.blockedServices,
+                    services: [],
+                  })
+                }
+                class="px-2 py-1 rounded border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#111111] text-[#666666] dark:text-[#a1a1aa] hover:text-[#171717] dark:hover:text-[#ededed] cursor-pointer"
+              >
+                {t("settingsBlockedServicesClear")}
+              </button>
+            </div>
+          </Show>
+        </div>
+
+        <div
+          class={`grid grid-cols-2 sm:grid-cols-4 gap-2 transition-opacity duration-150 ${
+            props.blockedServices.enabled ? "opacity-100" : "opacity-60"
+          }`}
+        >
+          <For each={props.blockedServiceCatalog}>
+            {(svc) => {
+              const checked = () => props.blockedServices.services.includes(svc.id);
+              const toggle = (next: boolean) => {
+                const current = props.blockedServices.services;
+                const updated = next
+                  ? Array.from(new Set([...current, svc.id]))
+                  : current.filter((id) => id !== svc.id);
+                props.onBlockedServicesChange({
+                  ...props.blockedServices,
+                  services: updated,
+                });
+              };
+              return (
+                <div
+                  class={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                    checked()
+                      ? "border-[#171717]/40 dark:border-[#ededed]/40 bg-[#f4f4f5] dark:bg-[#141414] text-[#171717] dark:text-[#ededed] font-medium"
+                      : "border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] text-[#666666] dark:text-[#a1a1aa] hover:border-[#d4d4d8] dark:hover:border-[#404040]"
+                  }`}
+                >
+                  <span class="truncate">{svc.name}</span>
+                  <ToggleSwitch
+                    compact
+                    checked={checked()}
+                    ariaLabel={svc.name}
+                    onChange={toggle}
+                  />
+                </div>
+              );
+            }}
+          </For>
+        </div>
+      </SettingsCard>
+
       {/* DNS Client ACL & Rate Limiting */}
       <SettingsCard
         icon="i-ri-shield-user-line"

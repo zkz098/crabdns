@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { t } from "../i18n";
 import type { BlockMode } from "../types/BlockMode";
+import type { BlockedServiceInfo } from "../types/BlockedServiceInfo";
 import type { ClientActivityStats } from "../types/ClientActivityStats";
 import type { ClientGroup } from "../types/ClientGroup";
 import type { ClientGroupPayload } from "../types/ClientGroupPayload";
@@ -20,6 +21,7 @@ import {
 
 interface ClientsViewProps {
   overview: ClientsOverviewResponse | null;
+  blockedServiceCatalog: BlockedServiceInfo[];
   message: string;
   isError: boolean;
   saving: boolean;
@@ -66,6 +68,7 @@ function sourceLabel(src: string): string {
   if (src === "hosts") return t("clientsSourceHosts");
   if (src === "dhcp") return t("clientsSourceDhcp");
   if (src === "mdns") return t("clientsSourceMdns");
+  if (src === "llmnr") return t("clientsSourceLlmnr");
   if (src === "rdns") return t("clientsSourceRdns");
   return t("clientsSourceUnknown");
 }
@@ -140,6 +143,10 @@ export function ClientsView(props: ClientsViewProps) {
   const [groupBlockMode, setGroupBlockMode] = createSignal<OptBlockMode>("");
   const [groupCnameCloak, setGroupCnameCloak] = createSignal<TriState>("");
   const [groupSafeSearch, setGroupSafeSearch] = createSignal<TriState>("");
+  const [groupBlockedServicesMode, setGroupBlockedServicesMode] = createSignal<
+    "inherit" | "custom"
+  >("inherit");
+  const [groupBlockedServices, setGroupBlockedServices] = createSignal<string[]>([]);
   const [groupUpstreams, setGroupUpstreams] = createSignal("");
   const [groupRules, setGroupRules] = createSignal("");
   const [groupUpstreamPolicy, setGroupUpstreamPolicy] =
@@ -155,6 +162,10 @@ export function ClientsView(props: ClientsViewProps) {
   const [clientUseGlobal, setClientUseGlobal] = createSignal<TriState>("");
   const [clientBlockMode, setClientBlockMode] = createSignal<OptBlockMode>("");
   const [clientSafeSearch, setClientSafeSearch] = createSignal<TriState>("");
+  const [clientBlockedServicesMode, setClientBlockedServicesMode] = createSignal<
+    "inherit" | "custom"
+  >("inherit");
+  const [clientBlockedServices, setClientBlockedServices] = createSignal<string[]>([]);
   const [clientUpstreams, setClientUpstreams] = createSignal("");
   const [clientRules, setClientRules] = createSignal("");
   const [clientUpstreamPolicy, setClientUpstreamPolicy] =
@@ -215,6 +226,8 @@ export function ClientsView(props: ClientsViewProps) {
     setGroupBlockMode("");
     setGroupCnameCloak("");
     setGroupSafeSearch("");
+    setGroupBlockedServicesMode("inherit");
+    setGroupBlockedServices([]);
     setGroupUpstreams("");
     setGroupRules("");
     setGroupUpstreamPolicy(emptyUpstreamPolicy());
@@ -230,6 +243,8 @@ export function ClientsView(props: ClientsViewProps) {
     setGroupBlockMode(g.block_mode ?? "");
     setGroupCnameCloak(toTriState(g.cname_cloaking_blocking));
     setGroupSafeSearch(toTriState(g.safesearch_enabled));
+    setGroupBlockedServicesMode(Array.isArray(g.blocked_services) ? "custom" : "inherit");
+    setGroupBlockedServices(g.blocked_services ?? []);
     setGroupUpstreams(g.upstreams.join("\n"));
     setGroupRules(g.custom_rules);
     setGroupUpstreamPolicy(g.upstream_policy ? { ...g.upstream_policy } : emptyUpstreamPolicy());
@@ -248,6 +263,7 @@ export function ClientsView(props: ClientsViewProps) {
       block_mode: groupBlockMode() === "" ? null : (groupBlockMode() as BlockMode),
       cname_cloaking_blocking: fromTriState(groupCnameCloak()),
       safesearch_enabled: fromTriState(groupSafeSearch()),
+      blocked_services: groupBlockedServicesMode() === "custom" ? groupBlockedServices() : null,
       upstream_policy: groupUpstreamPolicy(),
     };
     const editId = editingGroupId();
@@ -268,6 +284,8 @@ export function ClientsView(props: ClientsViewProps) {
     setClientUseGlobal("");
     setClientBlockMode("");
     setClientSafeSearch("");
+    setClientBlockedServicesMode("inherit");
+    setClientBlockedServices([]);
     setClientUpstreams("");
     setClientRules("");
     setClientUpstreamPolicy(emptyUpstreamPolicy());
@@ -284,6 +302,8 @@ export function ClientsView(props: ClientsViewProps) {
     setClientUseGlobal(toTriState(c.use_global_rules));
     setClientBlockMode(c.block_mode ?? "");
     setClientSafeSearch(toTriState(c.safesearch_enabled));
+    setClientBlockedServicesMode(Array.isArray(c.blocked_services) ? "custom" : "inherit");
+    setClientBlockedServices(c.blocked_services ?? []);
     setClientUpstreams(c.upstreams.join("\n"));
     setClientRules(c.custom_rules);
     setClientUpstreamPolicy(c.upstream_policy ? { ...c.upstream_policy } : emptyUpstreamPolicy());
@@ -314,6 +334,7 @@ export function ClientsView(props: ClientsViewProps) {
       upstreams: parseLines(clientUpstreams()),
       block_mode: clientBlockMode() === "" ? null : (clientBlockMode() as BlockMode),
       safesearch_enabled: fromTriState(clientSafeSearch()),
+      blocked_services: clientBlockedServicesMode() === "custom" ? clientBlockedServices() : null,
       upstream_policy: clientUpstreamPolicy(),
       tags: parseTags(clientTags()),
     };
@@ -459,6 +480,65 @@ export function ClientsView(props: ClientsViewProps) {
                 />
               </div>
             </div>
+            <Show when={props.blockedServiceCatalog.length > 0}>
+              <div class="space-y-2 rounded-lg border border-[#eaeaea] dark:border-[#262626] p-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                    {t("settingsBlockedServicesTitle")}
+                  </span>
+                  <div class="flex items-center gap-1.5 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setGroupBlockedServicesMode("inherit")}
+                      class={`px-2 py-1 rounded border cursor-pointer ${
+                        groupBlockedServicesMode() === "inherit"
+                          ? "border-[#171717] dark:border-[#ededed] bg-[#171717] dark:bg-[#ededed] text-white dark:text-[#171717]"
+                          : "border-[#eaeaea] dark:border-[#262626] text-[#666666] dark:text-[#a1a1aa]"
+                      }`}
+                    >
+                      {t("clientsBlockedServicesInherit")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGroupBlockedServicesMode("custom")}
+                      class={`px-2 py-1 rounded border cursor-pointer ${
+                        groupBlockedServicesMode() === "custom"
+                          ? "border-[#171717] dark:border-[#ededed] bg-[#171717] dark:bg-[#ededed] text-white dark:text-[#171717]"
+                          : "border-[#eaeaea] dark:border-[#262626] text-[#666666] dark:text-[#a1a1aa]"
+                      }`}
+                    >
+                      {t("clientsBlockedServicesCustom")}
+                    </button>
+                  </div>
+                </div>
+                <Show when={groupBlockedServicesMode() === "custom"}>
+                  <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-1">
+                    <For each={props.blockedServiceCatalog}>
+                      {(svc) => {
+                        const checked = () => groupBlockedServices().includes(svc.id);
+                        return (
+                          <label class="flex items-center gap-1.5 text-xs text-[#666666] dark:text-[#a1a1aa] cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={checked()}
+                              onChange={(e) => {
+                                const next = e.currentTarget.checked;
+                                setGroupBlockedServices((prev) =>
+                                  next
+                                    ? Array.from(new Set([...prev, svc.id]))
+                                    : prev.filter((id) => id !== svc.id),
+                                );
+                              }}
+                            />
+                            <span class="truncate">{svc.name}</span>
+                          </label>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            </Show>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               <div>
                 <label class="block text-xs text-[#666666] dark:text-[#a1a1aa] mb-1">
@@ -704,6 +784,65 @@ export function ClientsView(props: ClientsViewProps) {
                 />
               </div>
             </div>
+            <Show when={props.blockedServiceCatalog.length > 0}>
+              <div class="space-y-2 rounded-lg border border-[#eaeaea] dark:border-[#262626] p-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-xs font-medium text-[#171717] dark:text-[#ededed]">
+                    {t("settingsBlockedServicesTitle")}
+                  </span>
+                  <div class="flex items-center gap-1.5 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setClientBlockedServicesMode("inherit")}
+                      class={`px-2 py-1 rounded border cursor-pointer ${
+                        clientBlockedServicesMode() === "inherit"
+                          ? "border-[#171717] dark:border-[#ededed] bg-[#171717] dark:bg-[#ededed] text-white dark:text-[#171717]"
+                          : "border-[#eaeaea] dark:border-[#262626] text-[#666666] dark:text-[#a1a1aa]"
+                      }`}
+                    >
+                      {t("clientsBlockedServicesInherit")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setClientBlockedServicesMode("custom")}
+                      class={`px-2 py-1 rounded border cursor-pointer ${
+                        clientBlockedServicesMode() === "custom"
+                          ? "border-[#171717] dark:border-[#ededed] bg-[#171717] dark:bg-[#ededed] text-white dark:text-[#171717]"
+                          : "border-[#eaeaea] dark:border-[#262626] text-[#666666] dark:text-[#a1a1aa]"
+                      }`}
+                    >
+                      {t("clientsBlockedServicesCustom")}
+                    </button>
+                  </div>
+                </div>
+                <Show when={clientBlockedServicesMode() === "custom"}>
+                  <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-1">
+                    <For each={props.blockedServiceCatalog}>
+                      {(svc) => {
+                        const checked = () => clientBlockedServices().includes(svc.id);
+                        return (
+                          <label class="flex items-center gap-1.5 text-xs text-[#666666] dark:text-[#a1a1aa] cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={checked()}
+                              onChange={(e) => {
+                                const next = e.currentTarget.checked;
+                                setClientBlockedServices((prev) =>
+                                  next
+                                    ? Array.from(new Set([...prev, svc.id]))
+                                    : prev.filter((id) => id !== svc.id),
+                                );
+                              }}
+                            />
+                            <span class="truncate">{svc.name}</span>
+                          </label>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            </Show>
 
             <div>
               <div class="flex flex-wrap items-center justify-between gap-2 mb-1">

@@ -269,13 +269,16 @@ pub fn spawn_mdns_listener_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut socket: Option<tokio::net::UdpSocket> = None;
+        let mut sock_v4: Option<tokio::net::UdpSocket> = None;
+        let mut sock_v6: Option<tokio::net::UdpSocket> = None;
         let notify = pipeline.mdns_notify();
-        let mut buf = [0_u8; 4096];
+        let mut buf_v4 = [0_u8; 4096];
+        let mut buf_v6 = [0_u8; 4096];
 
         loop {
             if !config.load().mdns_enabled {
-                socket = None;
+                sock_v4 = None;
+                sock_v6 = None;
                 tokio::select! {
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
@@ -287,41 +290,57 @@ pub fn spawn_mdns_listener_task(
                 continue;
             }
 
-            if socket.is_none() {
-                match bind_mdns_multicast_socket() {
-                    Ok(sock) => socket = Some(sock),
+            if sock_v4.is_none() {
+                match bind_multicast_v4(std::net::Ipv4Addr::new(224, 0, 0, 251), 5353) {
+                    Ok(sock) => sock_v4 = Some(sock),
                     Err(err) => {
-                        tracing::debug!(error = %err, "passive mDNS multicast listener unavailable; using on-demand PTR queries");
-                        tokio::select! {
-                            _ = shutdown_rx.changed() => {
-                                if *shutdown_rx.borrow() {
-                                    break;
-                                }
-                            }
-                            () = tokio::time::sleep(Duration::from_secs(30)) => {}
-                        }
-                        continue;
+                        tracing::debug!(error = %err, "passive mDNS IPv4 multicast listener unavailable");
                     }
                 }
             }
+            if sock_v6.is_none()
+                && let Ok(sock) = bind_multicast_v6(
+                    std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb),
+                    5353,
+                )
+            {
+                sock_v6 = Some(sock);
+            }
 
-            if let Some(ref sock) = socket {
+            if sock_v4.is_none() && sock_v6.is_none() {
                 tokio::select! {
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
                             break;
                         }
                     }
-                    () = notify.notified() => {}
-                    recv_res = sock.recv_from(&mut buf) => {
-                        match recv_res {
-                            Ok((len, _)) => {
-                                pipeline.mdns_resolver().ingest_mdns_packet(&buf[..len]);
-                            }
-                            Err(err) => {
-                                tracing::debug!(error = %err, "mDNS multicast recv error");
-                                socket = None;
-                            }
+                    () = tokio::time::sleep(Duration::from_secs(30)) => {}
+                }
+                continue;
+            }
+
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                () = notify.notified() => {}
+                recv_res = recv_opt(sock_v4.as_ref(), &mut buf_v4) => {
+                    match recv_res {
+                        Ok(len) => pipeline.mdns_resolver().ingest_mdns_packet(&buf_v4[..len]),
+                        Err(err) => {
+                            tracing::debug!(error = %err, "mDNS IPv4 multicast recv error");
+                            sock_v4 = None;
+                        }
+                    }
+                }
+                recv_res = recv_opt(sock_v6.as_ref(), &mut buf_v6) => {
+                    match recv_res {
+                        Ok(len) => pipeline.mdns_resolver().ingest_mdns_packet(&buf_v6[..len]),
+                        Err(err) => {
+                            tracing::debug!(error = %err, "mDNS IPv6 multicast recv error");
+                            sock_v6 = None;
                         }
                     }
                 }
@@ -330,17 +349,138 @@ pub fn spawn_mdns_listener_task(
     })
 }
 
-fn bind_mdns_multicast_socket() -> std::io::Result<tokio::net::UdpSocket> {
+pub fn spawn_llmnr_listener_task(
+    config: Arc<ArcSwap<Config>>,
+    pipeline: Arc<DnsPipeline>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut sock_v4: Option<tokio::net::UdpSocket> = None;
+        let mut sock_v6: Option<tokio::net::UdpSocket> = None;
+        let notify = pipeline.llmnr_notify();
+        let mut buf_v4 = [0_u8; 4096];
+        let mut buf_v6 = [0_u8; 4096];
+
+        loop {
+            if !config.load().llmnr_enabled {
+                sock_v4 = None;
+                sock_v6 = None;
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    () = notify.notified() => {}
+                }
+                continue;
+            }
+
+            if sock_v4.is_none() {
+                match bind_multicast_v4(std::net::Ipv4Addr::new(224, 0, 0, 252), 5355) {
+                    Ok(sock) => sock_v4 = Some(sock),
+                    Err(err) => {
+                        tracing::debug!(error = %err, "passive LLMNR IPv4 multicast listener unavailable");
+                    }
+                }
+            }
+            if sock_v6.is_none()
+                && let Ok(sock) = bind_multicast_v6(
+                    std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x0001, 0x0003),
+                    5355,
+                )
+            {
+                sock_v6 = Some(sock);
+            }
+
+            if sock_v4.is_none() && sock_v6.is_none() {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    () = tokio::time::sleep(Duration::from_secs(30)) => {}
+                }
+                continue;
+            }
+
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                () = notify.notified() => {}
+                recv_res = recv_opt(sock_v4.as_ref(), &mut buf_v4) => {
+                    match recv_res {
+                        Ok(len) => pipeline.llmnr_resolver().ingest_llmnr_packet(&buf_v4[..len]),
+                        Err(err) => {
+                            tracing::debug!(error = %err, "LLMNR IPv4 multicast recv error");
+                            sock_v4 = None;
+                        }
+                    }
+                }
+                recv_res = recv_opt(sock_v6.as_ref(), &mut buf_v6) => {
+                    match recv_res {
+                        Ok(len) => pipeline.llmnr_resolver().ingest_llmnr_packet(&buf_v6[..len]),
+                        Err(err) => {
+                            tracing::debug!(error = %err, "LLMNR IPv6 multicast recv error");
+                            sock_v6 = None;
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn recv_opt(sock: Option<&tokio::net::UdpSocket>, buf: &mut [u8]) -> std::io::Result<usize> {
+    match sock {
+        Some(s) => s.recv_from(buf).await.map(|(len, _)| len),
+        None => std::future::pending().await,
+    }
+}
+
+fn bind_multicast_v4(
+    group: std::net::Ipv4Addr,
+    port: u16,
+) -> std::io::Result<tokio::net::UdpSocket> {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-    let domain = socket2::Domain::IPV4;
-    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
     sock.set_reuse_address(true)?;
     #[cfg(unix)]
     sock.set_reuse_port(true)?;
     sock.set_nonblocking(true)?;
-    let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5353));
+    let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
     sock.bind(&bind_addr.into())?;
-    sock.join_multicast_v4(&Ipv4Addr::new(224, 0, 0, 251), &Ipv4Addr::UNSPECIFIED)?;
+    sock.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)?;
+    let std_sock: std::net::UdpSocket = sock.into();
+    tokio::net::UdpSocket::from_std(std_sock)
+}
+
+fn bind_multicast_v6(
+    group: std::net::Ipv6Addr,
+    port: u16,
+) -> std::io::Result<tokio::net::UdpSocket> {
+    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    sock.set_only_v6(true)?;
+    sock.set_reuse_address(true)?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true)?;
+    sock.set_nonblocking(true)?;
+    let bind_addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0));
+    sock.bind(&bind_addr.into())?;
+    sock.join_multicast_v6(&group, 0)?;
     let std_sock: std::net::UdpSocket = sock.into();
     tokio::net::UdpSocket::from_std(std_sock)
 }

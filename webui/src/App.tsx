@@ -15,6 +15,8 @@ import { t } from "./i18n";
 import type { AcmeChallengeType } from "./types/AcmeChallengeType";
 import type { AcmeStatusResponse } from "./types/AcmeStatusResponse";
 import type { AuthStatusResponse } from "./types/AuthStatusResponse";
+import type { BlockedServiceInfo } from "./types/BlockedServiceInfo";
+import type { BlockedServicesConfig } from "./types/BlockedServicesConfig";
 import type { BlockMode } from "./types/BlockMode";
 import type { BlockingStatusResponse } from "./types/BlockingStatusResponse";
 import type { CfCdnStatus } from "./types/CfCdnStatus";
@@ -30,6 +32,7 @@ import type { DnssecNta } from "./types/DnssecNta";
 import type { FilterSubscription } from "./types/FilterSubscription";
 import type { QueryEvent } from "./types/QueryEvent";
 import type { QuickRuleResponse } from "./types/QuickRuleResponse";
+import type { RecursiveConfig } from "./types/RecursiveConfig";
 import type { RulesPayload } from "./types/RulesPayload";
 import type { SafeSearchConfig } from "./types/SafeSearchConfig";
 import type { SetupCompletePayload } from "./types/SetupCompletePayload";
@@ -136,6 +139,7 @@ export default function App() {
   const [rollbackBusy, setRollbackBusy] = createSignal(false);
   const [refreshingSplitDns, setRefreshingSplitDns] = createSignal(false);
   const [mdnsEnabled, setMdnsEnabled] = createSignal(false);
+  const [llmnrEnabled, setLlmnrEnabled] = createSignal(false);
   const [sniClientIdHostnamesText, setSniClientIdHostnamesText] = createSignal("");
   const [privatePtrEnabled, setPrivatePtrEnabled] = createSignal(false);
   const [privatePtrUpstreamsText, setPrivatePtrUpstreamsText] = createSignal("");
@@ -160,6 +164,17 @@ export default function App() {
     yandex: true,
     pixabay: true,
     brave: true,
+  });
+  const [blockedServices, setBlockedServices] = createSignal<BlockedServicesConfig>({
+    enabled: false,
+    services: [],
+  });
+  const [blockedServiceCatalog, setBlockedServiceCatalog] = createSignal<BlockedServiceInfo[]>([]);
+  const [recursive, setRecursive] = createSignal<RecursiveConfig>({
+    enabled: false,
+    qname_minimization: "relaxed",
+    dnssec_validate: false,
+    case_randomization: false,
   });
   const [dns64Enabled, setDns64Enabled] = createSignal(false);
   const [dns64PrefixesText, setDns64PrefixesText] = createSignal("64:ff9b::/96");
@@ -873,6 +888,7 @@ export default function App() {
     setDhcpLeasesForwardEnabled(data.dhcp_leases_forward_enabled);
     setDhcpLeasesDomain(data.dhcp_leases_domain || "lan");
     setMdnsEnabled(data.mdns_enabled);
+    setLlmnrEnabled(data.llmnr_enabled);
     setSniClientIdHostnamesText((data.sni_client_id_hostnames ?? []).join("\n"));
     setPrivatePtrEnabled(data.private_ptr_enabled);
     setPrivatePtrUpstreamsText((data.private_ptr_upstreams ?? []).join("\n"));
@@ -907,6 +923,20 @@ export default function App() {
         yandex: true,
         pixabay: true,
         brave: true,
+      },
+    );
+    setBlockedServices(
+      data.blocked_services ?? {
+        enabled: false,
+        services: [],
+      },
+    );
+    setRecursive(
+      data.recursive ?? {
+        enabled: false,
+        qname_minimization: "relaxed",
+        dnssec_validate: false,
+        case_randomization: false,
       },
     );
     setDns64Enabled(data.dns64_enabled);
@@ -1419,6 +1449,18 @@ export default function App() {
     }
   }
 
+  async function fetchBlockedServiceCatalog() {
+    try {
+      const res = await fetch("/api/blocked-services");
+      if (res.ok) {
+        const data: BlockedServiceInfo[] = await res.json();
+        setBlockedServiceCatalog(data);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   async function fetchConfig() {
     try {
       const res = await fetch("/api/config");
@@ -1427,6 +1469,7 @@ export default function App() {
         applyConfigToForm(data);
         void fetchConfigHistory();
         void fetchSplitDnsStatus();
+        void fetchBlockedServiceCatalog();
       }
     } catch {
       // ignore
@@ -1503,6 +1546,7 @@ export default function App() {
       dhcp_leases_forward_enabled: dhcpLeasesForwardEnabled(),
       dhcp_leases_domain: dhcpLeasesDomain().trim() || "lan",
       mdns_enabled: mdnsEnabled(),
+      llmnr_enabled: llmnrEnabled(),
       sni_client_id_hostnames: parseLines(sniClientIdHostnamesText()),
       private_ptr_enabled: privatePtrEnabled(),
       private_ptr_upstreams: parseLines(privatePtrUpstreamsText()),
@@ -1518,6 +1562,8 @@ export default function App() {
       tls_key_path: tlsKeyPath().trim(),
       rdns_enabled: rdnsEnabled(),
       safesearch: safesearch(),
+      blocked_services: blockedServices(),
+      recursive: recursive(),
       dns64_enabled: dns64Enabled(),
       dns64_prefixes: parseLines(dns64PrefixesText()),
       svcb_strip_ech: svcbStripEch(),
@@ -1768,6 +1814,7 @@ export default function App() {
             <Show when={tab() === "clients"}>
               <ClientsView
                 overview={clientsOverview()}
+                blockedServiceCatalog={blockedServiceCatalog()}
                 message={clientsMessage()}
                 isError={clientsIsError()}
                 saving={clientsSaving()}
@@ -1954,6 +2001,8 @@ export default function App() {
                 onDhcpLeasesDomainChange={setDhcpLeasesDomain}
                 mdnsEnabled={mdnsEnabled()}
                 onMdnsEnabledChange={setMdnsEnabled}
+                llmnrEnabled={llmnrEnabled()}
+                onLlmnrEnabledChange={setLlmnrEnabled}
                 sniClientIdHostnamesText={sniClientIdHostnamesText()}
                 onSniClientIdHostnamesChange={setSniClientIdHostnamesText}
                 privatePtrEnabled={privatePtrEnabled()}
@@ -1980,6 +2029,11 @@ export default function App() {
                 onRdnsEnabledChange={setRdnsEnabled}
                 safesearch={safesearch()}
                 onSafesearchChange={setSafesearch}
+                blockedServices={blockedServices()}
+                onBlockedServicesChange={setBlockedServices}
+                blockedServiceCatalog={blockedServiceCatalog()}
+                recursive={recursive()}
+                onRecursiveChange={setRecursive}
                 dns64Enabled={dns64Enabled()}
                 onDns64EnabledChange={setDns64Enabled}
                 dns64PrefixesText={dns64PrefixesText()}

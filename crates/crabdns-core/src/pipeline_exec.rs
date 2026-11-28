@@ -13,15 +13,13 @@ use crate::config::BlockMode;
 use crate::cookies::CookieCheck;
 use crate::edns::{
     EDE_BLOCKED, EDE_DNSSEC_BOGUS, EDE_NO_REACHABLE_AUTHORITY, EDE_PROHIBITED, EDE_STALE_ANSWER,
-    EcsConfig, apply_ecs_to_message, extract_edns_client_ip, extract_edns_mac, has_dnssec_ok,
-    has_edns_mac, has_private_ecs, resolve_ecs_subnet, set_dnssec_ok, strip_forwarder_edns_options,
+    EcsConfig, apply_ecs_to_message, extract_edns_client_ip, extract_edns_mac, has_edns_mac,
+    has_private_ecs, resolve_ecs_subnet, set_dnssec_ok, strip_forwarder_edns_options,
 };
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision};
 use crate::filter_rules::FilterQueryContext;
-use crate::lan::{
-    build_ddr_response, build_hosts_response, is_ddr_query, is_local_domain, is_private_ptr_domain,
-};
+use crate::lan::{build_ddr_response, build_hosts_response, is_ddr_query, is_private_ptr_domain};
 use crate::pipeline::{DnsPipeline, QueryContext, QueryOutcome, QueryProtocol};
 use crate::pipeline_cache::cache_upstream_response_msg;
 use crate::pipeline_types::LogMeta;
@@ -180,6 +178,12 @@ impl DnsPipeline {
         if let Some(resp) = self.check_pre_routing(request, meta)? {
             return Ok(resp);
         }
+        if let Some(resp) = self.check_multicast_local_resolution(request, meta).await? {
+            return Ok(resp);
+        }
+        if let Some(resp) = self.check_local_domain_block(request, meta)? {
+            return Ok(resp);
+        }
 
         let flags = self.build_policy_flags(request, policy.as_deref());
         let decision = self.evaluate_request_filter(meta, ctx, policy.as_deref());
@@ -196,9 +200,7 @@ impl DnsPipeline {
 
         if !flags.explicitly_allowed {
             let p = policy.as_deref();
-            if let Some(resp) =
-                self.check_safesearch_interceptor(request, meta, p, flags.blocking_disabled)?
-            {
+            if let Some(resp) = self.check_policy_interceptors(request, meta, p, flags)? {
                 return Ok(resp);
             }
         }
@@ -335,33 +337,6 @@ impl DnsPipeline {
             client_tags: policy.map_or(empty_tags, |p| p.tags.as_slice()),
         };
         ClientRegistry::evaluate_domain_with_context(policy, &self.filter, &filter_ctx)
-    }
-
-    fn build_policy_flags(
-        &self,
-        request: &Message,
-        policy: Option<&ResolvedClientPolicy>,
-    ) -> PolicyFlags {
-        PolicyFlags {
-            blocking_disabled: self.is_blocking_paused()
-                || policy.is_some_and(|p| !p.blocking_enabled),
-            explicitly_allowed: false,
-            cname_cloaking_on: policy
-                .and_then(|p| p.cname_cloaking_blocking)
-                .unwrap_or_else(|| self.cname_cloaking()),
-            block_mode: policy
-                .and_then(|p| p.block_mode)
-                .unwrap_or_else(|| self.block_mode()),
-            dnssec_on: self.dnssec_enabled.load(Ordering::Relaxed),
-            client_wants_do: has_dnssec_ok(request),
-            client_cd: request.checking_disabled,
-            dns_rebinding_on: self.dns_rebinding_protection.load(Ordering::Relaxed),
-            dns64_on: self.dns64_enabled(),
-            svcb_strip_ech: self.svcb_strip_ech.load(Ordering::Relaxed),
-            svcb_strip_hints: self.svcb_strip_hints.load(Ordering::Relaxed),
-            cf_cdn_on: self.cf_cdn.is_enabled(),
-            disable_ipv6: false,
-        }
     }
 
     #[allow(clippy::unused_self)]
@@ -505,40 +480,6 @@ impl DnsPipeline {
             return Ok(Some(resp));
         }
 
-        if let Some(resp) = self.check_local_domain_block(request, meta)? {
-            return Ok(Some(resp));
-        }
-
-        Ok(None)
-    }
-
-    fn check_local_domain_block(
-        &self,
-        request: &Message,
-        meta: &LogMeta,
-    ) -> Result<Option<Vec<u8>>> {
-        if self.block_local_domains.load(Ordering::Relaxed)
-            && is_local_domain(&meta.domain)
-            && self
-                .split_router
-                .load()
-                .resolve_with_policy(&meta.domain)
-                .is_none()
-        {
-            let resp = build_error_response(request, ResponseCode::NXDomain)?;
-            if !self.suppress_local_domain_logs.load(Ordering::Relaxed) {
-                self.emit_log(
-                    meta,
-                    QueryOutcome::Blocked,
-                    Some("lan:local-mdns".to_string()),
-                    Some("lan".to_string()),
-                    None,
-                    "NXDOMAIN",
-                    Vec::new(),
-                );
-            }
-            return Ok(Some(resp));
-        }
         Ok(None)
     }
 

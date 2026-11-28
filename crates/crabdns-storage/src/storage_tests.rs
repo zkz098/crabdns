@@ -134,6 +134,7 @@ fn test_clients_groups_persistence_and_selective_pruning() {
         block_mode: None,
         cname_cloaking_blocking: None,
         safesearch_enabled: None,
+        blocked_services: None,
         upstream_policy: crabdns_core::UpstreamPolicy::default(),
     }];
     let clients = vec![ClientProfile {
@@ -147,6 +148,7 @@ fn test_clients_groups_persistence_and_selective_pruning() {
         upstreams: vec![],
         block_mode: None,
         safesearch_enabled: None,
+        blocked_services: None,
         upstream_policy: crabdns_core::UpstreamPolicy::default(),
         tags: vec!["tv".to_string()],
     }];
