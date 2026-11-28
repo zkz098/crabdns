@@ -88,9 +88,9 @@ jobs:
           esac
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
-      - name: Install musl toolchain
+      - name: Install musl toolchain & zstd
         if: endsWith(matrix.target, '-musl')
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools zstd
       - name: Build release binary
         shell: bash
         env:
@@ -101,14 +101,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          ARCHIVE="crabdns-${{ steps.meta.outputs.tag }}-${{ matrix.platform }}.${{ matrix.ext }}"
-          BIN_PATH="target/${{ matrix.target }}/release/${{ matrix.bin }}"
-          if [ "${{ matrix.ext }}" = "tar.gz" ]; then
-            tar -C "target/${{ matrix.target }}/release" -czf "dist/${ARCHIVE}" "${{ matrix.bin }}"
-          else
-            7z a -tzip "dist/${ARCHIVE}" "${BIN_PATH}"
-          fi
-          (cd dist && sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256")
+          GZ_ARCHIVE="crabdns-${{ steps.meta.outputs.tag }}-${{ matrix.platform }}.tar.gz"
+          ZST_ARCHIVE="crabdns-${{ steps.meta.outputs.tag }}-${{ matrix.platform }}.tar.zst"
+          tar -C "target/${{ matrix.target }}/release" -czf "dist/${GZ_ARCHIVE}" "${{ matrix.bin }}"
+          tar -C "target/${{ matrix.target }}/release" -cf - "${{ matrix.bin }}" | zstd -19 -q -o "dist/${ZST_ARCHIVE}"
+          (cd dist && sha256sum "${GZ_ARCHIVE}" > "${GZ_ARCHIVE}.sha256" && sha256sum "${ZST_ARCHIVE}" > "${ZST_ARCHIVE}.sha256")
       - name: Upload release archive
         uses: actions/upload-artifact@v7
         with:
@@ -131,7 +128,7 @@ jobs:
           merge-multiple: true
       - uses: dtolnay/rust-toolchain@stable
       - name: Install sigilup CLI
-        run: cargo install sigilup-cli --version 0.1.3 --locked
+        run: cargo install sigilup-cli --version 0.1.4 --locked
       - name: Resolve version
         id: meta
         run: |
@@ -164,10 +161,12 @@ jobs:
 
           ARCHIVE_FILES=()
           for p in linux-x86_64 linux-aarch64; do
-            f="dist/crabdns-${TAG}-${p}.tar.gz"
-            if [ -f "$f" ]; then
-              ARCHIVE_FILES+=("$f")
-            fi
+            for ext in tar.gz tar.zst; do
+              f="dist/crabdns-${TAG}-${p}.${ext}"
+              if [ -f "$f" ]; then
+                ARCHIVE_FILES+=("$f")
+              fi
+            done
           done
 
           sigilup sign "${ARCHIVE_FILES[@]}"
@@ -223,6 +222,7 @@ jobs:
           generate_release_notes: false
           files: |
             dist/crabdns-*.tar.gz
+            dist/crabdns-*.tar.zst
             dist/*.sha256
             dist/*.hsig
             dist/latest.hsig.json

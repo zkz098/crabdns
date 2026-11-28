@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "crabdns-core"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "crabdns-server"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "crabdns-storage"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "chrono",
  "crabdns-core",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "crabdns-web"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
@@ -3017,6 +3017,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3243,12 +3252,13 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sigilup"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcac23676d0d293c89df7b2b5117cc9ee53031e80e32ff422ff908f8ba23c274"
+checksum = "57bf8a230d4eb3c348105a7b53854439e61d61a4f0742b87262484e2d42036c1"
 dependencies = [
  "flate2",
  "reqwest",
+ "ruzstd",
  "self-replace",
  "serde",
  "serde_json",
@@ -3262,9 +3272,9 @@ dependencies = [
 
 [[package]]
 name = "sigilup-core"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "005ce1b7b90946d3715472f5dd49f10036751afffd42c1f1412d417e9261e5e5"
+checksum = "e344dad60332512f67b8575426498bd6429268b5ee1dff57fcbbfa3d5273c743"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -3283,9 +3293,9 @@ dependencies = [
 
 [[package]]
 name = "sigilup-manifest"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b45a1351f713fea413f6cd046ad4ea0d703e564729407ce79249e057dca6a086"
+checksum = "ee1f37cad1f05512b28ab5c9ce1a32bcdcd06d9e8e8ff38563ed53564d48f9d4"
 dependencies = [
  "semver",
  "serde",
