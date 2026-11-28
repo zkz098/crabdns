@@ -4,6 +4,20 @@ import type { QueryEvent } from "../types/QueryEvent";
 import { OutcomeBadge } from "./OutcomeBadge";
 import { SelectMenu, type SelectOption } from "./SelectMenu";
 
+function matchedListBadgeClass(entry: QueryEvent): string {
+  if (entry.outcome === "blocked" || entry.outcome === "error") {
+    return "bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/20";
+  }
+  if (
+    entry.outcome === "rewritten" ||
+    entry.matched_list === "hosts" ||
+    entry.matched_list === "rewrites"
+  ) {
+    return "bg-sky-500/10 text-sky-700 dark:text-sky-400 border-sky-500/20";
+  }
+  return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20";
+}
+
 interface LogsViewProps {
   logs: QueryEvent[];
   search: string;
@@ -273,7 +287,9 @@ export function LogsView(props: LogsViewProps) {
                           <div class="flex items-center gap-1.5 mt-0.5 text-[10px] text-[#8f8f8f] dark:text-[#71717a] truncate">
                             <Show when={entry.matched_list}>
                               {(listName) => (
-                                <span class="px-1.5 py-0.2 rounded bg-rose-500/10 text-rose-700 dark:text-rose-400 border border-rose-500/20 shrink-0">
+                                <span
+                                  class={`px-1.5 py-0.2 rounded border shrink-0 ${matchedListBadgeClass(entry)}`}
+                                >
                                   {t("logsMatchedList")}: {listName()}
                                 </span>
                               )}
@@ -342,7 +358,9 @@ export function LogsView(props: LogsViewProps) {
                     <Show when={entry.matched_list}>
                       {(listName) => (
                         <div class="mt-0.5">
-                          <span class="px-1.5 py-0.5 rounded text-[10px] bg-rose-500/10 text-rose-700 dark:text-rose-400 border border-rose-500/20">
+                          <span
+                            class={`px-1.5 py-0.5 rounded text-[10px] border ${matchedListBadgeClass(entry)}`}
+                          >
                             {t("logsMatchedList")}: {listName()}
                           </span>
                         </div>
