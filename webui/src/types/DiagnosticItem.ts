@@ -2,4 +2,4 @@
 import type { DiagnosticCategory } from "./DiagnosticCategory";
 import type { DiagnosticStatus } from "./DiagnosticStatus";
 
-export type DiagnosticItem = { id: string, category: DiagnosticCategory, status: DiagnosticStatus, summary: string, detail: string | null, hint: string | null, };
+export type DiagnosticItem = { id: string, category: DiagnosticCategory, status: DiagnosticStatus, summary: string, detail: string | null, hint: string | null, action_tab?: string | null, };

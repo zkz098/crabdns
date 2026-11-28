@@ -283,6 +283,10 @@ pub fn build_router_with_managers(
             "/api/system/diagnostics",
             post(diagnostics_api::run_system_diagnostics),
         )
+        .route(
+            "/api/system/diagnostics/trace",
+            post(diagnostics_api::trace_domain_resolution),
+        )
         .route("/api/cf-cdn/status", get(controls::get_cf_cdn_status))
         .route("/api/cf-cdn/test", post(controls::trigger_cf_cdn_test));
 

@@ -3,17 +3,27 @@ import { t, type TranslationKey } from "../i18n";
 import type { DiagnosticCategory } from "../types/DiagnosticCategory";
 import type { DiagnosticItem } from "../types/DiagnosticItem";
 import type { DiagnosticStatus } from "../types/DiagnosticStatus";
+import type { DomainTraceResponse } from "../types/DomainTraceResponse";
 import type { SystemDiagnosticsResponse } from "../types/SystemDiagnosticsResponse";
 
 const ITEM_TITLE_KEYS: Record<string, TranslationKey> = {
   mdns_port_conflict: "diagItemMdnsConflict",
   loopback_probe: "diagItemLoopbackProbe",
+  system_dns_takeover: "diagItemSystemDns",
   udp_inflight_drops: "diagItemUdpDrops",
   upstream_health: "diagItemUpstreamHealth",
   bootstrap_dns: "diagItemBootstrapDns",
   forwarding_loop: "diagItemForwardingLoop",
   webui_auth: "diagItemWebuiAuth",
+  tls_cert_health: "diagItemTlsCert",
+  open_resolver_risk: "diagItemOpenResolver",
+  dnssec_clock: "diagItemDnssecClock",
+  local_data_sources: "diagItemLocalSources",
+  data_dir_storage: "diagItemDataStorage",
+  cache_config: "diagItemCacheConfig",
 };
+
+const TRACE_QTYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "HTTPS", "PTR"] as const;
 
 function categoryLabel(category: DiagnosticCategory): string {
   switch (category) {
@@ -23,6 +33,21 @@ function categoryLabel(category: DiagnosticCategory): string {
       return t("diagCatUpstream");
     case "security":
       return t("diagCatSecurity");
+    case "storage":
+      return t("diagCatStorage");
+  }
+}
+
+function traceStageLabel(stage: string): string {
+  switch (stage) {
+    case "filter":
+      return t("diagTraceStageFilter");
+    case "routing":
+      return t("diagTraceStageRouting");
+    case "result":
+      return t("diagTraceStageResult");
+    default:
+      return stage;
   }
 }
 
@@ -73,10 +98,16 @@ function formatCheckedTime(ms: number): string {
   });
 }
 
-export function DiagnosticsView() {
+export function DiagnosticsView(props: { onNavigateTab?: (tab: string) => void } = {}) {
   const [report, setReport] = createSignal<SystemDiagnosticsResponse | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [errorMsg, setErrorMsg] = createSignal("");
+
+  const [traceDomain, setTraceDomain] = createSignal("");
+  const [traceQtype, setTraceQtype] = createSignal<string>("A");
+  const [traceLoading, setTraceLoading] = createSignal(false);
+  const [traceError, setTraceError] = createSignal("");
+  const [traceResult, setTraceResult] = createSignal<DomainTraceResponse | null>(null);
 
   async function runDiagnostics() {
     setLoading(true);
@@ -93,6 +124,32 @@ export function DiagnosticsView() {
       setErrorMsg(t("diagFailed"));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function runDomainTrace(e: Event) {
+    e.preventDefault();
+    const domain = traceDomain().trim();
+    if (!domain) return;
+    setTraceLoading(true);
+    setTraceError("");
+    try {
+      const res = await fetch("/api/system/diagnostics/trace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain, qtype: traceQtype() }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setTraceError(body?.error || t("diagTraceFailed"));
+        return;
+      }
+      const data: DomainTraceResponse = await res.json();
+      setTraceResult(data);
+    } catch {
+      setTraceError(t("diagTraceFailed"));
+    } finally {
+      setTraceLoading(false);
     }
   }
 
@@ -218,6 +275,7 @@ export function DiagnosticsView() {
           severity="error"
           items={errorItems()}
           delay={60}
+          onNavigateTab={props.onNavigateTab}
         />
       </Show>
 
@@ -228,6 +286,7 @@ export function DiagnosticsView() {
           severity="warn"
           items={warnItems()}
           delay={120}
+          onNavigateTab={props.onNavigateTab}
         />
       </Show>
 
@@ -238,8 +297,121 @@ export function DiagnosticsView() {
           severity="ok"
           items={infoItems()}
           delay={180}
+          onNavigateTab={props.onNavigateTab}
         />
       </Show>
+
+      {/* 4. Single-Domain Resolution Trace */}
+      <section
+        class="animate-card-enter rounded-xl border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] p-4 sm:p-5 space-y-3.5"
+        style={{ "animation-delay": "220ms" }}
+      >
+        <div class="space-y-0.5">
+          <div class="flex items-center gap-2">
+            <span class="i-ri-route-line text-base text-[#171717] dark:text-[#ededed]" />
+            <h3 class="text-sm font-semibold text-[#171717] dark:text-[#ededed]">
+              {t("diagTraceTitle")}
+            </h3>
+          </div>
+          <p class="text-xs text-[#666666] dark:text-[#a1a1aa]">{t("diagTraceSubtitle")}</p>
+        </div>
+
+        <form onSubmit={(e) => void runDomainTrace(e)} class="flex flex-wrap sm:flex-nowrap gap-2">
+          <input
+            type="text"
+            value={traceDomain()}
+            onInput={(e) => setTraceDomain(e.currentTarget.value)}
+            placeholder={t("diagTracePlaceholder")}
+            class="flex-1 min-w-[180px] h-8.5 px-3 rounded-lg border border-[#e5e5e5] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] text-xs font-mono text-[#171717] dark:text-[#ededed] placeholder:text-[#999999] focus:outline-none focus:ring-1 focus:ring-[#171717] dark:focus:ring-white"
+          />
+          <select
+            value={traceQtype()}
+            onChange={(e) => setTraceQtype(e.currentTarget.value)}
+            class="h-8.5 px-2.5 rounded-lg border border-[#e5e5e5] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] text-xs font-mono text-[#171717] dark:text-[#ededed] focus:outline-none"
+          >
+            <For each={TRACE_QTYPES}>{(qt) => <option value={qt}>{qt}</option>}</For>
+          </select>
+          <button
+            type="submit"
+            disabled={traceLoading() || !traceDomain().trim()}
+            class="h-8.5 px-3.5 rounded-lg text-xs font-medium bg-[#171717] dark:bg-white hover:bg-[#333333] dark:hover:bg-[#e5e5e5] disabled:opacity-50 text-white dark:text-[#0a0a0a] flex items-center gap-1.5 cursor-pointer transition-all duration-150 shrink-0"
+          >
+            <span class={`i-ri-play-line text-sm ${traceLoading() ? "animate-spin" : ""}`} />
+            <span>{traceLoading() ? t("diagTraceRunning") : t("diagTraceBtn")}</span>
+          </button>
+        </form>
+
+        <Show when={traceError()}>
+          <div class="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-400">
+            {traceError()}
+          </div>
+        </Show>
+
+        <Show when={traceResult()}>
+          {(tr) => (
+            <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] p-3.5 space-y-3">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-mono text-xs font-semibold text-[#171717] dark:text-[#ededed]">
+                    {tr().domain}
+                  </span>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#eaeaea]/80 dark:bg-[#1f1f1f] text-[#52525b] dark:text-[#a1a1aa]">
+                    {tr().qtype}
+                  </span>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                    {tr().outcome} · {tr().rcode}
+                  </span>
+                </div>
+                <span class="font-mono text-[11px] text-[#666666] dark:text-[#a1a1aa] tabular-nums">
+                  {tr().elapsed_ms.toFixed(1)} ms
+                </span>
+              </div>
+
+              <div class="space-y-1.5">
+                <For each={tr().steps}>
+                  {(step, idx) => (
+                    <div class="flex items-start gap-2 text-xs">
+                      <span
+                        class={`w-2 h-2 rounded-full shrink-0 mt-1.5 ${statusDotClass(step.status)}`}
+                      />
+                      <span class="font-medium text-[#52525b] dark:text-[#a1a1aa] shrink-0">
+                        {idx() + 1}. {traceStageLabel(step.stage)}:
+                      </span>
+                      <span class="text-[#171717] dark:text-[#ededed] break-all">
+                        {step.detail}
+                      </span>
+                    </div>
+                  )}
+                </For>
+              </div>
+
+              <div class="pt-2 border-t border-[#eaeaea] dark:border-[#262626] space-y-1">
+                <div class="text-[11px] font-medium text-[#666666] dark:text-[#a1a1aa]">
+                  {t("diagTraceAnswers")}
+                </div>
+                <Show
+                  when={tr().answers.length > 0}
+                  fallback={
+                    <p class="text-xs text-[#888888] dark:text-[#71717a]">
+                      {t("diagTraceNoAnswers")}
+                    </p>
+                  }
+                >
+                  <div class="flex flex-wrap gap-1.5">
+                    <For each={tr().answers}>
+                      {(ans) => (
+                        <span class="font-mono text-[11px] px-2 py-0.5 rounded border border-[#eaeaea] dark:border-[#262626] bg-white dark:bg-[#0a0a0a] text-[#171717] dark:text-[#ededed]">
+                          {ans}
+                        </span>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            </div>
+          )}
+        </Show>
+      </section>
     </div>
   );
 }
@@ -283,6 +455,7 @@ function SeveritySection(props: {
   severity: DiagnosticStatus;
   items: DiagnosticItem[];
   delay: number;
+  onNavigateTab?: (tab: string) => void;
 }) {
   const headerAccent = () => {
     switch (props.severity) {
@@ -363,10 +536,22 @@ function SeveritySection(props: {
               <Show when={item.hint}>
                 {(hint) => (
                   <div
-                    class={`ml-4 rounded-md border px-2.5 py-1.5 text-[11px] flex items-start gap-1.5 ${hintClass()}`}
+                    class={`ml-4 rounded-md border px-2.5 py-1.5 text-[11px] flex flex-wrap items-center justify-between gap-2 ${hintClass()}`}
                   >
-                    <span class="i-ri-lightbulb-line text-xs shrink-0 mt-0.5" />
-                    <span>{hint()}</span>
+                    <div class="flex items-start gap-1.5 min-w-0">
+                      <span class="i-ri-lightbulb-line text-xs shrink-0 mt-0.5" />
+                      <span>{hint()}</span>
+                    </div>
+                    <Show when={item.action_tab && props.onNavigateTab}>
+                      <button
+                        type="button"
+                        onClick={() => props.onNavigateTab?.(item.action_tab!)}
+                        class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/80 dark:bg-[#0a0a0a]/80 border border-current/20 font-medium hover:opacity-80 cursor-pointer shrink-0 transition-opacity"
+                      >
+                        <span>{t("diagActionFix")}</span>
+                        <span class="i-ri-arrow-right-line text-xs" />
+                      </button>
+                    </Show>
                   </div>
                 )}
               </Show>

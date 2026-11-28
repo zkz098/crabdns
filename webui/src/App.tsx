@@ -1759,7 +1759,7 @@ export default function App() {
             </Show>
 
             <Show when={tab() === "diagnostics"}>
-              <DiagnosticsView />
+              <DiagnosticsView onNavigateTab={(next) => handleSelectTab(next as TabKey)} />
             </Show>
 
             <Show when={tab() === "clients"}>
