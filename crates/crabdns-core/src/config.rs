@@ -44,17 +44,38 @@ pub enum StorageProfile {
     Performance,
 }
 
+/// Static startup, listener, and storage-path configuration loaded from CLI/TOML.
+///
+/// These fields are intentionally separated from [`RuntimeConfig`] so they are
+/// never overwritten by persisted runtime settings on restart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct Config {
+pub struct BootstrapConfig {
     #[serde(default = "default_listen_dns")]
     pub listen_dns: SocketAddr,
     #[serde(default = "default_listen_web")]
     pub listen_web: SocketAddr,
     #[serde(default)]
     pub listen_web_tls: Option<SocketAddr>,
+    #[serde(default)]
+    pub listen_dot: Option<SocketAddr>,
+    #[serde(default)]
+    pub listen_doq: Option<SocketAddr>,
+    #[serde(default)]
+    pub listen_doh3: Option<SocketAddr>,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    #[serde(default = "default_tcp_max_connections")]
+    pub tcp_max_connections: usize,
+    #[serde(default = "default_tcp_idle_timeout_secs")]
+    pub tcp_idle_timeout_secs: u64,
+    #[serde(default)]
+    pub custom_rules: Vec<String>,
+}
+
+/// Dynamic runtime configuration editable via the Web UI and persisted in storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct RuntimeConfig {
     #[serde(default = "default_upstreams")]
     pub upstreams: Vec<String>,
     #[serde(default)]
@@ -75,8 +96,6 @@ pub struct Config {
     pub cache_persist_enabled: bool,
     #[serde(default = "default_upstream_timeout_ms")]
     pub upstream_timeout_ms: u64,
-    #[serde(default)]
-    pub custom_rules: Vec<String>,
     #[serde(default = "default_log_retention_hours")]
     pub log_retention_hours: u64,
     #[serde(default = "default_log_max_disk_mb")]
@@ -112,21 +131,11 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub doh_enabled: bool,
     #[serde(default)]
-    pub listen_dot: Option<SocketAddr>,
-    #[serde(default)]
-    pub listen_doq: Option<SocketAddr>,
-    #[serde(default)]
-    pub listen_doh3: Option<SocketAddr>,
-    #[serde(default)]
     pub sni_client_id_hostnames: Vec<String>,
     #[serde(default)]
     pub tls_cert_path: Option<PathBuf>,
     #[serde(default)]
     pub tls_key_path: Option<PathBuf>,
-    #[serde(default = "default_tcp_max_connections")]
-    pub tcp_max_connections: usize,
-    #[serde(default = "default_tcp_idle_timeout_secs")]
-    pub tcp_idle_timeout_secs: u64,
     #[serde(default)]
     pub allow_private_subscriptions: bool,
     #[serde(default)]
@@ -229,6 +238,31 @@ pub struct Config {
     pub dnssec_strict_clock: bool,
     #[serde(default)]
     pub dnssec_auto_rollover: bool,
+}
+
+/// Top-level `CrabDNS` configuration combining [`BootstrapConfig`] and [`RuntimeConfig`].
+///
+/// Both sections are flattened for TOML/JSON compatibility with existing config files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(flatten)]
+    pub bootstrap: BootstrapConfig,
+    #[serde(flatten)]
+    pub runtime: RuntimeConfig,
+}
+
+impl std::ops::Deref for Config {
+    type Target = RuntimeConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl std::ops::DerefMut for Config {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
 }
 
 fn default_listen_dns() -> SocketAddr {
@@ -347,13 +381,26 @@ pub fn validate_split_dns_refresh_interval(secs: u64) -> Result<()> {
     Ok(())
 }
 
-impl Default for Config {
+impl Default for BootstrapConfig {
     fn default() -> Self {
         Self {
             listen_dns: default_listen_dns(),
             listen_web: default_listen_web(),
             listen_web_tls: None,
+            listen_dot: None,
+            listen_doq: None,
+            listen_doh3: None,
             data_dir: default_data_dir(),
+            tcp_max_connections: default_tcp_max_connections(),
+            tcp_idle_timeout_secs: default_tcp_idle_timeout_secs(),
+            custom_rules: Vec::new(),
+        }
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
             upstreams: default_upstreams(),
             bootstrap_dns: Vec::new(),
             upstream_strategy: UpstreamStrategy::default(),
@@ -364,7 +411,6 @@ impl Default for Config {
             cache_prefetch_enabled: true,
             cache_persist_enabled: false,
             upstream_timeout_ms: default_upstream_timeout_ms(),
-            custom_rules: Vec::new(),
             log_retention_hours: default_log_retention_hours(),
             log_max_disk_mb: default_log_max_disk_mb(),
             block_mode: BlockMode::default(),
@@ -382,14 +428,9 @@ impl Default for Config {
             split_dns_refresh_interval_secs: default_split_dns_refresh_interval_secs(),
             cname_cloaking_blocking: true,
             doh_enabled: true,
-            listen_dot: None,
-            listen_doq: None,
-            listen_doh3: None,
             sni_client_id_hostnames: Vec::new(),
             tls_cert_path: None,
             tls_key_path: None,
-            tcp_max_connections: default_tcp_max_connections(),
-            tcp_idle_timeout_secs: default_tcp_idle_timeout_secs(),
             allow_private_subscriptions: false,
             ecs_enabled: false,
             ecs_custom_ip: None,
@@ -472,8 +513,8 @@ mod tests {
     #[test]
     fn test_default_and_toml_config() {
         let def = Config::default();
-        assert_eq!(def.listen_dns.port(), 5354);
-        assert_eq!(def.listen_web.port(), 3000);
+        assert_eq!(def.bootstrap.listen_dns.port(), 5354);
+        assert_eq!(def.bootstrap.listen_web.port(), 3000);
         assert!(def.optimistic_cache);
 
         let parsed = Config::from_toml_str(
@@ -486,11 +527,11 @@ mod tests {
             "#,
         )
         .expect("valid toml");
-        assert_eq!(parsed.listen_dns.port(), 15353);
+        assert_eq!(parsed.bootstrap.listen_dns.port(), 15353);
         assert_eq!(parsed.bootstrap_dns, vec!["1.1.1.1", "tcp://8.8.8.8:53"]);
         assert_eq!(parsed.cache_size, 1024);
         assert!(!parsed.optimistic_cache);
-        assert_eq!(parsed.custom_rules, vec!["||ads.test^"]);
+        assert_eq!(parsed.bootstrap.custom_rules, vec!["||ads.test^"]);
     }
 
     #[test]

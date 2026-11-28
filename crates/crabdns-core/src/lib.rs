@@ -51,8 +51,8 @@ pub use clients::{
     ResolvedClientPolicy, ip_to_ptr_domain, validate_client_id, validate_client_identifier,
 };
 pub use config::{
-    AcmeChallengeType, BlockMode, CompiledUpstreamPolicy, Config, ResponseIpRule,
-    SplitDnsMatchMode, SplitDnsRule, StorageProfile, UpstreamGroup, UpstreamPolicy,
+    AcmeChallengeType, BlockMode, BootstrapConfig, CompiledUpstreamPolicy, Config, ResponseIpRule,
+    RuntimeConfig, SplitDnsMatchMode, SplitDnsRule, StorageProfile, UpstreamGroup, UpstreamPolicy,
     UpstreamStrategy,
 };
 pub use cookies::{CookieCheck, DnsCookieEngine};

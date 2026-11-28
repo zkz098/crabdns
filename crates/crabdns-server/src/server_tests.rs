@@ -60,17 +60,14 @@ async fn test_tcp_pipelining_out_of_order_and_formerr_keeps_conn_alive() {
     });
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let server = spawn_server(Config {
-        listen_dns: "127.0.0.1:0".parse().unwrap(),
-        listen_web: "127.0.0.1:0".parse().unwrap(),
-        data_dir: dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{upstream_addr}")],
-        custom_rules: vec!["||blocked.pipe.test^".to_string()],
-        rdns_enabled: false,
-        ..Config::default()
-    })
-    .await
-    .expect("spawn server");
+    let mut test_cfg = Config::default();
+    test_cfg.bootstrap.listen_dns = "127.0.0.1:0".parse().unwrap();
+    test_cfg.bootstrap.listen_web = "127.0.0.1:0".parse().unwrap();
+    test_cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    test_cfg.bootstrap.custom_rules = vec!["||blocked.pipe.test^".to_string()];
+    test_cfg.upstreams = vec![format!("udp://{upstream_addr}")];
+    test_cfg.rdns_enabled = false;
+    let server = spawn_server(test_cfg).await.expect("spawn server");
 
     let mut stream = tokio::net::TcpStream::connect(server.dns_addr)
         .await
@@ -128,4 +125,23 @@ async fn test_tcp_pipelining_out_of_order_and_formerr_keeps_conn_alive() {
 
     drop(stream);
     server.shutdown().await;
+}
+
+#[test]
+fn test_merge_saved_runtime_config_preserves_cf_cdn_and_bootstrap() {
+    let mut cfg = Config::default();
+    cfg.bootstrap.listen_dns = "127.0.0.1:15353".parse().unwrap();
+    assert!(!cfg.cf_cdn.enabled);
+
+    let mut saved = crabdns_core::RuntimeConfig::default();
+    saved.cf_cdn.enabled = true;
+    saved.cf_cdn.ipv6_enabled = false;
+    saved.cf_cdn.interval_secs = 900;
+
+    merge_saved_runtime_config(&mut cfg, saved);
+
+    assert_eq!(cfg.bootstrap.listen_dns.port(), 15353);
+    assert!(cfg.cf_cdn.enabled);
+    assert!(!cfg.cf_cdn.ipv6_enabled);
+    assert_eq!(cfg.cf_cdn.interval_secs, 900);
 }

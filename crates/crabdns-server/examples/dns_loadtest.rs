@@ -436,16 +436,14 @@ async fn main() -> anyhow::Result<()> {
     let upstream_addr = spawn_mock_udp_upstream().await;
     let temp_dir = TempDir::new()?;
 
-    let config = Config {
-        listen_dns: "127.0.0.1:0".parse()?,
-        listen_web: "127.0.0.1:0".parse()?,
-        data_dir: temp_dir.path().to_path_buf(),
-        upstreams: vec![upstream_addr.to_string()],
-        cache_size: 100_000,
-        optimistic_cache: true,
-        custom_rules: generate_custom_rules(args.rules),
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.bootstrap.listen_dns = "127.0.0.1:0".parse()?;
+    config.bootstrap.listen_web = "127.0.0.1:0".parse()?;
+    config.bootstrap.data_dir = temp_dir.path().to_path_buf();
+    config.bootstrap.custom_rules = generate_custom_rules(args.rules);
+    config.upstreams = vec![upstream_addr.to_string()];
+    config.cache_size = 100_000;
+    config.optimistic_cache = true;
 
     let server = spawn_server(config).await?;
     warmup_cache(server.dns_addr, 100).await;

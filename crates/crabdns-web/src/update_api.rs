@@ -826,7 +826,7 @@ pub async fn check_update(
             Json(serde_json::json!({ "error": err })),
         )
     })?;
-    let data_dir = state.app.config.load().data_dir.clone();
+    let data_dir = state.app.config.load().bootstrap.data_dir.clone();
 
     match check_for_update_with_config(&state.update_http_client, &data_dir, &cfg).await {
         Ok(found) => {
@@ -864,7 +864,7 @@ pub async fn apply_update(
             Json(serde_json::json!({ "error": err })),
         )
     })?;
-    let data_dir = state.app.config.load().data_dir.clone();
+    let data_dir = state.app.config.load().bootstrap.data_dir.clone();
 
     let update = if let Some(u) = state.updater.cached_pending() {
         u

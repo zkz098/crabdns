@@ -605,7 +605,7 @@ pub async fn update_auth(
 
     let storage = Arc::clone(&state.app.storage);
     let to_save = next.clone();
-    tokio::task::spawn_blocking(move || storage.save_config(&to_save))
+    tokio::task::spawn_blocking(move || storage.save_config(&to_save.runtime))
         .await
         .map_err(|e| {
             (

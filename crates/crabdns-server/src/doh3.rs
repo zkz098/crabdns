@@ -75,7 +75,7 @@ pub fn start_doh3_listener(
 ) -> anyhow::Result<Doh3ListenerParts> {
     let cfg = config.load_full();
     let (Some(addr), Some(cert_p), Some(key_p)) = (
-        cfg.listen_doh3,
+        cfg.bootstrap.listen_doh3,
         cfg.tls_cert_path.as_deref(),
         cfg.tls_key_path.as_deref(),
     ) else {

@@ -128,20 +128,18 @@ async fn test_virtual_time_long_horizon_background_tasks() {
     let hosts_path = dir.path().join("hosts");
     std::fs::write(&hosts_path, "10.0.0.50 virtual.lan\n").expect("write hosts");
 
-    let cfg = Config {
-        listen_dns: "127.0.0.1:0".parse().expect("dns addr"),
-        listen_web: "127.0.0.1:0".parse().expect("web addr"),
-        data_dir: dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{upstream_addr}")],
-        cache_size: 128,
-        cache_persist_enabled: true,
-        log_retention_hours: 1,
-        hosts_enabled: true,
-        hosts_path: Some(hosts_path.display().to_string()),
-        allow_private_subscriptions: true,
-        rdns_enabled: false,
-        ..Config::default()
-    };
+    let mut cfg = Config::default();
+    cfg.bootstrap.listen_dns = "127.0.0.1:0".parse().expect("dns addr");
+    cfg.bootstrap.listen_web = "127.0.0.1:0".parse().expect("web addr");
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    cfg.upstreams = vec![format!("udp://{upstream_addr}")];
+    cfg.cache_size = 128;
+    cfg.cache_persist_enabled = true;
+    cfg.log_retention_hours = 1;
+    cfg.hosts_enabled = true;
+    cfg.hosts_path = Some(hosts_path.display().to_string());
+    cfg.allow_private_subscriptions = true;
+    cfg.rdns_enabled = false;
 
     let server = spawn_server(cfg).await.expect("spawn server");
     let client = reqwest::Client::new();
@@ -206,16 +204,14 @@ async fn test_fd_and_inflight_return_to_baseline_after_mixed_bursts() {
     let upstream_addr = spawn_mock_udp_upstream().await;
     let dir = tempfile::tempdir().expect("tempdir");
 
-    let cfg = Config {
-        listen_dns: "127.0.0.1:0".parse().expect("dns addr"),
-        listen_web: "127.0.0.1:0".parse().expect("web addr"),
-        data_dir: dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{upstream_addr}")],
-        custom_rules: vec!["||blocked.burst.test^".to_string()],
-        tcp_idle_timeout_secs: 1,
-        rdns_enabled: false,
-        ..Config::default()
-    };
+    let mut cfg = Config::default();
+    cfg.bootstrap.listen_dns = "127.0.0.1:0".parse().expect("dns addr");
+    cfg.bootstrap.listen_web = "127.0.0.1:0".parse().expect("web addr");
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    cfg.bootstrap.custom_rules = vec!["||blocked.burst.test^".to_string()];
+    cfg.bootstrap.tcp_idle_timeout_secs = 1;
+    cfg.upstreams = vec![format!("udp://{upstream_addr}")];
+    cfg.rdns_enabled = false;
 
     let server = spawn_server(cfg).await.expect("spawn server");
     let http = reqwest::Client::new();

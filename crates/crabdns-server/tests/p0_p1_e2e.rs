@@ -61,14 +61,13 @@ async fn spawn_mock_udp_upstream(answer_ip: Ipv4Addr) -> SocketAddr {
 }
 
 fn base_test_config(data_dir: &Path, upstream: SocketAddr) -> Config {
-    Config {
-        listen_dns: "127.0.0.1:0".parse().expect("dns addr"),
-        listen_web: "127.0.0.1:0".parse().expect("web addr"),
-        data_dir: data_dir.to_path_buf(),
-        upstreams: vec![format!("udp://{upstream}")],
-        allow_cidrs: vec!["127.0.0.1/32".to_string()],
-        ..Config::default()
-    }
+    let mut cfg = Config::default();
+    cfg.bootstrap.listen_dns = "127.0.0.1:0".parse().expect("dns addr");
+    cfg.bootstrap.listen_web = "127.0.0.1:0".parse().expect("web addr");
+    cfg.bootstrap.data_dir = data_dir.to_path_buf();
+    cfg.upstreams = vec![format!("udp://{upstream}")];
+    cfg.allow_cidrs = vec!["127.0.0.1/32".to_string()];
+    cfg
 }
 
 async fn send_udp_query(server_addr: SocketAddr, query: &[u8]) -> Message {
@@ -378,7 +377,7 @@ async fn test_enriched_query_logs_udp_tcp_doh_and_hosts_ptr() {
     let mut cfg = base_test_config(dir.path(), upstream);
     cfg.hosts_enabled = true;
     cfg.hosts_path = Some(hosts_file.display().to_string());
-    cfg.custom_rules = vec!["||ad.test^".to_string()];
+    cfg.bootstrap.custom_rules = vec!["||ad.test^".to_string()];
 
     let server = spawn_server(cfg).await.expect("spawn server");
     let http = reqwest::Client::new();
@@ -446,8 +445,8 @@ async fn test_native_https_doh_dot_and_tls_hot_reload() {
 
     let upstream = spawn_mock_udp_upstream(Ipv4Addr::new(10, 20, 30, 40)).await;
     let mut cfg = base_test_config(dir.path(), upstream);
-    cfg.listen_web_tls = Some("127.0.0.1:0".parse().expect("web tls addr"));
-    cfg.listen_dot = Some("127.0.0.1:0".parse().expect("dot addr"));
+    cfg.bootstrap.listen_web_tls = Some("127.0.0.1:0".parse().expect("web tls addr"));
+    cfg.bootstrap.listen_dot = Some("127.0.0.1:0".parse().expect("dot addr"));
     cfg.tls_cert_path = Some(active_cert.clone());
     cfg.tls_key_path = Some(active_key.clone());
     cfg.ddr_hostname = Some("dns.local".to_string());
@@ -681,11 +680,11 @@ async fn restart_with_clients_config(
     up_default: SocketAddr,
 ) -> RunningServer {
     let mut cfg = base_test_config(data_dir, up_default);
-    cfg.listen_dot = Some("127.0.0.1:0".parse().expect("dot addr"));
+    cfg.bootstrap.listen_dot = Some("127.0.0.1:0".parse().expect("dot addr"));
     cfg.tls_cert_path = Some(cert_path);
     cfg.tls_key_path = Some(key_path);
     cfg.ddr_hostname = Some("dns.local".to_string());
-    cfg.custom_rules = vec!["||global-blocked.test^".to_string()];
+    cfg.bootstrap.custom_rules = vec!["||global-blocked.test^".to_string()];
     spawn_server(cfg).await.expect("spawn server")
 }
 

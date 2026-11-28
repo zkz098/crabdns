@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     }) = cli.command
     {
         return run_cli_self_update(
-            &config.data_dir,
+            &config.bootstrap.data_dir,
             check,
             manifest_url.or(cli.update_manifest_url),
         )
@@ -105,26 +105,31 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.check_update || cli.self_update {
         let check_only = cli.check_update && !cli.self_update;
-        return run_cli_self_update(&config.data_dir, check_only, cli.update_manifest_url).await;
+        return run_cli_self_update(
+            &config.bootstrap.data_dir,
+            check_only,
+            cli.update_manifest_url,
+        )
+        .await;
     }
 
     if let Some(addr) = cli.dns_listen {
-        config.listen_dns = addr;
+        config.bootstrap.listen_dns = addr;
     }
     if let Some(addr) = cli.web_listen {
-        config.listen_web = addr;
+        config.bootstrap.listen_web = addr;
     }
     if let Some(addr) = cli.web_tls_listen {
-        config.listen_web_tls = Some(addr);
+        config.bootstrap.listen_web_tls = Some(addr);
     }
     if let Some(addr) = cli.dot_listen {
-        config.listen_dot = Some(addr);
+        config.bootstrap.listen_dot = Some(addr);
     }
     if let Some(addr) = cli.doq_listen {
-        config.listen_doq = Some(addr);
+        config.bootstrap.listen_doq = Some(addr);
     }
     if let Some(addr) = cli.doh3_listen {
-        config.listen_doh3 = Some(addr);
+        config.bootstrap.listen_doh3 = Some(addr);
     }
 
     let mut server = spawn_server(config).await?;

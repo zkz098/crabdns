@@ -180,7 +180,7 @@ pub(crate) async fn apply_snapshot_rollback(
         .map_err(|err| err_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
         .map_err(|err| err_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
 
-    let next = snapshot_opt.ok_or_else(|| {
+    let next_runtime = snapshot_opt.ok_or_else(|| {
         err_response(
             StatusCode::NOT_FOUND,
             "configuration snapshot not found".to_string(),
@@ -188,6 +188,8 @@ pub(crate) async fn apply_snapshot_rollback(
     })?;
 
     let current = state.app.config.load_full();
+    let mut next = (*current).clone();
+    next.runtime = next_runtime;
     let storage_for_clients = Arc::clone(&state.app.storage);
     let (clients, groups) = tokio::task::spawn_blocking(move || {
         Ok::<_, crabdns_storage::StorageError>((
@@ -237,7 +239,7 @@ pub(crate) async fn apply_snapshot_rollback(
     let storage_save = Arc::clone(&state.app.storage);
     let to_save = next.clone();
     tokio::task::spawn_blocking(move || -> crabdns_storage::Result<()> {
-        storage_save.save_config(&to_save)?;
+        storage_save.save_config(&to_save.runtime)?;
         let _ = storage_save.record_config_snapshot(&to_save, &reason_owned);
         Ok(())
     })

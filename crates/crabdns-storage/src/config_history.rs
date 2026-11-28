@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crabdns_core::Config;
+use crabdns_core::{Config, RuntimeConfig};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -51,7 +51,7 @@ pub struct ConfigSnapshotMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConfigSnapshotRecord {
     meta: ConfigSnapshotMeta,
-    config: Config,
+    config: RuntimeConfig,
 }
 
 fn encode_history_key(id: u64) -> Vec<u8> {
@@ -101,13 +101,13 @@ impl StorageEngine {
             id: next_id.to_string(),
             created_at,
             reason: reason.to_string(),
-            listen_dns: config.listen_dns.to_string(),
+            listen_dns: config.bootstrap.listen_dns.to_string(),
             upstreams_count: config.upstreams.len(),
             split_dns_count: config.split_dns.len(),
         };
         let record = ConfigSnapshotRecord {
             meta: meta.clone(),
-            config: config.clone(),
+            config: config.runtime.clone(),
         };
         let bytes = serde_json::to_vec(&record)?;
         self.meta.insert(encode_history_key(next_id), bytes)?;
@@ -137,7 +137,7 @@ impl StorageEngine {
     }
 
     /// Loads a specific configuration snapshot by ID.
-    pub fn get_config_snapshot(&self, id: &str) -> Result<Option<Config>> {
+    pub fn get_config_snapshot(&self, id: &str) -> Result<Option<RuntimeConfig>> {
         let Ok(parsed_id) = id.trim().parse::<u64>() else {
             return Ok(None);
         };
@@ -216,7 +216,10 @@ mod tests {
         let mut last_id = String::new();
         for i in 0..25_u32 {
             let cfg = Config {
-                cache_size: u64::from(1000 + i),
+                runtime: RuntimeConfig {
+                    cache_size: u64::from(1000 + i),
+                    ..RuntimeConfig::default()
+                },
                 ..Config::default()
             };
             let meta = storage
@@ -270,5 +273,26 @@ mod tests {
 
         let all = storage.list_split_dns_list_metas().expect("list");
         assert_eq!(all, vec![meta]);
+    }
+
+    #[test]
+    fn test_runtime_config_loads_from_legacy_full_config_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = StorageEngine::open(dir.path()).expect("open storage");
+
+        let mut legacy = Config::default();
+        legacy.bootstrap.listen_dns = "127.0.0.1:25353".parse().unwrap();
+        legacy.cf_cdn.enabled = true;
+        legacy.cache_size = 4096;
+
+        let legacy_bytes = serde_json::to_vec(&legacy).expect("serialize legacy full config");
+        storage
+            .meta
+            .insert(crate::models::KEY_RUNTIME_CONFIG, legacy_bytes)
+            .expect("insert legacy bytes");
+
+        let loaded = storage.load_config().expect("load").expect("present");
+        assert!(loaded.cf_cdn.enabled);
+        assert_eq!(loaded.cache_size, 4096);
     }
 }

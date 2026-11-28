@@ -17,7 +17,10 @@ async fn test_web_api_endpoints_and_spa() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
     let cfg = Config {
-        allow_private_subscriptions: true,
+        runtime: crabdns_core::RuntimeConfig {
+            allow_private_subscriptions: true,
+            ..Default::default()
+        },
         ..Config::default()
     };
     let config = Arc::new(ArcSwap::from_pointee(cfg));
@@ -134,7 +137,10 @@ async fn test_subscription_crud_toggle_and_refresh() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
     let cfg = Config {
-        allow_private_subscriptions: true,
+        runtime: crabdns_core::RuntimeConfig {
+            allow_private_subscriptions: true,
+            ..Default::default()
+        },
         ..Config::default()
     };
     let config = Arc::new(ArcSwap::from_pointee(cfg));
@@ -241,10 +247,9 @@ async fn test_subscription_crud_toggle_and_refresh() {
 async fn test_web_auth_login_protected_routes_and_logout() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
-    let config = Arc::new(ArcSwap::from_pointee(Config {
-        data_dir: dir.path().to_path_buf(),
-        ..Config::default()
-    }));
+    let mut cfg = Config::default();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
     let filter = Arc::new(FilterEngine::new(&[]));
     let cache = Arc::new(DnsCache::new(64, false));
     let upstream = Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
@@ -345,10 +350,9 @@ async fn test_web_auth_login_protected_routes_and_logout() {
 async fn test_upstream_probe_endpoint_validation_and_response() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
-    let config = Arc::new(ArcSwap::from_pointee(Config {
-        data_dir: dir.path().to_path_buf(),
-        ..Config::default()
-    }));
+    let mut cfg = Config::default();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
     let filter = Arc::new(FilterEngine::new(&[]));
     let cache = Arc::new(DnsCache::new(64, false));
     let upstream = Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 500).unwrap());
@@ -401,11 +405,10 @@ async fn test_upstream_probe_endpoint_validation_and_response() {
 async fn test_doh_body_limit_and_atomic_config_rollback() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
-    let config = Arc::new(ArcSwap::from_pointee(Config {
-        data_dir: dir.path().to_path_buf(),
-        upstreams: vec!["udp://1.1.1.1:53".to_string()],
-        ..Config::default()
-    }));
+    let mut cfg = Config::default();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    cfg.upstreams = vec!["udp://1.1.1.1:53".to_string()];
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
     let filter = Arc::new(FilterEngine::new(&[]));
     let cache = Arc::new(DnsCache::new(64, false));
     let upstream = Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
@@ -470,10 +473,9 @@ async fn test_doh_body_limit_and_atomic_config_rollback() {
 async fn test_cors_tightened_and_metrics_histogram_exported() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
-    let config = Arc::new(ArcSwap::from_pointee(Config {
-        data_dir: dir.path().to_path_buf(),
-        ..Config::default()
-    }));
+    let mut cfg = Config::default();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
     let filter = Arc::new(FilterEngine::new(&["||blocked.test^".to_string()]));
     let cache = Arc::new(DnsCache::new(64, false));
     let upstream = Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());
@@ -566,11 +568,10 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
-    let config = Arc::new(ArcSwap::from_pointee(Config {
-        data_dir: dir.path().to_path_buf(),
-        allow_private_subscriptions: true,
-        ..Config::default()
-    }));
+    let mut cfg = Config::default();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    cfg.allow_private_subscriptions = true;
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
     let filter = Arc::new(FilterEngine::new(&["||initial-block.test^".to_string()]));
     storage
         .save_custom_rules("||initial-block.test^\n")
@@ -878,10 +879,9 @@ async fn test_web_update_api_status_check_and_apply() {
     });
 
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
-    let config = Arc::new(ArcSwap::from_pointee(Config {
-        data_dir: dir.path().to_path_buf(),
-        ..Config::default()
-    }));
+    let mut cfg = Config::default();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
     let filter = Arc::new(FilterEngine::new(&[]));
     let cache = Arc::new(DnsCache::new(64, false));
     let upstream = Arc::new(UpstreamPool::new(&["udp://127.0.0.1:1".to_string()], 200).unwrap());
@@ -1115,7 +1115,7 @@ async fn test_port_precheck_endpoint() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
     let cfg = Config::default();
-    let expected_dns = cfg.listen_dns.to_string();
+    let expected_dns = cfg.bootstrap.listen_dns.to_string();
     let filter = Arc::new(FilterEngine::new(&[]));
     let cache = Arc::new(DnsCache::new(64, true));
     let pool = Arc::new(UpstreamPool::new(&cfg.upstreams, 1000).unwrap());
@@ -1186,12 +1186,10 @@ async fn test_acme_http01_challenge_and_status_api() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
-    let cfg = Config {
-        data_dir: dir.path().to_path_buf(),
-        acme_enabled: true,
-        acme_domains: vec!["dns.example.com".to_string()],
-        ..Config::default()
-    };
+    let mut cfg = Config::default();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    cfg.acme_enabled = true;
+    cfg.acme_domains = vec!["dns.example.com".to_string()];
     let config = Arc::new(ArcSwap::from_pointee(cfg));
     let filter = Arc::new(FilterEngine::new(&[]));
     let cache = Arc::new(DnsCache::new(64, false));
@@ -1320,7 +1318,7 @@ async fn spawn_ws_test_server(
 ) {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut full_cfg = cfg;
-    full_cfg.data_dir = dir.path().to_path_buf();
+    full_cfg.bootstrap.data_dir = dir.path().to_path_buf();
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
     let config = Arc::new(ArcSwap::from_pointee(full_cfg));
     let filter = Arc::new(FilterEngine::new(&[]));
@@ -1353,16 +1351,16 @@ async fn test_ws_events_requires_auth_when_enabled() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
     let password_hash = auth::hash_password("s3cret-pass").expect("hash");
-    let (addr, _live_tx, _pipeline, _dir) = spawn_ws_test_server(
-        Config {
+    let auth_cfg = Config {
+        runtime: crabdns_core::RuntimeConfig {
             web_auth_enabled: true,
             web_username: "admin".to_string(),
             web_password_hash: password_hash,
-            ..Config::default()
+            ..Default::default()
         },
-        None,
-    )
-    .await;
+        ..Config::default()
+    };
+    let (addr, _live_tx, _pipeline, _dir) = spawn_ws_test_server(auth_cfg, None).await;
 
     let ws_url = format!("ws://{addr}/api/ws");
     let unauthed = tokio_tungstenite::connect_async(&ws_url).await;
@@ -1763,12 +1761,15 @@ async fn test_split_dns_conditional_sync_status_and_interval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open fjall"));
     let cfg = Config {
-        allow_private_subscriptions: true,
-        split_dns: vec![crabdns_core::SplitDnsRule {
-            domains_url: Some(list_url.clone()),
-            upstreams: vec!["udp://10.0.0.1:53".to_string()],
+        runtime: crabdns_core::RuntimeConfig {
+            allow_private_subscriptions: true,
+            split_dns: vec![crabdns_core::SplitDnsRule {
+                domains_url: Some(list_url.clone()),
+                upstreams: vec!["udp://10.0.0.1:53".to_string()],
+                ..Default::default()
+            }],
             ..Default::default()
-        }],
+        },
         ..Config::default()
     };
     let config = Arc::new(ArcSwap::from_pointee(cfg));
@@ -1884,10 +1885,9 @@ async fn test_split_dns_conditional_sync_status_and_interval() {
 async fn test_security_headers_csrf_and_commit_confirm() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));
-    let config = Arc::new(ArcSwap::from_pointee(Config {
-        data_dir: dir.path().to_path_buf(),
-        ..Config::default()
-    }));
+    let mut cfg = Config::default();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    let config = Arc::new(ArcSwap::from_pointee(cfg));
     let filter = Arc::new(FilterEngine::new(&[]));
     let cache = Arc::new(DnsCache::new(64, false));
     let upstream = Arc::new(UpstreamPool::new(&["udp://1.1.1.1:53".to_string()], 1000).unwrap());

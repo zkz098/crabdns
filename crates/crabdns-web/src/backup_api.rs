@@ -648,13 +648,14 @@ pub(crate) fn apply_compiled_to_pipeline(
     pipe.reload_ddr(DdrConfig {
         enabled: next.ddr_enabled,
         hostname: next.ddr_hostname.clone(),
-        dot_port: current.listen_dot.map(|a| a.port()),
-        doq_port: current.listen_doq.map(|a| a.port()),
+        dot_port: current.bootstrap.listen_dot.map(|a| a.port()),
+        doq_port: current.bootstrap.listen_doq.map(|a| a.port()),
         doh_enabled: next.doh_enabled,
         doh_port: current
+            .bootstrap
             .listen_web_tls
             .map(|a| a.port())
-            .or(Some(current.listen_web.port())),
+            .or(Some(current.bootstrap.listen_web.port())),
     });
     pipe.reload_cache_with_options(
         next.cache_size,
@@ -733,7 +734,7 @@ pub async fn import_backup(
     let custom_rules = backup.custom_rules;
     let custom_rules_enabled = backup.custom_rules_enabled;
     tokio::task::spawn_blocking(move || -> crabdns_storage::Result<()> {
-        storage.save_config(&to_save_cfg)?;
+        storage.save_config(&to_save_cfg.runtime)?;
         let _ = storage.record_config_snapshot(&to_save_cfg, "backup_import");
         storage.save_custom_rules(&custom_rules)?;
         storage.save_custom_rules_enabled(custom_rules_enabled)?;

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crabdns_core::{
-    ClientGroup, ClientProfile, Config, DnsRewriteEntry, PersistedCacheEntry, QueryEvent,
-    QueryOutcome, StorageProfile,
+    ClientGroup, ClientProfile, DnsRewriteEntry, PersistedCacheEntry, QueryEvent, QueryOutcome,
+    RuntimeConfig, StorageProfile,
 };
 
 pub mod client_stats;
@@ -551,13 +551,13 @@ impl StorageEngine {
         out
     }
 
-    pub fn save_config(&self, config: &Config) -> Result<()> {
+    pub fn save_config(&self, config: &RuntimeConfig) -> Result<()> {
         let bytes = serde_json::to_vec(config)?;
         self.meta.insert(KEY_RUNTIME_CONFIG, bytes)?;
         Ok(())
     }
 
-    pub fn load_config(&self) -> Result<Option<Config>> {
+    pub fn load_config(&self) -> Result<Option<RuntimeConfig>> {
         match self.meta.get(KEY_RUNTIME_CONFIG)? {
             Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
             None => Ok(None),

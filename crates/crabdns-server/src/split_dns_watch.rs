@@ -208,18 +208,21 @@ mod tests {
         std::fs::write(&cidrs_path, "1.0.1.0/24\n").expect("write initial cidrs");
 
         let cfg = Config {
-            split_dns_refresh_interval_secs: 0,
-            split_dns: vec![SplitDnsRule {
-                name: Some("hot-local".to_string()),
-                domains_file: Some(domains_path.display().to_string()),
-                upstreams: vec!["udp://10.0.0.1:53".to_string()],
-                response_ip: Some(ResponseIpRule {
-                    expected_ip_file: Some(cidrs_path.display().to_string()),
-                    fallback_upstreams: vec!["udp://10.0.0.2:53".to_string()],
+            runtime: crabdns_core::RuntimeConfig {
+                split_dns_refresh_interval_secs: 0,
+                split_dns: vec![SplitDnsRule {
+                    name: Some("hot-local".to_string()),
+                    domains_file: Some(domains_path.display().to_string()),
+                    upstreams: vec!["udp://10.0.0.1:53".to_string()],
+                    response_ip: Some(ResponseIpRule {
+                        expected_ip_file: Some(cidrs_path.display().to_string()),
+                        fallback_upstreams: vec!["udp://10.0.0.2:53".to_string()],
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
+                }],
                 ..Default::default()
-            }],
+            },
             ..Config::default()
         };
 

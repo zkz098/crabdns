@@ -23,7 +23,7 @@ pub async fn run_system_diagnostics(
     State(state): State<RouterState>,
 ) -> Json<SystemDiagnosticsResponse> {
     let cfg = state.app.config.load();
-    let listen_dns = cfg.listen_dns;
+    let listen_dns = cfg.bootstrap.listen_dns;
 
     let mdns_item = checks_core::check_mdns_port_conflict(listen_dns);
     let loopback_item = checks_core::check_loopback_probe(listen_dns).await;

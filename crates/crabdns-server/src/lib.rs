@@ -167,90 +167,15 @@ async fn shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
     }
 }
 
-fn merge_saved_config(config: &mut Config, saved_cfg: Config) {
-    config.upstreams = saved_cfg.upstreams;
-    config.bootstrap_dns = saved_cfg.bootstrap_dns;
-    config.upstream_strategy = saved_cfg.upstream_strategy;
-    config.cache_size = saved_cfg.cache_size;
-    config.optimistic_cache = saved_cfg.optimistic_cache;
-    config.cache_min_ttl_secs = saved_cfg.cache_min_ttl_secs;
-    config.cache_max_ttl_secs = saved_cfg.cache_max_ttl_secs;
-    config.cache_prefetch_enabled = saved_cfg.cache_prefetch_enabled;
-    config.cache_persist_enabled = saved_cfg.cache_persist_enabled;
-    config.upstream_timeout_ms = saved_cfg.upstream_timeout_ms;
-    config.log_retention_hours = saved_cfg.log_retention_hours;
-    config.log_max_disk_mb = saved_cfg.log_max_disk_mb;
-    config.storage_profile = saved_cfg.storage_profile;
-    config.disk_min_free_mb = saved_cfg.disk_min_free_mb;
-    config.serve_stale_enabled = saved_cfg.serve_stale_enabled;
-    config.dnssec_strict_clock = saved_cfg.dnssec_strict_clock;
-    config.dnssec_auto_rollover = saved_cfg.dnssec_auto_rollover;
-    config.block_mode = saved_cfg.block_mode;
-    config.allow_cidrs = saved_cfg.allow_cidrs;
-    config.deny_cidrs = saved_cfg.deny_cidrs;
-    config.rate_limit_qps = saved_cfg.rate_limit_qps;
-    config.web_auth_enabled = saved_cfg.web_auth_enabled;
-    config.web_username = saved_cfg.web_username;
-    config.web_password_hash = saved_cfg.web_password_hash;
-    config.setup_completed = saved_cfg.setup_completed;
-    config.split_dns = saved_cfg.split_dns;
-    config.upstream_groups = saved_cfg.upstream_groups;
-    config.split_dns_match_mode = saved_cfg.split_dns_match_mode;
-    config.split_dns_before_client_upstreams = saved_cfg.split_dns_before_client_upstreams;
-    config.split_dns_refresh_interval_secs = saved_cfg.split_dns_refresh_interval_secs;
-    config.cname_cloaking_blocking = saved_cfg.cname_cloaking_blocking;
-    config.doh_enabled = saved_cfg.doh_enabled;
-    config.allow_private_subscriptions = saved_cfg.allow_private_subscriptions;
-    config.ecs_enabled = saved_cfg.ecs_enabled;
-    config.ecs_custom_ip = saved_cfg.ecs_custom_ip;
-    config.ecs_ipv4_prefix = saved_cfg.ecs_ipv4_prefix;
-    config.ecs_ipv6_prefix = saved_cfg.ecs_ipv6_prefix;
-    config.dnssec_enabled = saved_cfg.dnssec_enabled;
-    config.dnssec_trust_anchors = saved_cfg.dnssec_trust_anchors;
-    config.dnssec_ntas = saved_cfg.dnssec_ntas;
-    config.hosts_enabled = saved_cfg.hosts_enabled;
-    config.hosts_path = saved_cfg.hosts_path;
-    config.dhcp_leases_enabled = saved_cfg.dhcp_leases_enabled;
-    config.dhcp_leases_path = saved_cfg.dhcp_leases_path;
-    config.dhcp_leases_forward_enabled = saved_cfg.dhcp_leases_forward_enabled;
-    config.dhcp_leases_domain = saved_cfg.dhcp_leases_domain;
-    config.mdns_enabled = saved_cfg.mdns_enabled;
-    config.sni_client_id_hostnames = saved_cfg.sni_client_id_hostnames;
-    config.private_ptr_enabled = saved_cfg.private_ptr_enabled;
-    config.private_ptr_upstreams = saved_cfg.private_ptr_upstreams;
-    config.block_local_domains = saved_cfg.block_local_domains;
-    config.suppress_local_domain_logs = saved_cfg.suppress_local_domain_logs;
-    config.ddr_enabled = saved_cfg.ddr_enabled;
-    config.ddr_hostname = saved_cfg.ddr_hostname;
-    config.dns_rebinding_protection = saved_cfg.dns_rebinding_protection;
-    config.block_any_queries = saved_cfg.block_any_queries;
-    config.trusted_proxies = saved_cfg.trusted_proxies;
-    config.rdns_enabled = saved_cfg.rdns_enabled;
-    config.safesearch = saved_cfg.safesearch;
-    config.dns64_enabled = saved_cfg.dns64_enabled;
-    config.dns64_prefixes = saved_cfg.dns64_prefixes;
-    config.svcb_strip_ech = saved_cfg.svcb_strip_ech;
-    config.svcb_strip_hints = saved_cfg.svcb_strip_hints;
-    config.ede_enabled = saved_cfg.ede_enabled;
-    config.dns_cookies_enabled = saved_cfg.dns_cookies_enabled;
-    config.dns_cookies_require_valid = saved_cfg.dns_cookies_require_valid;
-    config.max_udp_payload_size = saved_cfg.max_udp_payload_size;
-    config.rrl_enabled = saved_cfg.rrl_enabled;
-    config.rrl_responses_per_second = saved_cfg.rrl_responses_per_second;
-    config.rrl_slip = saved_cfg.rrl_slip;
-    config.rrl_window_secs = saved_cfg.rrl_window_secs;
-    config.acme_enabled = saved_cfg.acme_enabled;
-    config.acme_domains = saved_cfg.acme_domains;
-    config.acme_email = saved_cfg.acme_email;
-    config.acme_directory_url = saved_cfg.acme_directory_url;
-    config.acme_challenge_type = saved_cfg.acme_challenge_type;
-    config.acme_http_listen = saved_cfg.acme_http_listen;
-    config.acme_renew_before_days = saved_cfg.acme_renew_before_days;
-    if saved_cfg.tls_cert_path.is_some() {
-        config.tls_cert_path = saved_cfg.tls_cert_path;
+fn merge_saved_runtime_config(config: &mut Config, saved_runtime: crabdns_core::RuntimeConfig) {
+    let prev_tls_cert = config.runtime.tls_cert_path.take();
+    let prev_tls_key = config.runtime.tls_key_path.take();
+    config.runtime = saved_runtime;
+    if config.runtime.tls_cert_path.is_none() {
+        config.runtime.tls_cert_path = prev_tls_cert;
     }
-    if saved_cfg.tls_key_path.is_some() {
-        config.tls_key_path = saved_cfg.tls_key_path;
+    if config.runtime.tls_key_path.is_none() {
+        config.runtime.tls_key_path = prev_tls_key;
     }
 }
 
@@ -259,10 +184,10 @@ fn init_pipeline(
     storage: &StorageEngine,
     log_tx: mpsc::Sender<QueryEvent>,
 ) -> anyhow::Result<Arc<DnsPipeline>> {
-    let filter = Arc::new(FilterEngine::new(&cfg.custom_rules));
+    let filter = Arc::new(FilterEngine::new(&cfg.bootstrap.custom_rules));
     let custom_rules_text = storage
         .load_custom_rules()?
-        .unwrap_or_else(|| cfg.custom_rules.join("\n"));
+        .unwrap_or_else(|| cfg.bootstrap.custom_rules.join("\n"));
     let custom_enabled = storage.load_custom_rules_enabled()?;
     let mut sub_contents = storage.load_enabled_named_subscription_contents()?;
     let rewrites = storage.list_dns_rewrites()?;
@@ -427,7 +352,9 @@ async fn start_dot_listener(
     shutdown_rx: &watch::Receiver<bool>,
 ) -> anyhow::Result<(Option<SocketAddr>, Option<JoinHandle<()>>)> {
     let current_cfg = config.load_full();
-    let (Some(addr), Some(acceptor)) = (current_cfg.listen_dot, tls_manager.dot_acceptor()) else {
+    let (Some(addr), Some(acceptor)) =
+        (current_cfg.bootstrap.listen_dot, tls_manager.dot_acceptor())
+    else {
         return Ok((None, None));
     };
     let dot_listener = dot::bind_dot_listener(addr).await?;
@@ -454,7 +381,7 @@ fn start_doq_listener(
 ) -> anyhow::Result<(Option<SocketAddr>, Option<JoinHandle<()>>)> {
     let cfg = config.load_full();
     let (Some(addr), Some(cert_p), Some(key_p)) = (
-        cfg.listen_doq,
+        cfg.bootstrap.listen_doq,
         cfg.tls_cert_path.as_deref(),
         cfg.tls_key_path.as_deref(),
     ) else {
@@ -519,10 +446,10 @@ async fn start_web_and_tls(
         tls_manager.set_doh3_endpoint(Some(ep));
     }
 
-    let web_listener = TcpListener::bind(current_cfg.listen_web).await?;
+    let web_listener = TcpListener::bind(current_cfg.bootstrap.listen_web).await?;
     let web_addr = web_listener.local_addr()?;
 
-    let web_tls_listener = match current_cfg.listen_web_tls {
+    let web_tls_listener = match current_cfg.bootstrap.listen_web_tls {
         Some(addr) => Some(TcpListener::bind(addr).await?),
         None => None,
     };
@@ -696,16 +623,16 @@ fn spawn_background_tasks(
 #[allow(clippy::too_many_lines)]
 pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let storage = Arc::new(StorageEngine::open_with_profile(
-        &config.data_dir,
+        &config.bootstrap.data_dir,
         config.storage_profile,
     )?);
 
-    if let Some(saved_cfg) = storage.load_config()? {
-        merge_saved_config(&mut config, saved_cfg);
+    if let Some(saved_runtime) = storage.load_config()? {
+        merge_saved_runtime_config(&mut config, saved_runtime);
     }
 
     if config.acme_enabled && (config.tls_cert_path.is_none() || config.tls_key_path.is_none()) {
-        let (acme_cert, acme_key, _) = AcmeManager::acme_paths(&config.data_dir);
+        let (acme_cert, acme_key, _) = AcmeManager::acme_paths(&config.bootstrap.data_dir);
         if acme_cert.is_file() && acme_key.is_file() {
             config.tls_cert_path = Some(acme_cert);
             config.tls_key_path = Some(acme_key);
@@ -720,19 +647,19 @@ pub async fn spawn_server(mut config: Config) -> anyhow::Result<RunningServer> {
     let sink_handle = spawn_log_sink(Arc::clone(&storage), log_rx, live_tx.clone());
     let pipeline = init_pipeline(&current_cfg, &storage, log_tx)?;
 
-    let tcp_max_connections = current_cfg.tcp_max_connections.max(1);
-    let tcp_idle_timeout = Duration::from_secs(current_cfg.tcp_idle_timeout_secs.max(1));
+    let tcp_max_connections = current_cfg.bootstrap.tcp_max_connections.max(1);
+    let tcp_idle_timeout = Duration::from_secs(current_cfg.bootstrap.tcp_idle_timeout_secs.max(1));
     let tls_manager = Arc::new(tls::TlsManager::new(
-        current_cfg.listen_web_tls,
-        current_cfg.listen_dot,
-        current_cfg.listen_doq,
-        current_cfg.listen_doh3,
+        current_cfg.bootstrap.listen_web_tls,
+        current_cfg.bootstrap.listen_dot,
+        current_cfg.bootstrap.listen_doq,
+        current_cfg.bootstrap.listen_doh3,
         tcp_idle_timeout,
         current_cfg.tls_cert_path.as_deref(),
         current_cfg.tls_key_path.as_deref(),
     )?);
 
-    let tcp_listener = TcpListener::bind(current_cfg.listen_dns).await?;
+    let tcp_listener = TcpListener::bind(current_cfg.bootstrap.listen_dns).await?;
     let dns_addr = tcp_listener.local_addr()?;
     let udp_worker_count = std::thread::available_parallelism()
         .map_or(2, std::num::NonZeroUsize::get)

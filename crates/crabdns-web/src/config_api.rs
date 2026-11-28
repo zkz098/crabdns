@@ -120,16 +120,16 @@ pub struct ConfigResponse {
 impl From<&Config> for ConfigResponse {
     fn from(cfg: &Config) -> Self {
         Self {
-            listen_dns: cfg.listen_dns.to_string(),
-            listen_web: cfg.listen_web.to_string(),
-            listen_web_tls: cfg.listen_web_tls.map(|addr| addr.to_string()),
-            listen_dot: cfg.listen_dot.map(|addr| addr.to_string()),
-            listen_doq: cfg.listen_doq.map(|addr| addr.to_string()),
-            listen_doh3: cfg.listen_doh3.map(|addr| addr.to_string()),
+            listen_dns: cfg.bootstrap.listen_dns.to_string(),
+            listen_web: cfg.bootstrap.listen_web.to_string(),
+            listen_web_tls: cfg.bootstrap.listen_web_tls.map(|addr| addr.to_string()),
+            listen_dot: cfg.bootstrap.listen_dot.map(|addr| addr.to_string()),
+            listen_doq: cfg.bootstrap.listen_doq.map(|addr| addr.to_string()),
+            listen_doh3: cfg.bootstrap.listen_doh3.map(|addr| addr.to_string()),
             sni_client_id_hostnames: cfg.sni_client_id_hostnames.clone(),
             tls_cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
             tls_key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
-            data_dir: cfg.data_dir.display().to_string(),
+            data_dir: cfg.bootstrap.data_dir.display().to_string(),
             upstreams: cfg.upstreams.clone(),
             bootstrap_dns: cfg.bootstrap_dns.clone(),
             upstream_strategy: cfg.upstream_strategy,
@@ -773,14 +773,14 @@ pub async fn update_config(
     next.ecs_ipv4_prefix = ecs_ipv4_prefix;
     next.ecs_ipv6_prefix = ecs_ipv6_prefix;
     next.dnssec_enabled = dnssec_enabled;
-    next.dnssec_trust_anchors = dnssec_trust_anchors.clone();
-    next.dnssec_ntas = dnssec_ntas.clone();
+    next.dnssec_trust_anchors.clone_from(&dnssec_trust_anchors);
+    next.dnssec_ntas.clone_from(&dnssec_ntas);
     next.hosts_enabled = hosts_enabled;
     next.hosts_path = hosts_path;
     next.dhcp_leases_enabled = dhcp_leases_enabled;
     next.dhcp_leases_path = dhcp_leases_path;
     next.dhcp_leases_forward_enabled = dhcp_leases_forward_enabled;
-    next.dhcp_leases_domain = dhcp_leases_domain.clone();
+    next.dhcp_leases_domain.clone_from(&dhcp_leases_domain);
     next.mdns_enabled = mdns_enabled;
     next.sni_client_id_hostnames = sni_client_id_hostnames;
     next.private_ptr_enabled = private_ptr_enabled;
@@ -788,7 +788,7 @@ pub async fn update_config(
     next.block_local_domains = block_local_domains;
     next.suppress_local_domain_logs = suppress_local_domain_logs;
     next.ddr_enabled = ddr_enabled;
-    next.ddr_hostname = ddr_hostname.clone();
+    next.ddr_hostname.clone_from(&ddr_hostname);
     next.dns_rebinding_protection = dns_rebinding_protection;
     next.block_any_queries = block_any_queries;
     next.trusted_proxies = trusted_proxies;
@@ -797,7 +797,7 @@ pub async fn update_config(
     next.rdns_enabled = rdns_enabled;
     next.safesearch = safesearch.clone();
     next.dns64_enabled = dns64_enabled;
-    next.dns64_prefixes = dns64_prefixes.clone();
+    next.dns64_prefixes.clone_from(&dns64_prefixes);
     next.svcb_strip_ech = svcb_strip_ech;
     next.svcb_strip_hints = svcb_strip_hints;
     next.ede_enabled = ede_enabled;
@@ -847,7 +847,7 @@ pub async fn update_config(
                 }
                 None
             };
-            storage.save_config(&to_save)?;
+            storage.save_config(&to_save.runtime)?;
             let _ = storage.record_config_snapshot(&to_save, "settings_update");
             Ok(rollback_id)
         })
@@ -904,13 +904,14 @@ pub async fn update_config(
     pipe.reload_ddr(DdrConfig {
         enabled: ddr_enabled,
         hostname: ddr_hostname,
-        dot_port: current.listen_dot.map(|a| a.port()),
-        doq_port: current.listen_doq.map(|a| a.port()),
+        dot_port: current.bootstrap.listen_dot.map(|a| a.port()),
+        doq_port: current.bootstrap.listen_doq.map(|a| a.port()),
         doh_enabled,
         doh_port: current
+            .bootstrap
             .listen_web_tls
             .map(|a| a.port())
-            .or(Some(current.listen_web.port())),
+            .or(Some(current.bootstrap.listen_web.port())),
     });
 
     let split_dns_changed = current.split_dns != next.split_dns

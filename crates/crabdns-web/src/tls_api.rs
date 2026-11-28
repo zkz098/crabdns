@@ -49,13 +49,13 @@ pub async fn get_tls_status(State(state): State<RouterState>) -> Json<TlsStatusR
     let cfg = state.app.config.load();
     Json(TlsStatusResponse {
         https_enabled: false,
-        https_listen: cfg.listen_web_tls.map(|a| a.to_string()),
+        https_listen: cfg.bootstrap.listen_web_tls.map(|a| a.to_string()),
         dot_enabled: false,
-        dot_listen: cfg.listen_dot.map(|a| a.to_string()),
+        dot_listen: cfg.bootstrap.listen_dot.map(|a| a.to_string()),
         doq_enabled: false,
-        doq_listen: cfg.listen_doq.map(|a| a.to_string()),
+        doq_listen: cfg.bootstrap.listen_doq.map(|a| a.to_string()),
         doh3_enabled: false,
-        doh3_listen: cfg.listen_doh3.map(|a| a.to_string()),
+        doh3_listen: cfg.bootstrap.listen_doh3.map(|a| a.to_string()),
         cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
         key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
         last_loaded_at: None,

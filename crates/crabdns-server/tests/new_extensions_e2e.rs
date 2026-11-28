@@ -234,14 +234,12 @@ async fn test_rewrites_crud_resolution_and_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let upstream = spawn_mock_udp_upstream(Ipv4Addr::new(10, 0, 0, 1)).await;
 
-    let cfg = Config {
-        listen_dns: "127.0.0.1:0".parse().unwrap(),
-        listen_web: "127.0.0.1:0".parse().unwrap(),
-        data_dir: dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{upstream}")],
-        rdns_enabled: false,
-        ..Config::default()
-    };
+    let mut cfg = Config::default();
+    cfg.bootstrap.listen_dns = "127.0.0.1:0".parse().unwrap();
+    cfg.bootstrap.listen_web = "127.0.0.1:0".parse().unwrap();
+    cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    cfg.upstreams = vec![format!("udp://{upstream}")];
+    cfg.rdns_enabled = false;
     let server = spawn_server(cfg.clone()).await.unwrap();
     let base = format!("http://{}", server.web_addr);
     let http = reqwest::Client::new();
@@ -378,22 +376,19 @@ async fn test_adguard_modifiers_regex_and_rule_tester_e2e() {
     let dir = tempfile::tempdir().unwrap();
     let upstream = spawn_mock_udp_upstream(Ipv4Addr::new(93, 184, 216, 34)).await;
 
-    let server = spawn_server(Config {
-        listen_dns: "127.0.0.1:0".parse().unwrap(),
-        listen_web: "127.0.0.1:0".parse().unwrap(),
-        data_dir: dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{upstream}")],
-        custom_rules: vec![
-            "||aaaa-only.test^$dnstype=AAAA".to_string(),
-            "||shop.test^$denyallow=pay.shop.test".to_string(),
-            "||local-client-block.test^$client=127.0.0.1".to_string(),
-            r"/^ad-[0-9]+\.rx\.test$/".to_string(),
-        ],
-        rdns_enabled: false,
-        ..Config::default()
-    })
-    .await
-    .unwrap();
+    let mut server_cfg = Config::default();
+    server_cfg.bootstrap.listen_dns = "127.0.0.1:0".parse().unwrap();
+    server_cfg.bootstrap.listen_web = "127.0.0.1:0".parse().unwrap();
+    server_cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    server_cfg.bootstrap.custom_rules = vec![
+        "||aaaa-only.test^$dnstype=AAAA".to_string(),
+        "||shop.test^$denyallow=pay.shop.test".to_string(),
+        "||local-client-block.test^$client=127.0.0.1".to_string(),
+        r"/^ad-[0-9]+\.rx\.test$/".to_string(),
+    ];
+    server_cfg.upstreams = vec![format!("udp://{upstream}")];
+    server_cfg.rdns_enabled = false;
+    let server = spawn_server(server_cfg).await.unwrap();
     let base = format!("http://{}", server.web_addr);
     let http = reqwest::Client::new();
 
@@ -494,22 +489,19 @@ async fn test_doq_sni_client_id_dhcp_leases_and_client_activity_stats() {
     let up_default = spawn_mock_udp_upstream(Ipv4Addr::new(10, 0, 0, 1)).await;
     let up_vip = spawn_mock_udp_upstream(Ipv4Addr::new(10, 0, 0, 99)).await;
 
-    let server = spawn_server(Config {
-        listen_dns: "127.0.0.1:0".parse().unwrap(),
-        listen_web: "127.0.0.1:0".parse().unwrap(),
-        listen_doq: Some("127.0.0.1:0".parse().unwrap()),
-        sni_client_id_hostnames: vec!["doq.local".to_string()],
-        tls_cert_path: Some(cert_path),
-        tls_key_path: Some(key_path),
-        data_dir: dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{up_default}")],
-        dhcp_leases_enabled: true,
-        dhcp_leases_path: Some(leases_path.display().to_string()),
-        rdns_enabled: false,
-        ..Config::default()
-    })
-    .await
-    .unwrap();
+    let mut server_cfg = Config::default();
+    server_cfg.bootstrap.listen_dns = "127.0.0.1:0".parse().unwrap();
+    server_cfg.bootstrap.listen_web = "127.0.0.1:0".parse().unwrap();
+    server_cfg.bootstrap.listen_doq = Some("127.0.0.1:0".parse().unwrap());
+    server_cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    server_cfg.sni_client_id_hostnames = vec!["doq.local".to_string()];
+    server_cfg.tls_cert_path = Some(cert_path);
+    server_cfg.tls_key_path = Some(key_path);
+    server_cfg.upstreams = vec![format!("udp://{up_default}")];
+    server_cfg.dhcp_leases_enabled = true;
+    server_cfg.dhcp_leases_path = Some(leases_path.display().to_string());
+    server_cfg.rdns_enabled = false;
+    let server = spawn_server(server_cfg).await.unwrap();
 
     let doq_addr = server.doq_addr.expect("doq addr");
     let base = format!("http://{}", server.web_addr);
@@ -608,19 +600,16 @@ async fn test_doh3_server_e2e() {
     let (cert_path, key_path, cert_pem) = generate_test_cert(dir.path(), "doh3-test");
     let up_default = spawn_mock_udp_upstream(Ipv4Addr::new(10, 0, 0, 42)).await;
 
-    let server = spawn_server(Config {
-        listen_dns: "127.0.0.1:0".parse().unwrap(),
-        listen_web: "127.0.0.1:0".parse().unwrap(),
-        listen_doh3: Some("127.0.0.1:0".parse().unwrap()),
-        tls_cert_path: Some(cert_path),
-        tls_key_path: Some(key_path),
-        data_dir: dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{up_default}")],
-        rdns_enabled: false,
-        ..Config::default()
-    })
-    .await
-    .unwrap();
+    let mut server_cfg = Config::default();
+    server_cfg.bootstrap.listen_dns = "127.0.0.1:0".parse().unwrap();
+    server_cfg.bootstrap.listen_web = "127.0.0.1:0".parse().unwrap();
+    server_cfg.bootstrap.listen_doh3 = Some("127.0.0.1:0".parse().unwrap());
+    server_cfg.bootstrap.data_dir = dir.path().to_path_buf();
+    server_cfg.tls_cert_path = Some(cert_path);
+    server_cfg.tls_key_path = Some(key_path);
+    server_cfg.upstreams = vec![format!("udp://{up_default}")];
+    server_cfg.rdns_enabled = false;
+    let server = spawn_server(server_cfg).await.unwrap();
 
     let doh3_addr = server.doh3_addr.expect("doh3 addr");
 

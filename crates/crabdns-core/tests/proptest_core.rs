@@ -245,27 +245,25 @@ proptest! {
         retention_hours in 1_u64..720,
         rules in prop::collection::vec(arb_rule_line(), 0..10),
     ) {
-        let cfg = Config {
-            listen_dns: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), dns_port),
-            listen_web: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), web_port),
-            upstreams: vec!["udp://127.0.0.1:5353".to_string()],
-            cache_size,
-            optimistic_cache: optimistic,
-            upstream_timeout_ms: timeout_ms,
-            custom_rules: rules.clone(),
-            log_retention_hours: retention_hours,
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.bootstrap.listen_dns = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), dns_port);
+        cfg.bootstrap.listen_web = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), web_port);
+        cfg.bootstrap.custom_rules = rules.clone();
+        cfg.upstreams = vec!["udp://127.0.0.1:5353".to_string()];
+        cfg.cache_size = cache_size;
+        cfg.optimistic_cache = optimistic;
+        cfg.upstream_timeout_ms = timeout_ms;
+        cfg.log_retention_hours = retention_hours;
 
         let toml_text = toml::to_string(&cfg).expect("serialize config");
         let decoded = Config::from_toml_str(&toml_text).expect("deserialize config");
 
-        prop_assert_eq!(decoded.listen_dns, cfg.listen_dns);
-        prop_assert_eq!(decoded.listen_web, cfg.listen_web);
+        prop_assert_eq!(decoded.bootstrap.listen_dns, cfg.bootstrap.listen_dns);
+        prop_assert_eq!(decoded.bootstrap.listen_web, cfg.bootstrap.listen_web);
         prop_assert_eq!(decoded.cache_size, cfg.cache_size);
         prop_assert_eq!(decoded.optimistic_cache, cfg.optimistic_cache);
         prop_assert_eq!(decoded.upstream_timeout_ms, cfg.upstream_timeout_ms);
-        prop_assert_eq!(decoded.custom_rules, rules);
+        prop_assert_eq!(&decoded.bootstrap.custom_rules, &rules);
         prop_assert_eq!(decoded.log_retention_hours, cfg.log_retention_hours);
     }
 

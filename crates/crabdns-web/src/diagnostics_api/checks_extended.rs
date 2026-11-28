@@ -19,10 +19,10 @@ pub(crate) fn check_tls_cert_health(
     cfg: &crabdns_core::Config,
     tls_reloader: Option<&dyn TlsReloader>,
 ) -> DiagnosticItem {
-    let any_tls_enabled = cfg.listen_web_tls.is_some()
-        || cfg.listen_dot.is_some()
-        || cfg.listen_doq.is_some()
-        || cfg.listen_doh3.is_some();
+    let any_tls_enabled = cfg.bootstrap.listen_web_tls.is_some()
+        || cfg.bootstrap.listen_dot.is_some()
+        || cfg.bootstrap.listen_doq.is_some()
+        || cfg.bootstrap.listen_doh3.is_some();
     if !any_tls_enabled {
         return DiagnosticItem {
             id: "tls_cert_health".to_string(),
@@ -195,7 +195,7 @@ pub(crate) fn evaluate_tls_cert_file(cert_path: &Path, now: DateTime<Utc>) -> Di
 }
 
 pub(crate) fn check_open_resolver_risk(cfg: &crabdns_core::Config) -> DiagnosticItem {
-    let wildcard_bind = cfg.listen_dns.ip().is_unspecified();
+    let wildcard_bind = cfg.bootstrap.listen_dns.ip().is_unspecified();
     let no_acl = cfg.allow_cidrs.is_empty();
     let no_rate_limit = cfg.rate_limit_qps == 0;
 
@@ -207,7 +207,7 @@ pub(crate) fn check_open_resolver_risk(cfg: &crabdns_core::Config) -> Diagnostic
             summary: "Unrestricted wildcard DNS listener".to_string(),
             detail: Some(format!(
                 "Listening on {} with empty allow_cidrs and rate_limit_qps = 0.",
-                cfg.listen_dns
+                cfg.bootstrap.listen_dns
             )),
             hint: Some(
                 "If exposed beyond LAN, configure allow_cidrs or rate_limit_qps in Settings to prevent DNS amplification."
@@ -217,7 +217,7 @@ pub(crate) fn check_open_resolver_risk(cfg: &crabdns_core::Config) -> Diagnostic
         }
     } else {
         let detail = if !wildcard_bind {
-            format!("Bound to specific interface {}", cfg.listen_dns)
+            format!("Bound to specific interface {}", cfg.bootstrap.listen_dns)
         } else if !no_acl {
             format!("{} allowed CIDR(s) configured", cfg.allow_cidrs.len())
         } else {
@@ -448,7 +448,7 @@ pub(crate) fn check_dnssec_and_clock(cfg: &crabdns_core::Config) -> DiagnosticIt
 }
 
 pub(crate) fn check_data_dir_storage(cfg: &crabdns_core::Config) -> DiagnosticItem {
-    let dir = &cfg.data_dir;
+    let dir = &cfg.bootstrap.data_dir;
     if !dir.exists() {
         return DiagnosticItem {
             id: "data_dir_storage".to_string(),

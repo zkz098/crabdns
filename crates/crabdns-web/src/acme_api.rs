@@ -98,7 +98,7 @@ impl AcmeManager {
     }
 
     pub fn status(&self, cfg: &Config) -> AcmeStatusResponse {
-        let (cert_path, key_path, _) = Self::acme_paths(&cfg.data_dir);
+        let (cert_path, key_path, _) = Self::acme_paths(&cfg.bootstrap.data_dir);
         let cert_exists = cert_path.is_file() && key_path.is_file();
         let cert_expires_at = if cert_path.is_file() {
             read_cert_expiry(&cert_path)
@@ -138,7 +138,7 @@ impl AcmeManager {
         if !cfg.acme_enabled || cfg.acme_domains.is_empty() {
             return false;
         }
-        let (cert_path, key_path, _) = Self::acme_paths(&cfg.data_dir);
+        let (cert_path, key_path, _) = Self::acme_paths(&cfg.bootstrap.data_dir);
         if !cert_path.is_file() || !key_path.is_file() {
             return true;
         }
@@ -208,7 +208,7 @@ impl AcmeManager {
         pipeline: &DnsPipeline,
         tls_reloader: Option<&Arc<dyn TlsReloader>>,
     ) -> Result<(), String> {
-        let (cert_path, key_path, account_path) = Self::acme_paths(&cfg.data_dir);
+        let (cert_path, key_path, account_path) = Self::acme_paths(&cfg.bootstrap.data_dir);
         if let Some(parent) = cert_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await

@@ -101,10 +101,8 @@ fn test_webui_auth_check() {
 
 #[test]
 fn test_open_resolver_risk() {
-    let mut cfg = crabdns_core::Config {
-        listen_dns: "0.0.0.0:53".parse().unwrap(),
-        ..Default::default()
-    };
+    let mut cfg = crabdns_core::Config::default();
+    cfg.bootstrap.listen_dns = "0.0.0.0:53".parse().unwrap();
     cfg.allow_cidrs.clear();
     cfg.rate_limit_qps = 0;
     let warn = check_open_resolver_risk(&cfg);

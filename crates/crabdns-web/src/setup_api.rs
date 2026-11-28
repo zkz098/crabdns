@@ -110,11 +110,11 @@ pub async fn get_setup_status(State(state): State<RouterState>) -> Json<SetupSta
     let tls_configured = cfg.tls_cert_path.is_some() && cfg.tls_key_path.is_some();
     Json(SetupStatusResponse {
         setup_required: true,
-        listen_dns: cfg.listen_dns.to_string(),
-        listen_web: cfg.listen_web.to_string(),
-        listen_web_tls: cfg.listen_web_tls.map(|a| a.to_string()),
-        listen_dot: cfg.listen_dot.map(|a| a.to_string()),
-        listen_doq: cfg.listen_doq.map(|a| a.to_string()),
+        listen_dns: cfg.bootstrap.listen_dns.to_string(),
+        listen_web: cfg.bootstrap.listen_web.to_string(),
+        listen_web_tls: cfg.bootstrap.listen_web_tls.map(|a| a.to_string()),
+        listen_dot: cfg.bootstrap.listen_dot.map(|a| a.to_string()),
+        listen_doq: cfg.bootstrap.listen_doq.map(|a| a.to_string()),
         tls_configured,
         upstreams: cfg.upstreams.clone(),
         block_mode: cfg.block_mode,
@@ -232,7 +232,7 @@ pub async fn complete_setup(
 
     let storage = Arc::clone(&state.app.storage);
     let to_save = next.clone();
-    match tokio::task::spawn_blocking(move || storage.save_config(&to_save)).await {
+    match tokio::task::spawn_blocking(move || storage.save_config(&to_save.runtime)).await {
         Ok(Ok(())) => {}
         Ok(Err(err)) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
         Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
@@ -354,22 +354,32 @@ pub async fn check_ports(
             "dns",
             payload.dns_addr,
             TransportKind::Both,
-            Some(cfg.listen_dns),
+            Some(cfg.bootstrap.listen_dns),
         ),
         (
             "web",
             payload.web_addr,
             TransportKind::Tcp,
-            Some(cfg.listen_web),
+            Some(cfg.bootstrap.listen_web),
         ),
         (
             "web_tls",
             payload.web_tls_addr,
             TransportKind::Tcp,
-            cfg.listen_web_tls,
+            cfg.bootstrap.listen_web_tls,
         ),
-        ("dot", payload.dot_addr, TransportKind::Tcp, cfg.listen_dot),
-        ("doq", payload.doq_addr, TransportKind::Udp, cfg.listen_doq),
+        (
+            "dot",
+            payload.dot_addr,
+            TransportKind::Tcp,
+            cfg.bootstrap.listen_dot,
+        ),
+        (
+            "doq",
+            payload.doq_addr,
+            TransportKind::Udp,
+            cfg.bootstrap.listen_doq,
+        ),
     ];
 
     let mut results = Vec::new();

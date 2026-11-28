@@ -212,22 +212,20 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
     let (upstream_addr, upstream_hits) = spawn_mock_udp_upstream().await;
     let data_dir = tempfile::tempdir().expect("tempdir");
 
-    let config = Config {
-        listen_dns: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        listen_web: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        data_dir: data_dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{upstream_addr}")],
-        cache_size: 1024,
-        optimistic_cache: true,
-        upstream_timeout_ms: 2000,
-        custom_rules: vec![
-            "||ads.example.com^".to_string(),
-            "||tracker.evil.com^".to_string(),
-            "||nas.local^$dnsrewrite=192.168.1.50".to_string(),
-        ],
-        log_retention_hours: 24,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.bootstrap.listen_dns = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    config.bootstrap.listen_web = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    config.bootstrap.data_dir = data_dir.path().to_path_buf();
+    config.bootstrap.custom_rules = vec![
+        "||ads.example.com^".to_string(),
+        "||tracker.evil.com^".to_string(),
+        "||nas.local^$dnsrewrite=192.168.1.50".to_string(),
+    ];
+    config.upstreams = vec![format!("udp://{upstream_addr}")];
+    config.cache_size = 1024;
+    config.optimistic_cache = true;
+    config.upstream_timeout_ms = 2000;
+    config.log_retention_hours = 24;
 
     let server = spawn_server(config.clone())
         .await
@@ -392,10 +390,8 @@ async fn test_full_chain_dns_udp_tcp_cache_filter_storage_web_ws_and_restart() {
     // Graceful shutdown + restart on the same data_dir with empty config.custom_rules
     server.shutdown().await;
 
-    let restart_config = Config {
-        custom_rules: vec![],
-        ..config
-    };
+    let mut restart_config = config;
+    restart_config.bootstrap.custom_rules = vec![];
     let restarted = spawn_server(restart_config).await.expect("restart server");
     let restarted_base = format!("http://{}", restarted.web_addr);
 
@@ -422,21 +418,18 @@ async fn test_full_chain_upstream_failover_and_servfail() {
     let data_dir = tempfile::tempdir().expect("tempdir");
 
     // 1. Failover from unreachable UDP upstream to healthy TCP upstream
-    let failover_cfg = Config {
-        listen_dns: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        listen_web: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        data_dir: data_dir.path().to_path_buf(),
-        upstreams: vec![
-            "udp://127.0.0.1:1".to_string(),
-            format!("tcp://{tcp_upstream_addr}"),
-        ],
-        cache_size: 128,
-        optimistic_cache: false,
-        upstream_timeout_ms: 500,
-        custom_rules: vec![],
-        log_retention_hours: 24,
-        ..Config::default()
-    };
+    let mut failover_cfg = Config::default();
+    failover_cfg.bootstrap.listen_dns = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    failover_cfg.bootstrap.listen_web = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    failover_cfg.bootstrap.data_dir = data_dir.path().to_path_buf();
+    failover_cfg.upstreams = vec![
+        "udp://127.0.0.1:1".to_string(),
+        format!("tcp://{tcp_upstream_addr}"),
+    ];
+    failover_cfg.cache_size = 128;
+    failover_cfg.optimistic_cache = false;
+    failover_cfg.upstream_timeout_ms = 500;
+    failover_cfg.log_retention_hours = 24;
 
     let server = spawn_server(failover_cfg)
         .await
@@ -454,18 +447,15 @@ async fn test_full_chain_upstream_failover_and_servfail() {
 
     // 2. All upstreams unreachable -> SERVFAIL + Error counter
     let dead_dir = tempfile::tempdir().expect("tempdir dead");
-    let dead_cfg = Config {
-        listen_dns: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        listen_web: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        data_dir: dead_dir.path().to_path_buf(),
-        upstreams: vec!["udp://127.0.0.1:1".to_string()],
-        cache_size: 128,
-        optimistic_cache: false,
-        upstream_timeout_ms: 200,
-        custom_rules: vec![],
-        log_retention_hours: 24,
-        ..Config::default()
-    };
+    let mut dead_cfg = Config::default();
+    dead_cfg.bootstrap.listen_dns = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    dead_cfg.bootstrap.listen_web = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    dead_cfg.bootstrap.data_dir = dead_dir.path().to_path_buf();
+    dead_cfg.upstreams = vec!["udp://127.0.0.1:1".to_string()];
+    dead_cfg.cache_size = 128;
+    dead_cfg.optimistic_cache = false;
+    dead_cfg.upstream_timeout_ms = 200;
+    dead_cfg.log_retention_hours = 24;
 
     let dead_server = spawn_server(dead_cfg).await.expect("spawn dead server");
     let dead_base = format!("http://{}", dead_server.web_addr);
@@ -490,18 +480,15 @@ async fn test_full_chain_config_update_hot_reload_and_restart() {
     let (tcp_upstream, tcp_hits) = spawn_mock_tcp_upstream().await;
     let data_dir = tempfile::tempdir().expect("tempdir");
 
-    let config = Config {
-        listen_dns: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        listen_web: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        data_dir: data_dir.path().to_path_buf(),
-        upstreams: vec![format!("udp://{udp_upstream}")],
-        cache_size: 128,
-        optimistic_cache: true,
-        upstream_timeout_ms: 1500,
-        custom_rules: vec![],
-        log_retention_hours: 24,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.bootstrap.listen_dns = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    config.bootstrap.listen_web = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    config.bootstrap.data_dir = data_dir.path().to_path_buf();
+    config.upstreams = vec![format!("udp://{udp_upstream}")];
+    config.cache_size = 128;
+    config.optimistic_cache = true;
+    config.upstream_timeout_ms = 1500;
+    config.log_retention_hours = 24;
 
     let server = spawn_server(config.clone()).await.expect("spawn server");
     let http = reqwest::Client::new();
