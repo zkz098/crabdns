@@ -233,6 +233,88 @@ export function DiagnosticsView(props: { onNavigateTab?: (tab: string) => void }
                 />
               </div>
 
+              {/* Health Metrics Cards */}
+              <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <HealthMetricCard
+                  label={t("diagMetricAvgResponse")}
+                  value={
+                    r().metrics.avg_response_ms !== null
+                      ? `${r().metrics.avg_response_ms!.toFixed(1)} ms`
+                      : "-"
+                  }
+                  subLabel={`${r().metrics.total_queries.toLocaleString()} ${t("diagMetricQueriesUnit")}`}
+                  icon="i-ri-speed-up-line"
+                  tone={
+                    r().metrics.avg_response_ms === null
+                      ? "neutral"
+                      : r().metrics.avg_response_ms! >= 200
+                        ? "error"
+                        : r().metrics.avg_response_ms! >= 50
+                          ? "warn"
+                          : "ok"
+                  }
+                />
+                <HealthMetricCard
+                  label={t("diagMetricUpstreamLatency")}
+                  value={
+                    r().metrics.upstream_avg_latency_ms !== null
+                      ? `${r().metrics.upstream_avg_latency_ms} ms`
+                      : "-"
+                  }
+                  subLabel={
+                    r().metrics.upstream_avg_latency_ms === null ? t("diagMetricNoData") : "EWMA"
+                  }
+                  icon="i-ri-pulse-line"
+                  tone={
+                    r().metrics.upstream_avg_latency_ms === null
+                      ? "neutral"
+                      : r().metrics.upstream_avg_latency_ms! >= 400
+                        ? "error"
+                        : r().metrics.upstream_avg_latency_ms! >= 150
+                          ? "warn"
+                          : "ok"
+                  }
+                />
+                <HealthMetricCard
+                  label={t("diagMetricCacheHitRate")}
+                  value={
+                    r().metrics.cache_hit_rate_pct !== null
+                      ? `${r().metrics.cache_hit_rate_pct!.toFixed(1)}%`
+                      : "-"
+                  }
+                  subLabel={`${r().metrics.cache_entries.toLocaleString()} ${t("diagMetricCachedEntries")}`}
+                  icon="i-ri-database-2-line"
+                  tone={
+                    r().metrics.cache_hit_rate_pct === null
+                      ? "neutral"
+                      : r().metrics.cache_hit_rate_pct! < 20
+                        ? "warn"
+                        : "ok"
+                  }
+                />
+                <HealthMetricCard
+                  label={t("diagMetricErrorRate")}
+                  value={
+                    r().metrics.error_rate_pct !== null
+                      ? `${r().metrics.error_rate_pct!.toFixed(2)}%`
+                      : "-"
+                  }
+                  subLabel={
+                    r().metrics.error_rate_pct === null ? t("diagMetricNoData") : "SERVFAIL / Error"
+                  }
+                  icon="i-ri-shield-check-line"
+                  tone={
+                    r().metrics.error_rate_pct === null
+                      ? "neutral"
+                      : r().metrics.error_rate_pct! >= 5
+                        ? "error"
+                        : r().metrics.error_rate_pct! >= 1
+                          ? "warn"
+                          : "ok"
+                  }
+                />
+              </div>
+
               {/* Metadata Row */}
               <div class="flex flex-wrap items-center gap-x-5 gap-y-1.5 pt-1 border-t border-[#eaeaea] dark:border-[#262626] text-[11px] text-[#666666] dark:text-[#a1a1aa]">
                 <span class="inline-flex items-center gap-1.5">
@@ -412,6 +494,40 @@ export function DiagnosticsView(props: { onNavigateTab?: (tab: string) => void }
           )}
         </Show>
       </section>
+    </div>
+  );
+}
+
+function HealthMetricCard(props: {
+  label: string;
+  value: string;
+  subLabel: string;
+  icon: string;
+  tone: DiagnosticStatus | "neutral";
+}) {
+  const valueClass = () => {
+    switch (props.tone) {
+      case "ok":
+        return "text-emerald-700 dark:text-emerald-400";
+      case "warn":
+        return "text-amber-700 dark:text-amber-400";
+      case "error":
+        return "text-rose-700 dark:text-rose-400";
+      case "neutral":
+        return "text-[#171717] dark:text-[#ededed]";
+    }
+  };
+
+  return (
+    <div class="rounded-lg border border-[#eaeaea] dark:border-[#262626] bg-[#fafafa] dark:bg-[#050505] px-3 py-2.5 space-y-1">
+      <div class="flex items-center justify-between gap-1.5 text-[#666666] dark:text-[#a1a1aa]">
+        <span class="text-[11px] font-medium truncate">{props.label}</span>
+        <span class={`${props.icon} text-sm shrink-0`} />
+      </div>
+      <div class={`text-base sm:text-lg font-semibold font-mono tabular-nums ${valueClass()}`}>
+        {props.value}
+      </div>
+      <div class="text-[11px] text-[#888888] dark:text-[#71717a] truncate">{props.subLabel}</div>
     </div>
   );
 }

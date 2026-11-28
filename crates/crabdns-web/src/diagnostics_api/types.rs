@@ -35,11 +35,26 @@ pub struct DiagnosticItem {
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
+pub struct SystemHealthMetrics {
+    pub avg_response_ms: Option<f64>,
+    #[ts(type = "number | null")]
+    pub upstream_avg_latency_ms: Option<u64>,
+    pub cache_hit_rate_pct: Option<f64>,
+    pub error_rate_pct: Option<f64>,
+    #[ts(type = "number")]
+    pub total_queries: u64,
+    #[ts(type = "number")]
+    pub cache_entries: u64,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct SystemDiagnosticsResponse {
     pub overall: DiagnosticStatus,
     #[ts(type = "number")]
     pub checked_at_ms: u64,
     pub listen_dns: String,
+    pub metrics: SystemHealthMetrics,
     pub items: Vec<DiagnosticItem>,
 }
 

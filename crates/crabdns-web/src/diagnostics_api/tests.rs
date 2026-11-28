@@ -168,3 +168,56 @@ fn test_parse_qtype_code() {
     assert_eq!(parse_qtype_code("HTTPS"), Some(("HTTPS", 65)));
     assert_eq!(parse_qtype_code("INVALID"), None);
 }
+
+#[test]
+fn test_compute_health_metrics_handles_zero_and_populated_inputs() {
+    let empty_cache = crabdns_core::CacheStats::default();
+    let empty = super::compute_health_metrics(0.0, 0, &[], &empty_cache, 0, 0);
+    assert_eq!(empty.avg_response_ms, None);
+    assert_eq!(empty.upstream_avg_latency_ms, None);
+    assert_eq!(empty.cache_hit_rate_pct, None);
+    assert_eq!(empty.error_rate_pct, None);
+    assert_eq!(empty.total_queries, 0);
+    assert_eq!(empty.cache_entries, 0);
+
+    let upstreams = vec![
+        crabdns_core::UpstreamStatus {
+            endpoint: "1.1.1.1:53".to_string(),
+            healthy: true,
+            consecutive_failures: 0,
+            ewma_latency_ms: 20,
+            total_requests: 10,
+            total_failures: 0,
+        },
+        crabdns_core::UpstreamStatus {
+            endpoint: "8.8.8.8:53".to_string(),
+            healthy: true,
+            consecutive_failures: 0,
+            ewma_latency_ms: 40,
+            total_requests: 5,
+            total_failures: 0,
+        },
+        crabdns_core::UpstreamStatus {
+            endpoint: "9.9.9.9:53".to_string(),
+            healthy: false,
+            consecutive_failures: 3,
+            ewma_latency_ms: 500,
+            total_requests: 5,
+            total_failures: 3,
+        },
+    ];
+    let cache = crabdns_core::CacheStats {
+        entries: 42,
+        hits: 70,
+        optimistic_hits: 10,
+        misses: 20,
+        ..Default::default()
+    };
+    let populated = super::compute_health_metrics(0.5, 25, &upstreams, &cache, 200, 4);
+    assert!((populated.avg_response_ms.unwrap() - 20.0).abs() < 1e-6);
+    assert_eq!(populated.upstream_avg_latency_ms, Some(30));
+    assert!((populated.cache_hit_rate_pct.unwrap() - 80.0).abs() < 1e-6);
+    assert!((populated.error_rate_pct.unwrap() - 2.0).abs() < 1e-6);
+    assert_eq!(populated.total_queries, 200);
+    assert_eq!(populated.cache_entries, 42);
+}

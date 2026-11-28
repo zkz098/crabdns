@@ -16,7 +16,7 @@ use crate::RouterState;
 pub use trace::trace_domain_resolution;
 pub use types::{
     DiagnosticCategory, DiagnosticItem, DiagnosticStatus, DomainTraceRequest, DomainTraceResponse,
-    DomainTraceStep, SystemDiagnosticsResponse,
+    DomainTraceStep, SystemDiagnosticsResponse, SystemHealthMetrics,
 };
 
 pub async fn run_system_diagnostics(
@@ -62,6 +62,7 @@ pub async fn run_system_diagnostics(
         cache_item,
     ];
     let overall = compute_overall_status(&items);
+    let metrics = collect_health_metrics(&state);
     let checked_at_ms = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -74,8 +75,81 @@ pub async fn run_system_diagnostics(
         overall,
         checked_at_ms,
         listen_dns: listen_dns.to_string(),
+        metrics,
         items,
     })
+}
+
+fn collect_health_metrics(state: &RouterState) -> SystemHealthMetrics {
+    let latency = state.app.pipeline.latency_snapshot();
+    let upstreams = state.app.pipeline.upstream().health_snapshot();
+    let cache_stats = state.app.pipeline.cache().stats();
+    let query_stats = state.app.storage.stats_snapshot();
+
+    compute_health_metrics(
+        latency.sum_secs,
+        latency.count,
+        &upstreams,
+        &cache_stats,
+        query_stats.total_queries,
+        query_stats.error_queries,
+    )
+}
+
+pub(crate) fn compute_health_metrics(
+    latency_sum_secs: f64,
+    latency_count: u64,
+    upstreams: &[crabdns_core::UpstreamStatus],
+    cache_stats: &crabdns_core::CacheStats,
+    total_queries: u64,
+    error_queries: u64,
+) -> SystemHealthMetrics {
+    #[allow(clippy::cast_precision_loss)]
+    let avg_response_ms = if latency_count > 0 {
+        Some((latency_sum_secs / latency_count as f64) * 1000.0)
+    } else {
+        None
+    };
+
+    let measured_upstreams: Vec<u64> = upstreams
+        .iter()
+        .filter(|u| u.healthy && u.total_requests > 0)
+        .map(|u| u.ewma_latency_ms)
+        .collect();
+    let upstream_avg_latency_ms = if measured_upstreams.is_empty() {
+        None
+    } else {
+        let sum: u64 = measured_upstreams.iter().sum();
+        Some(sum / u64::try_from(measured_upstreams.len()).unwrap_or(1))
+    };
+
+    let cache_lookups = cache_stats
+        .hits
+        .saturating_add(cache_stats.optimistic_hits)
+        .saturating_add(cache_stats.misses);
+    #[allow(clippy::cast_precision_loss)]
+    let cache_hit_rate_pct = if cache_lookups > 0 {
+        let hits = cache_stats.hits.saturating_add(cache_stats.optimistic_hits);
+        Some((hits as f64 / cache_lookups as f64) * 100.0)
+    } else {
+        None
+    };
+
+    #[allow(clippy::cast_precision_loss)]
+    let error_rate_pct = if total_queries > 0 {
+        Some((error_queries as f64 / total_queries as f64) * 100.0)
+    } else {
+        None
+    };
+
+    SystemHealthMetrics {
+        avg_response_ms,
+        upstream_avg_latency_ms,
+        cache_hit_rate_pct,
+        error_rate_pct,
+        total_queries,
+        cache_entries: cache_stats.entries,
+    }
 }
 
 fn compute_overall_status(items: &[DiagnosticItem]) -> DiagnosticStatus {
