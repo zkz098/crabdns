@@ -86,6 +86,7 @@ pub struct ConfigResponse {
     pub dns_rebinding_protection: bool,
     pub block_any_queries: bool,
     pub trusted_proxies: Vec<String>,
+    pub trusted_forwarders: Vec<String>,
     pub rdns_enabled: bool,
     pub safesearch: SafeSearchConfig,
     pub dns64_enabled: bool,
@@ -179,6 +180,7 @@ impl From<&Config> for ConfigResponse {
             dns_rebinding_protection: cfg.dns_rebinding_protection,
             block_any_queries: cfg.block_any_queries,
             trusted_proxies: cfg.trusted_proxies.clone(),
+            trusted_forwarders: cfg.trusted_forwarders.clone(),
             rdns_enabled: cfg.rdns_enabled,
             safesearch: cfg.safesearch.clone(),
             dns64_enabled: cfg.dns64_enabled,
@@ -310,6 +312,8 @@ pub struct ConfigUpdatePayload {
     pub block_any_queries: Option<bool>,
     #[serde(default)]
     pub trusted_proxies: Option<Vec<String>>,
+    #[serde(default)]
+    pub trusted_forwarders: Option<Vec<String>>,
     #[serde(default)]
     pub tls_cert_path: Option<String>,
     #[serde(default)]
@@ -575,6 +579,11 @@ pub async fn update_config(
             .trusted_proxies
             .unwrap_or_else(|| current.trusted_proxies.clone()),
     );
+    let trusted_forwarders = clean_string_list(
+        payload
+            .trusted_forwarders
+            .unwrap_or_else(|| current.trusted_forwarders.clone()),
+    );
     let tls_cert_path = merge_opt_path(payload.tls_cert_path, current.tls_cert_path.as_deref());
     let tls_key_path = merge_opt_path(payload.tls_key_path, current.tls_key_path.as_deref());
     let rdns_enabled = payload.rdns_enabled.unwrap_or(current.rdns_enabled);
@@ -640,6 +649,9 @@ pub async fn update_config(
     Dns64Config::compile(dns64_enabled, &dns64_prefixes)
         .map_err(|err| bad_request(err.to_string()))?;
     if let Err(err) = parse_cidr_list(&trusted_proxies) {
+        return Err(bad_request(err.to_string()));
+    }
+    if let Err(err) = parse_cidr_list(&trusted_forwarders) {
         return Err(bad_request(err.to_string()));
     }
     let next_acl = AccessController::new(&allow_cidrs, &deny_cidrs, rate_limit_qps)
@@ -792,6 +804,7 @@ pub async fn update_config(
     next.dns_rebinding_protection = dns_rebinding_protection;
     next.block_any_queries = block_any_queries;
     next.trusted_proxies = trusted_proxies;
+    next.trusted_forwarders.clone_from(&trusted_forwarders);
     next.tls_cert_path = tls_cert_path;
     next.tls_key_path = tls_key_path;
     next.rdns_enabled = rdns_enabled;
@@ -893,6 +906,7 @@ pub async fn update_config(
     pipe.set_svcb_sanitization(svcb_strip_ech, svcb_strip_hints);
     pipe.reload_cf_cdn(next.cf_cdn.clone());
     pipe.set_ede_enabled(ede_enabled);
+    let _ = pipe.reload_trusted_forwarders(&next.trusted_forwarders);
     pipe.set_dns_cookies(dns_cookies_enabled, dns_cookies_require_valid);
     pipe.set_max_udp_payload_size(max_udp_payload_size);
     pipe.set_rrl(crabdns_core::RrlConfig {

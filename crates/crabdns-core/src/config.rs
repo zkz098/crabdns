@@ -184,6 +184,8 @@ pub struct RuntimeConfig {
     pub block_any_queries: bool,
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    #[serde(default)]
+    pub trusted_forwarders: Vec<String>,
     #[serde(default = "default_true")]
     pub rdns_enabled: bool,
     #[serde(default)]
@@ -455,6 +457,7 @@ impl Default for RuntimeConfig {
             dns_rebinding_protection: false,
             block_any_queries: false,
             trusted_proxies: Vec::new(),
+            trusted_forwarders: Vec::new(),
             rdns_enabled: true,
             safesearch: SafeSearchConfig::default(),
             dns64_enabled: false,

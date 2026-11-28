@@ -307,6 +307,7 @@ fn configure_pipeline(
     pipeline.set_svcb_sanitization(cfg.svcb_strip_ech, cfg.svcb_strip_hints);
     pipeline.reload_cf_cdn(cfg.cf_cdn.clone());
     pipeline.set_ede_enabled(cfg.ede_enabled);
+    pipeline.reload_trusted_forwarders(&cfg.trusted_forwarders)?;
     pipeline.set_dns_cookies(cfg.dns_cookies_enabled, cfg.dns_cookies_require_valid);
     pipeline.set_max_udp_payload_size(cfg.max_udp_payload_size);
     pipeline.set_rrl(crabdns_core::RrlConfig {

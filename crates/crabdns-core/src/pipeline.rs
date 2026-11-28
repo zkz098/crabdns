@@ -8,7 +8,7 @@ use foldhash::fast::RandomState;
 use hickory_proto::rr::RecordType;
 use tokio::sync::{Notify, Semaphore, mpsc};
 
-use crate::acl::AccessController;
+use crate::acl::{AccessController, IpNet, parse_cidr_list};
 use crate::cache::{CacheKey, DnsCache};
 use crate::cf_cdn::{CfCdnConfig, CfCdnManager};
 use crate::clients::{
@@ -50,6 +50,7 @@ pub struct DnsPipeline {
     pub(crate) split_router: ArcSwap<SplitUpstreamRouter>,
     pub(crate) split_dns_before_client_upstreams: AtomicBool,
     pub(crate) acl: ArcSwap<AccessController>,
+    pub(crate) trusted_forwarders: ArcSwap<Vec<IpNet>>,
     pub(crate) clients: ArcSwap<ClientRegistry>,
     pub(crate) name_resolver: Arc<ClientNameResolver>,
     pub(crate) rdns_enabled: AtomicBool,
@@ -126,6 +127,7 @@ impl DnsPipeline {
             split_router: ArcSwap::from_pointee(SplitUpstreamRouter::empty()),
             split_dns_before_client_upstreams: AtomicBool::new(false),
             acl: ArcSwap::from_pointee(default_acl),
+            trusted_forwarders: ArcSwap::from_pointee(Vec::new()),
             clients: ArcSwap::from_pointee(ClientRegistry::empty()),
             name_resolver: Arc::new(ClientNameResolver::new()),
             rdns_enabled: AtomicBool::new(true),
@@ -696,6 +698,18 @@ impl DnsPipeline {
 
     pub fn set_rrl(&self, cfg: RrlConfig) {
         self.rrl.update_config(cfg);
+    }
+
+    /// Updates the trusted DNS forwarder IP/CIDR allowlist used for EDNS0 MAC/ECS client identification.
+    pub fn reload_trusted_forwarders(&self, specs: &[String]) -> Result<()> {
+        let nets = parse_cidr_list(specs)?;
+        self.trusted_forwarders.store(Arc::new(nets));
+        Ok(())
+    }
+
+    pub(crate) fn is_trusted_forwarder(&self, ip: IpAddr) -> bool {
+        let nets = self.trusted_forwarders.load();
+        nets.iter().any(|net| net.contains(ip))
     }
 
     pub fn record_udp_dropped(&self) {

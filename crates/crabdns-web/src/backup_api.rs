@@ -138,6 +138,7 @@ fn config_to_update_payload(cfg: &Config) -> ConfigUpdatePayload {
         dns_rebinding_protection: Some(cfg.dns_rebinding_protection),
         block_any_queries: Some(cfg.block_any_queries),
         trusted_proxies: Some(cfg.trusted_proxies.clone()),
+        trusted_forwarders: Some(cfg.trusted_forwarders.clone()),
         tls_cert_path: cfg.tls_cert_path.as_ref().map(|p| p.display().to_string()),
         tls_key_path: cfg.tls_key_path.as_ref().map(|p| p.display().to_string()),
         rdns_enabled: Some(cfg.rdns_enabled),
@@ -475,6 +476,9 @@ fn apply_optional_flags(next: &mut Config, current: &Config, payload: ConfigUpda
     if let Some(v) = payload.trusted_proxies {
         next.trusted_proxies = clean_string_list(v);
     }
+    if let Some(v) = payload.trusted_forwarders {
+        next.trusted_forwarders = clean_string_list(v);
+    }
     next.tls_cert_path = merge_opt_path(payload.tls_cert_path, current.tls_cert_path.as_deref());
     next.tls_key_path = merge_opt_path(payload.tls_key_path, current.tls_key_path.as_deref());
     next.rdns_enabled = payload.rdns_enabled.unwrap_or(current.rdns_enabled);
@@ -526,6 +530,8 @@ pub(crate) fn compile_runtime_components(
     storage: &crabdns_storage::StorageEngine,
 ) -> ApiResult<CompiledRuntime> {
     parse_cidr_list(&next.trusted_proxies)
+        .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
+    parse_cidr_list(&next.trusted_forwarders)
         .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
     let acl = AccessController::new(&next.allow_cidrs, &next.deny_cidrs, next.rate_limit_qps)
         .map_err(|e| err_response(StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -637,6 +643,7 @@ pub(crate) fn apply_compiled_to_pipeline(
     pipe.set_svcb_sanitization(next.svcb_strip_ech, next.svcb_strip_hints);
     pipe.reload_cf_cdn(next.cf_cdn.clone());
     pipe.set_ede_enabled(next.ede_enabled);
+    let _ = pipe.reload_trusted_forwarders(&next.trusted_forwarders);
     pipe.set_dns_cookies(next.dns_cookies_enabled, next.dns_cookies_require_valid);
     pipe.set_max_udp_payload_size(next.max_udp_payload_size);
     pipe.set_rrl(crabdns_core::RrlConfig {

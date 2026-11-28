@@ -46,13 +46,26 @@ impl DnsPipeline {
         ip: IpAddr,
         client_id: Option<&str>,
     ) -> Option<Arc<ResolvedClientPolicy>> {
+        self.match_client_policy_with_mac(ip, client_id, None)
+    }
+
+    pub(crate) fn match_client_policy_with_mac(
+        &self,
+        ip: IpAddr,
+        client_id: Option<&str>,
+        edns_mac: Option<&str>,
+    ) -> Option<Arc<ResolvedClientPolicy>> {
         let registry = self.clients.load();
-        let mac = if registry.has_mac_rules() {
-            self.resolve_client_mac(ip)
-        } else {
-            None
+        let resolved_mac;
+        let mac = match edns_mac {
+            Some(m) => Some(m),
+            None if registry.has_mac_rules() => {
+                resolved_mac = self.resolve_client_mac(ip);
+                resolved_mac.as_deref()
+            }
+            None => None,
         };
-        registry.match_client_with_mac(ip, client_id, mac.as_deref())
+        registry.match_client_with_mac(ip, client_id, mac)
     }
 
     pub fn set_acme_dns_challenge(&self, fqdn: &str, value: String) {

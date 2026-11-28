@@ -44,7 +44,7 @@ impl DnsPipeline {
         client_addr: SocketAddr,
         out: &mut Vec<u8>,
     ) -> UdpFastOutcome {
-        if self.fast_path_bypassed() {
+        if self.fast_path_bypassed() || self.is_trusted_forwarder(client_addr.ip()) {
             return UdpFastOutcome::NeedsAsync;
         }
         let Some(q) = parse_fast_query(raw_query) else {

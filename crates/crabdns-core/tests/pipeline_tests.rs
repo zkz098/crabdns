@@ -593,3 +593,133 @@ async fn test_log_dropped_metric_and_monotonic_pause() {
     pipeline.resume_blocking();
     assert_eq!(pipeline.blocking_status(), (false, None));
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_trusted_forwarder_edns_mac_and_ecs_client_identification() {
+    use crabdns_core::edns::{EDNS_OPTION_MAC, has_edns_mac, has_private_ecs};
+    use crabdns_core::{ClientProfile, UdpFastOutcome, UpstreamPolicy, UpstreamStrategy};
+    use hickory_proto::op::Edns;
+    use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsOption};
+
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = sock.local_addr().unwrap();
+    let saw_mac_upstream = Arc::new(AtomicUsize::new(0));
+    let saw_priv_ecs_upstream = Arc::new(AtomicUsize::new(0));
+    let saw_mac_bg = Arc::clone(&saw_mac_upstream);
+    let saw_ecs_bg = Arc::clone(&saw_priv_ecs_upstream);
+
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 2048];
+        while let Ok((len, peer)) = sock.recv_from(&mut buf).await {
+            let req = Message::from_vec(&buf[..len]).unwrap();
+            if has_edns_mac(&req) {
+                saw_mac_bg.fetch_add(1, Ordering::SeqCst);
+            }
+            if has_private_ecs(&req) {
+                saw_ecs_bg.fetch_add(1, Ordering::SeqCst);
+            }
+            let q = req.queries.first().unwrap().clone();
+            let mut resp = Message::new(req.id, MessageType::Response, OpCode::Query);
+            resp.metadata.recursion_desired = true;
+            resp.metadata.recursion_available = true;
+            resp.metadata.response_code = ResponseCode::NoError;
+            resp.add_query(q.clone());
+            resp.add_answer(Record::from_rdata(
+                q.name,
+                60,
+                RData::A(A(Ipv4Addr::new(93, 184, 216, 34))),
+            ));
+            let _ = sock.send_to(&resp.to_vec().unwrap(), peer).await;
+        }
+    });
+
+    let filter = Arc::new(FilterEngine::new(&["||ads.example.com^".to_string()]));
+    let cache = Arc::new(DnsCache::new(64, false));
+    let upstream = Arc::new(UpstreamPool::new(&[format!("udp://{upstream_addr}")], 500).unwrap());
+    let (tx, mut rx) = mpsc::channel(32);
+    let pipeline = DnsPipeline::new(filter, cache, upstream, Some(tx));
+
+    pipeline
+        .reload_trusted_forwarders(&["192.168.1.1/32".to_string()])
+        .unwrap();
+
+    let vip_mac_client = ClientProfile {
+        id: "mac-vip".to_string(),
+        name: "Living Room TV".to_string(),
+        identifiers: vec!["aa:bb:cc:dd:ee:ff".to_string()],
+        group_id: None,
+        blocking_enabled: Some(false),
+        use_global_rules: None,
+        custom_rules: String::new(),
+        upstreams: Vec::new(),
+        block_mode: None,
+        safesearch_enabled: None,
+        upstream_policy: UpstreamPolicy::default(),
+        tags: Vec::new(),
+    };
+    pipeline
+        .reload_clients(&[vip_mac_client], &[], 500, UpstreamStrategy::Failover, &[])
+        .unwrap();
+
+    // Build a query carrying dnsmasq --add-mac (65001) + --add-subnet=32 (192.168.1.50/32)
+    let mut msg =
+        Message::from_vec(&build_query(0x4141, "ads.example.com.", RecordType::A)).unwrap();
+    let mut edns = Edns::new();
+    edns.options_mut().insert(EdnsOption::Unknown(
+        EDNS_OPTION_MAC,
+        vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    ));
+    edns.options_mut()
+        .insert(EdnsOption::Subnet(ClientSubnet::new(
+            "192.168.1.50".parse().unwrap(),
+            32,
+            0,
+        )));
+    msg.edns = Some(edns);
+    let wire = msg.to_vec().unwrap();
+
+    // 1. Trusted forwarder bypasses UDP fast path so EDNS0 MAC/ECS are parsed
+    let mut fast_out = Vec::new();
+    assert_eq!(
+        pipeline.try_handle_udp_fast(&wire, "192.168.1.1:5353".parse().unwrap(), &mut fast_out),
+        UdpFastOutcome::NeedsAsync
+    );
+
+    // 2. Trusted forwarder: MAC policy (blocking_enabled = false) allows ads.example.com,
+    //    effective client_ip is 192.168.1.50 from ECS, and upstream receives neither MAC nor private ECS.
+    let resp = Message::from_vec(
+        &pipeline
+            .handle_packet(&wire, "192.168.1.1:5353".parse().unwrap())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        resp.answers[0].data,
+        RData::A(A(Ipv4Addr::new(93, 184, 216, 34)))
+    );
+    let ev1 = rx.recv().await.unwrap();
+    assert_eq!(ev1.client_name.as_deref(), Some("Living Room TV"));
+    assert_eq!(ev1.client_ip, "192.168.1.50");
+    assert_eq!(saw_mac_upstream.load(Ordering::SeqCst), 0);
+    assert_eq!(saw_priv_ecs_upstream.load(Ordering::SeqCst), 0);
+
+    // 3. Untrusted source spoofing the same MAC & ECS must be ignored and blocked by global filter
+    let untrusted_resp = Message::from_vec(
+        &pipeline
+            .handle_packet(&wire, "192.168.1.99:5353".parse().unwrap())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(untrusted_resp.response_code, ResponseCode::NXDomain);
+    assert_eq!(
+        untrusted_resp.answers[0].data,
+        RData::A(A(Ipv4Addr::UNSPECIFIED))
+    );
+    let ev2 = rx.recv().await.unwrap();
+    assert_eq!(ev2.client_ip, "192.168.1.99");
+    assert_eq!(ev2.client_name, None);
+    assert_eq!(ev2.outcome, QueryOutcome::Blocked);
+}

@@ -13,7 +13,8 @@ use crate::config::BlockMode;
 use crate::cookies::CookieCheck;
 use crate::edns::{
     EDE_BLOCKED, EDE_DNSSEC_BOGUS, EDE_NO_REACHABLE_AUTHORITY, EDE_PROHIBITED, EDE_STALE_ANSWER,
-    EcsConfig, apply_ecs_to_message, has_dnssec_ok, resolve_ecs_subnet, set_dnssec_ok,
+    EcsConfig, apply_ecs_to_message, extract_edns_client_ip, extract_edns_mac, has_dnssec_ok,
+    has_edns_mac, has_private_ecs, resolve_ecs_subnet, set_dnssec_ok, strip_forwarder_edns_options,
 };
 use crate::error::{CoreError, Result};
 use crate::filter::{FilterAction, FilterDecision};
@@ -106,11 +107,32 @@ impl DnsPipeline {
         let qtype = question.query_type();
         let qclass = u16::from(question.query_class());
 
-        let (policy, meta) = self.resolve_query_meta(&ctx, clean_domain, qtype, start);
+        let peer_ip = ctx.client_addr.ip();
+        let (edns_mac, effective_ctx) = if self.is_trusted_forwarder(peer_ip) {
+            let mac = extract_edns_mac(&request);
+            let client_ip = extract_edns_client_ip(&request).unwrap_or(peer_ip);
+            (
+                mac,
+                QueryContext {
+                    client_addr: SocketAddr::new(client_ip, ctx.client_addr.port()),
+                    protocol: ctx.protocol,
+                    client_id: ctx.client_id,
+                },
+            )
+        } else {
+            (None, ctx)
+        };
 
-        let cookie_check = if ctx.protocol == QueryProtocol::Udp {
-            self.dns_cookies
-                .check_request(&request, ctx.client_addr.ip())
+        let (policy, meta) = self.resolve_query_meta(
+            &effective_ctx,
+            clean_domain,
+            qtype,
+            start,
+            edns_mac.as_deref(),
+        );
+
+        let cookie_check = if effective_ctx.protocol == QueryProtocol::Udp {
+            self.dns_cookies.check_request(&request, peer_ip)
         } else {
             CookieCheck::None
         };
@@ -121,21 +143,26 @@ impl DnsPipeline {
             CookieCheck::NeedsServerCookie { client_cookie }
                 if self.dns_cookies.require_valid() =>
             {
-                return self.dns_cookies.build_badcookie_response(
-                    &request,
-                    client_cookie,
-                    ctx.client_addr.ip(),
-                );
+                return self
+                    .dns_cookies
+                    .build_badcookie_response(&request, client_cookie, peer_ip);
             }
             _ => {}
         }
 
         let resp = self
             .handle_packet_inner(
-                raw_query, &request, &ctx, &meta, policy, &qname, qtype, qclass,
+                raw_query,
+                &request,
+                &effective_ctx,
+                &meta,
+                policy,
+                &qname,
+                qtype,
+                qclass,
             )
             .await?;
-        Ok(self.finalize_protocol_response(&request, &ctx, &meta, cookie_check, resp))
+        Ok(self.finalize_protocol_response(&request, &effective_ctx, &meta, cookie_check, resp))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -265,8 +292,13 @@ impl DnsPipeline {
         domain: String,
         qtype: RecordType,
         start: Instant,
+        edns_mac: Option<&str>,
     ) -> (Option<Arc<ResolvedClientPolicy>>, LogMeta) {
-        let policy = self.match_client_policy(ctx.client_addr.ip(), ctx.client_id.as_deref());
+        let policy = self.match_client_policy_with_mac(
+            ctx.client_addr.ip(),
+            ctx.client_id.as_deref(),
+            edns_mac,
+        );
         let client_name = match &policy {
             Some(p) => Some(p.client_name.clone()),
             None => {
@@ -655,10 +687,15 @@ impl DnsPipeline {
         ecs_subnet: Option<(IpAddr, u8)>,
         dnssec_on: bool,
     ) -> Vec<u8> {
-        if ecs_subnet.is_none() && !dnssec_on {
+        let strip_mac = has_edns_mac(request);
+        let strip_priv_ecs = ecs_subnet.is_none() && has_private_ecs(request);
+        if ecs_subnet.is_none() && !dnssec_on && !strip_mac && !strip_priv_ecs {
             return raw_query.to_vec();
         }
         let mut msg = request.clone();
+        if strip_mac || strip_priv_ecs {
+            strip_forwarder_edns_options(&mut msg, strip_priv_ecs);
+        }
         if let Some(subnet) = ecs_subnet {
             apply_ecs_to_message(&mut msg, subnet);
         }
