@@ -270,6 +270,21 @@ export function SecuritySettingsSection(props: SettingsViewProps) {
             class={TEXTAREA_MONO_CLASS}
           />
         </div>
+
+        <div>
+          <label class="inline-flex items-center gap-1.5 text-xs text-[#666666] dark:text-[#a1a1aa] mb-1.5">
+            <span>{t("settingsTrustedForwardersLabel")}</span>
+            <InfoTooltip text={t("tooltipTrustedForwarders")} align="left" />
+          </label>
+          <textarea
+            rows={2}
+            spellcheck={false}
+            placeholder={"127.0.0.1/32\n192.168.1.1/32"}
+            value={props.trustedForwardersText}
+            onInput={(e) => props.onTrustedForwardersChange(e.currentTarget.value)}
+            class={TEXTAREA_MONO_CLASS}
+          />
+        </div>
       </SettingsCard>
 
       {/* SafeSearch */}

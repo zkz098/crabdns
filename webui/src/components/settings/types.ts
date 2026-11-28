@@ -151,6 +151,8 @@ export interface SettingsViewProps {
   onBlockAnyQueriesChange: (val: boolean) => void;
   trustedProxiesText: string;
   onTrustedProxiesChange: (val: string) => void;
+  trustedForwardersText: string;
+  onTrustedForwardersChange: (val: string) => void;
   rdnsEnabled: boolean;
   onRdnsEnabledChange: (val: boolean) => void;
   safesearch: SafeSearchConfig;

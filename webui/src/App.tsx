@@ -146,6 +146,7 @@ export default function App() {
   const [dnsRebindingProtection, setDnsRebindingProtection] = createSignal(false);
   const [blockAnyQueries, setBlockAnyQueries] = createSignal(false);
   const [trustedProxiesText, setTrustedProxiesText] = createSignal("");
+  const [trustedForwardersText, setTrustedForwardersText] = createSignal("");
   const [tlsCertPath, setTlsCertPath] = createSignal("");
   const [tlsKeyPath, setTlsKeyPath] = createSignal("");
   const [rdnsEnabled, setRdnsEnabled] = createSignal(true);
@@ -882,6 +883,7 @@ export default function App() {
     setDnsRebindingProtection(data.dns_rebinding_protection);
     setBlockAnyQueries(data.block_any_queries);
     setTrustedProxiesText((data.trusted_proxies ?? []).join("\n"));
+    setTrustedForwardersText((data.trusted_forwarders ?? []).join("\n"));
     setTlsCertPath(data.tls_cert_path ?? "");
     setTlsKeyPath(data.tls_key_path ?? "");
     setAcmeEnabled(data.acme_enabled ?? false);
@@ -1511,6 +1513,7 @@ export default function App() {
       dns_rebinding_protection: dnsRebindingProtection(),
       block_any_queries: blockAnyQueries(),
       trusted_proxies: parseLines(trustedProxiesText()),
+      trusted_forwarders: parseLines(trustedForwardersText()),
       tls_cert_path: tlsCertPath().trim(),
       tls_key_path: tlsKeyPath().trim(),
       rdns_enabled: rdnsEnabled(),
@@ -1971,6 +1974,8 @@ export default function App() {
                 onBlockAnyQueriesChange={setBlockAnyQueries}
                 trustedProxiesText={trustedProxiesText()}
                 onTrustedProxiesChange={setTrustedProxiesText}
+                trustedForwardersText={trustedForwardersText()}
+                onTrustedForwardersChange={setTrustedForwardersText}
                 rdnsEnabled={rdnsEnabled()}
                 onRdnsEnabledChange={setRdnsEnabled}
                 safesearch={safesearch()}

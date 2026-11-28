@@ -223,6 +223,7 @@ const en = {
   settingsDnsRebindingLabel: "DNS Rebinding Protection (block private IPs from public upstreams)",
   settingsBlockAnyLabel: "Suppress ANY Queries (RFC 8482 HINFO)",
   settingsTrustedProxiesLabel: "Trusted Reverse Proxy CIDRs (one per line)",
+  settingsTrustedForwardersLabel: "Trusted DNS Forwarder CIDRs (one per line, for EDNS0 MAC/ECS)",
   settingsLanTitle: "LAN & System Integration",
   settingsHostsLabel: "Load Local Hosts File",
   settingsHostsPathLabel: "Hosts File Path (default: /etc/hosts)",
@@ -777,6 +778,8 @@ const en = {
     "Responds to DNS ANY queries with a minimal RFC 8482 HINFO record instead of forwarding, mitigating DNS amplification.",
   tooltipTrustedProxies:
     "Reverse proxy IP/CIDR ranges trusted to supply the real client IP via X-Forwarded-For or Forwarded headers for DoH requests.",
+  tooltipTrustedForwarders:
+    "DNS forwarder IP/CIDR ranges (e.g. dnsmasq) trusted to supply client MAC (EDNS0 option 65001) and client IP (ECS). Forwarder-injected MAC and private ECS options are stripped before forwarding upstream.",
   tooltipHosts:
     "Loads static hostname-to-IP mappings from the local hosts file so LAN devices resolve without upstream queries.",
   tooltipDhcpLeases:
@@ -1020,6 +1023,7 @@ const zhCN: Record<TranslationKey, string> = {
   settingsDnsRebindingLabel: "DNS 重绑定防护（拦截公网域名返回内网 IP）",
   settingsBlockAnyLabel: "抑制 ANY 类型查询（RFC 8482 HINFO）",
   settingsTrustedProxiesLabel: "可信反向代理 CIDR（每行一个，用于 DoH/登录真实 IP）",
+  settingsTrustedForwardersLabel: "可信 DNS 转发器 CIDR（每行一个，用于 EDNS0 MAC/ECS 识别）",
   settingsLanTitle: "局域网与系统集成",
   settingsHostsLabel: "加载本地 Hosts 文件并自动热更新",
   settingsHostsPathLabel: "Hosts 文件路径（留空默认 /etc/hosts）",
@@ -1558,6 +1562,8 @@ const zhCN: Record<TranslationKey, string> = {
     "对 DNS ANY 查询直接返回精简的 RFC 8482 HINFO 响应而不转发上游，防止 DNS 放大攻击。",
   tooltipTrustedProxies:
     "受信任的反向代理 IP/CIDR 列表，允许其通过 X-Forwarded-For 或 Forwarded 请求头传递真实 DoH 客户端 IP。",
+  tooltipTrustedForwarders:
+    "受信任的 DNS 转发器 IP/CIDR 列表（如 dnsmasq），允许其通过 EDNS0 Option 65001 (--add-mac) 与 ECS (--add-subnet) 传递真实客户端 MAC 与 IP；转发到公网上游前会自动剥离。",
   tooltipHosts: "加载本机 hosts 文件中的静态主机名映射，使局域网设备无需向上游查询即可直接解析。",
   tooltipDhcpLeases:
     "解析 DHCP 服务租约文件（支持 dnsmasq、ISC DHCP、Kea），自动将局域网客户端 IP 关联到设备主机名。",
