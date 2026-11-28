@@ -24,6 +24,7 @@ mime_guess.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
 aws-lc-rs.workspace = true
+argon2.workspace = true
 rust-embed.workspace = true
 rustls.workspace = true
 serde.workspace = true

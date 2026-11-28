@@ -3,6 +3,9 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use argon2::{
+    Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
+};
 use aws_lc_rs::pbkdf2;
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use axum::Json;
@@ -16,7 +19,10 @@ use ts_rs::TS;
 
 use crate::RouterState;
 
-const PBKDF2_ITERATIONS: u32 = 100_000;
+// OWASP minimum recommended Argon2id parameters (19 MiB, 2 iterations, 1 lane).
+const ARGON2ID_M_COST_KIB: u32 = 19_456;
+const ARGON2ID_T_COST: u32 = 2;
+const ARGON2ID_P_COST: u32 = 1;
 const SESSION_COOKIE_NAME: &str = "crabdns_session";
 const SESSION_TTL: Duration = Duration::from_hours(24);
 const MAX_LOGIN_FAILURES: u32 = 5;
@@ -256,28 +262,35 @@ pub struct AuthUpdatePayload {
     pub password: Option<String>,
 }
 
+fn argon2id_hasher() -> Result<Argon2<'static>, String> {
+    let params = Params::new(ARGON2ID_M_COST_KIB, ARGON2ID_T_COST, ARGON2ID_P_COST, None)
+        .map_err(|e| format!("invalid argon2id parameters: {e}"))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
+}
+
 pub fn hash_password(password: &str) -> Result<String, String> {
-    let mut salt = [0_u8; 16];
-    SystemRandom::new()
-        .fill(&mut salt)
-        .map_err(|_| "failed to generate random salt".to_string())?;
-    let mut out = [0_u8; 32];
-    let iters = NonZeroU32::new(PBKDF2_ITERATIONS).expect("non-zero");
-    pbkdf2::derive(
-        pbkdf2::PBKDF2_HMAC_SHA256,
-        iters,
-        &salt,
-        password.as_bytes(),
-        &mut out,
-    );
-    Ok(format!(
-        "pbkdf2${PBKDF2_ITERATIONS}${}${}",
-        hex_encode(&salt),
-        hex_encode(&out)
-    ))
+    argon2id_hasher()?
+        .hash_password(password.as_bytes())
+        .map(|hash| hash.to_string())
+        .map_err(|e| format!("failed to hash password: {e}"))
 }
 
 pub fn verify_password(password: &str, stored_hash: &str) -> bool {
+    if stored_hash.starts_with("$argon2id$") {
+        let Ok(parsed) = PasswordHash::new(stored_hash) else {
+            return false;
+        };
+        return Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok();
+    }
+    if stored_hash.starts_with("pbkdf2$") {
+        return verify_pbkdf2_password(password, stored_hash);
+    }
+    false
+}
+
+fn verify_pbkdf2_password(password: &str, stored_hash: &str) -> bool {
     let mut parts = stored_hash.split('$');
     let (Some("pbkdf2"), Some(iter_str), Some(salt_hex), Some(hash_hex), None) = (
         parts.next(),
@@ -481,6 +494,8 @@ pub async fn login(
     }
 
     let user_ok = payload.username.trim() == cfg.web_username;
+    let password_for_upgrade = (user_ok && cfg.web_password_hash.starts_with("pbkdf2$"))
+        .then(|| payload.password.clone());
     let pass_ok = if user_ok {
         let password = payload.password;
         let stored_hash = cfg.web_password_hash.clone();
@@ -500,6 +515,10 @@ pub async fn login(
     }
     state.login_limiter.clear(client_ip);
 
+    if let Some(pw) = password_for_upgrade {
+        upgrade_legacy_password_hash(&state, &cfg.web_password_hash, &pw).await;
+    }
+
     let Some(token) = state.sessions.create_session(&cfg.web_username) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -518,6 +537,42 @@ pub async fn login(
         resp.headers_mut().insert(header::SET_COOKIE, val);
     }
     resp
+}
+
+async fn upgrade_legacy_password_hash(state: &RouterState, legacy_hash: &str, password: &str) {
+    let _config_guard = state.app.storage.config_lock().lock().await;
+    let current = state.app.config.load_full();
+    if current.web_password_hash != legacy_hash {
+        return;
+    }
+    let pw_owned = password.to_string();
+    let new_hash = match tokio::task::spawn_blocking(move || hash_password(&pw_owned)).await {
+        Ok(Ok(hash)) => hash,
+        Ok(Err(err)) => {
+            tracing::warn!("failed to upgrade legacy password hash to Argon2id: {err}");
+            return;
+        }
+        Err(err) => {
+            tracing::warn!("failed to join password hash upgrade task: {err}");
+            return;
+        }
+    };
+
+    let mut next = (*current).clone();
+    next.web_password_hash = new_hash;
+    let storage = Arc::clone(&state.app.storage);
+    let to_save = next.clone();
+    match tokio::task::spawn_blocking(move || storage.save_config(&to_save.runtime)).await {
+        Ok(Ok(())) => {
+            state.app.config.store(Arc::new(next));
+        }
+        Ok(Err(err)) => {
+            tracing::warn!("failed to persist upgraded Argon2id password hash: {err}");
+        }
+        Err(err) => {
+            tracing::warn!("failed to join config save task during hash upgrade: {err}");
+        }
+    }
 }
 
 pub(crate) fn session_cookie_header(token: &str, secure_cookie: bool) -> String {
@@ -685,10 +740,31 @@ mod tests {
     #[test]
     fn test_password_hash_and_verify() {
         let hash = hash_password("s3cr3t-pass").expect("hash");
-        assert!(hash.starts_with("pbkdf2$"));
+        assert!(hash.starts_with("$argon2id$"));
         assert!(verify_password("s3cr3t-pass", &hash));
         assert!(!verify_password("wrong-pass", &hash));
         assert!(!verify_password("s3cr3t-pass", "invalid-format"));
+    }
+
+    #[test]
+    fn test_legacy_pbkdf2_password_verify() {
+        let salt = [0x11_u8; 16];
+        let mut out = [0_u8; 32];
+        let iterations = 100_000_u32;
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            NonZeroU32::new(iterations).expect("non-zero"),
+            &salt,
+            b"legacy-pass",
+            &mut out,
+        );
+        let legacy_hash = format!(
+            "pbkdf2${iterations}${}${}",
+            hex_encode(&salt),
+            hex_encode(&out)
+        );
+        assert!(verify_password("legacy-pass", &legacy_hash));
+        assert!(!verify_password("wrong-pass", &legacy_hash));
     }
 
     #[test]
