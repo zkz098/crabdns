@@ -197,7 +197,7 @@ impl<'a> FilterQueryContext<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClientMatcher {
     Ip(IpAddr),
     Cidr(IpNet),
@@ -247,7 +247,7 @@ impl ClientMatcher {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RuleConditions {
     pub positive_dnstypes: Vec<RecordType>,
     pub negative_dnstypes: Vec<RecordType>,

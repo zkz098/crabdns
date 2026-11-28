@@ -146,7 +146,12 @@ impl Default for TrieBuilder {
 }
 
 impl TrieBuilder {
-    pub(crate) fn insert(&mut self, interner: &mut LabelInterner, domain: &str, meta: RuleMeta) {
+    pub(crate) fn insert(
+        &mut self,
+        interner: &mut LabelInterner,
+        domain: &str,
+        meta: RuleMeta,
+    ) -> bool {
         let mut current_idx = 0_usize;
         for label in domain.rsplit('.').filter(|s| !s.is_empty()) {
             let label_id = interner.intern(label);
@@ -159,7 +164,16 @@ impl TrieBuilder {
                 current_idx = next_idx as usize;
             }
         }
-        self.nodes[current_idx].rules.push(meta);
+        let rules = &mut self.nodes[current_idx].rules;
+        if let Some(pos) = rules.iter().position(|r| {
+            r.scope == meta.scope && r.rewrite == meta.rewrite && r.conditions == meta.conditions
+        }) {
+            rules.remove(pos);
+            rules.push(meta);
+            return false;
+        }
+        rules.push(meta);
+        true
     }
 
     pub(crate) fn freeze(self) -> FlatTrie {

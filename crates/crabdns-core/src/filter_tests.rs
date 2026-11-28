@@ -208,3 +208,35 @@ fn test_filter_rejects_overlong_domain_and_counts_without_trie() {
     assert_eq!(counted.rewrite_rules, built.rewrite_rules);
     assert_eq!(counted.total_rules, 8);
 }
+
+#[test]
+fn test_trie_node_dedup_preserves_later_source_and_distinct_variants() {
+    let engine = FilterEngine::new(&[]);
+    let sub1 = "0.0.0.0 dup.example.com\n||sub.example.com^\n".to_string();
+    let sub2 = "127.0.0.1 dup.example.com\n0.0.0.0 sub.example.com\n".to_string();
+    let custom = "||dup.example.com^$dnstype=A\n||sub.example.com^\n";
+
+    let stats = engine.reload_from_named_sources(
+        custom,
+        true,
+        &[("sub1".to_string(), sub1), ("sub2".to_string(), sub2)],
+    );
+
+    // Effective unique rules:
+    // 1. dup.example.com (Exact, replaced by sub2)
+    // 2. sub.example.com (DomainAndSubdomains, replaced by custom)
+    // 3. sub.example.com (Exact, from sub2)
+    // 4. dup.example.com (DomainAndSubdomains + $dnstype=A, from custom)
+    assert_eq!(stats.total_rules, 4);
+    assert_eq!(stats.block_rules, 4);
+
+    let dup_dec = engine.evaluate("dup.example.com");
+    assert_eq!(dup_dec.action, FilterAction::Block);
+    assert_eq!(dup_dec.matched_rule.as_deref(), Some("127.0.0.1 dup.example.com"));
+    assert_eq!(dup_dec.matched_list.as_deref(), Some("sub2"));
+
+    let sub_dec = engine.evaluate("a.sub.example.com");
+    assert_eq!(sub_dec.action, FilterAction::Block);
+    assert_eq!(sub_dec.matched_rule.as_deref(), Some("||sub.example.com^"));
+    assert_eq!(sub_dec.matched_list.as_deref(), Some("custom"));
+}

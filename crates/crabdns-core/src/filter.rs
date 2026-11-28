@@ -228,7 +228,6 @@ impl RuleSetBuilder {
                     rewrite,
                     conditions,
                 } => {
-                    self.record_bucket_stat(bucket);
                     let meta = RuleMeta {
                         rule_text: raw,
                         scope,
@@ -236,24 +235,23 @@ impl RuleSetBuilder {
                         conditions,
                         source_id,
                     };
-                    match bucket {
+                    let inserted = match bucket {
                         RuleBucket::ImportantAllow => {
                             self.important_allows
-                                .insert(&mut self.interner, &domain, meta);
+                                .insert(&mut self.interner, &domain, meta)
                         }
-                        RuleBucket::Allow => {
-                            self.allows.insert(&mut self.interner, &domain, meta);
-                        }
+                        RuleBucket::Allow => self.allows.insert(&mut self.interner, &domain, meta),
                         RuleBucket::ImportantBlock => {
                             self.important_blocks
-                                .insert(&mut self.interner, &domain, meta);
+                                .insert(&mut self.interner, &domain, meta)
                         }
-                        RuleBucket::Block => {
-                            self.blocks.insert(&mut self.interner, &domain, meta);
-                        }
+                        RuleBucket::Block => self.blocks.insert(&mut self.interner, &domain, meta),
                         RuleBucket::Rewrite => {
-                            self.rewrites.insert(&mut self.interner, &domain, meta);
+                            self.rewrites.insert(&mut self.interner, &domain, meta)
                         }
+                    };
+                    if inserted {
+                        self.record_bucket_stat(bucket);
                     }
                 }
                 ParsedLine::Regex {
