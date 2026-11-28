@@ -733,6 +733,10 @@ mod tests {
 
     #[test]
     fn test_serve_stale_fallback_when_optimistic_disabled() {
+        use hickory_proto::op::{MessageType, OpCode, Query};
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::{Name, RData, Record, RecordType};
+
         let cache = DnsCache::with_options(16, false, 1, 300, false);
         let key = CacheKey {
             qname: "fallback.example.".to_string(),
@@ -742,9 +746,6 @@ mod tests {
             dnssec_do: false,
             upstream_scope: None,
         };
-        use hickory_proto::op::{MessageType, OpCode, Query};
-        use hickory_proto::rr::rdata::A;
-        use hickory_proto::rr::{Name, RData, Record, RecordType};
 
         let mut msg = Message::new(0x1111, MessageType::Response, OpCode::Query);
         let name = Name::from_ascii("fallback.example.").unwrap();

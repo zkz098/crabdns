@@ -860,29 +860,29 @@ async fn resolve_cidrs(cfg: &CfCdnConfig) -> (Vec<Ipv4Cidr>, Vec<Ipv6Cidr>, Opti
     };
 
     let mut fetch_err = None;
-    if !has_custom_v4 || (cfg.ipv6_enabled && !has_custom_v6) {
-        if let Ok(client) = reqwest::Client::builder().timeout(FETCH_TIMEOUT).build() {
-            if !has_custom_v4 {
-                match fetch_cidr_text(&client, CF_IPS_V4_URL).await {
-                    Ok(body) => {
-                        ipv4_cidrs = parse_v4_cidrs(body.lines());
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "failed to fetch Cloudflare IPv4 CIDRs, using fallback");
-                        fetch_err = Some(err);
-                    }
+    if (!has_custom_v4 || (cfg.ipv6_enabled && !has_custom_v6))
+        && let Ok(client) = reqwest::Client::builder().timeout(FETCH_TIMEOUT).build()
+    {
+        if !has_custom_v4 {
+            match fetch_cidr_text(&client, CF_IPS_V4_URL).await {
+                Ok(body) => {
+                    ipv4_cidrs = parse_v4_cidrs(body.lines());
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to fetch Cloudflare IPv4 CIDRs, using fallback");
+                    fetch_err = Some(err);
                 }
             }
-            if cfg.ipv6_enabled && !has_custom_v6 {
-                match fetch_cidr_text(&client, CF_IPS_V6_URL).await {
-                    Ok(body) => {
-                        ipv6_cidrs = parse_v6_cidrs(body.lines());
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "failed to fetch Cloudflare IPv6 CIDRs, using fallback");
-                        if fetch_err.is_none() {
-                            fetch_err = Some(err);
-                        }
+        }
+        if cfg.ipv6_enabled && !has_custom_v6 {
+            match fetch_cidr_text(&client, CF_IPS_V6_URL).await {
+                Ok(body) => {
+                    ipv6_cidrs = parse_v6_cidrs(body.lines());
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to fetch Cloudflare IPv6 CIDRs, using fallback");
+                    if fetch_err.is_none() {
+                        fetch_err = Some(err);
                     }
                 }
             }
@@ -990,6 +990,7 @@ async fn measure_throughput(ip: IpAddr, speedtest_url: &str) -> Result<f64, Stri
 
     let _ = timeout(THROUGHPUT_STREAM_DURATION, download).await;
     let elapsed_secs = start.elapsed().as_secs_f64();
+    #[allow(clippy::cast_precision_loss)]
     let total_bytes = bytes.load(Ordering::Relaxed) as f64;
 
     if elapsed_secs <= 0.0 || total_bytes <= 0.0 {

@@ -161,15 +161,11 @@ impl SplitRoute {
                 return false;
             }
         }
-        if !self.client_tags.is_empty()
+        !(!self.client_tags.is_empty()
             && !self
                 .client_tags
                 .iter()
-                .any(|req| ctx.client_tags.iter().any(|t| t.eq_ignore_ascii_case(req)))
-        {
-            return false;
-        }
-        true
+                .any(|req| ctx.client_tags.iter().any(|t| t.eq_ignore_ascii_case(req))))
     }
 }
 

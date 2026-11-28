@@ -21,7 +21,7 @@ export function MobileNav(props: MobileNavProps) {
   return (
     <nav
       aria-label="Mobile Navigation"
-      class="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-[#eaeaea] dark:border-[#262626] bg-white/90 dark:bg-[#0a0a0a]/90 backdrop-blur-xl pb-[env(safe-area-inset-bottom)]"
+      class="lg:hidden fixed bottom-0 inset-x-0 z-40 border-t border-[#eaeaea] dark:border-[#262626] bg-white/90 dark:bg-[#0a0a0a]/90 backdrop-blur-xl pb-[env(safe-area-inset-bottom)]"
     >
       <div class="grid grid-cols-7 h-15">
         <For each={NAV_ITEMS}>

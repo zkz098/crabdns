@@ -521,7 +521,7 @@ impl DnssecValidator {
         changed
     }
 
-    /// Queries the root zone `.` DNSKEY RRset via `upstream`, validates it against current
+    /// Queries the root zone `.` DNSKEY `RRset` via `upstream`, validates it against current
     /// trust anchors, and runs RFC 5011 trust anchor rollover checks.
     pub async fn probe_and_update_root_anchors(
         &self,

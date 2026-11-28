@@ -304,6 +304,7 @@ pub async fn check_for_update_with_config(
 }
 
 /// Check for a newer signed release relative to `current_version`.
+#[allow(clippy::too_many_lines)]
 pub async fn check_for_update_from_version(
     client: &reqwest::Client,
     data_dir: &Path,
@@ -363,7 +364,10 @@ pub async fn check_for_update_from_version(
                         )
                         .await
                         .map_err(|e| format!("sigilup update check failed: {e}"))?;
-                    (decision, rest.iter().any(|u| u.starts_with(GH_PROXY_PREFIX)))
+                    (
+                        decision,
+                        rest.iter().any(|u| u.starts_with(GH_PROXY_PREFIX)),
+                    )
                 }
                 Err(_) => {
                     tracing::info!(
@@ -379,7 +383,10 @@ pub async fn check_for_update_from_version(
                         )
                         .await
                         .map_err(|e| format!("sigilup update check failed: {e}"))?;
-                    (decision, rest.iter().any(|u| u.starts_with(GH_PROXY_PREFIX)))
+                    (
+                        decision,
+                        rest.iter().any(|u| u.starts_with(GH_PROXY_PREFIX)),
+                    )
                 }
             }
         }

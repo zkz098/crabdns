@@ -623,7 +623,7 @@ mod tests {
             block_mode: Some(BlockMode::NxDomain),
             cname_cloaking_blocking: Some(false),
             safesearch_enabled: None,
-            upstream_policy: Default::default(),
+            upstream_policy: UpstreamPolicy::default(),
         }];
         let clients = vec![
             ClientProfile {
@@ -637,7 +637,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
-                upstream_policy: Default::default(),
+                upstream_policy: UpstreamPolicy::default(),
                 tags: Vec::new(),
             },
             ClientProfile {
@@ -651,7 +651,7 @@ mod tests {
                 upstreams: vec!["udp://1.1.1.1:53".to_string()],
                 block_mode: Some(BlockMode::NoData),
                 safesearch_enabled: None,
-                upstream_policy: Default::default(),
+                upstream_policy: UpstreamPolicy::default(),
                 tags: vec!["work".to_string()],
             },
         ];
@@ -714,7 +714,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
-                upstream_policy: Default::default(),
+                upstream_policy: UpstreamPolicy::default(),
                 tags: Vec::new(),
             },
             ClientProfile {
@@ -728,7 +728,7 @@ mod tests {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: None,
-                upstream_policy: Default::default(),
+                upstream_policy: UpstreamPolicy::default(),
                 tags: Vec::new(),
             },
         ];

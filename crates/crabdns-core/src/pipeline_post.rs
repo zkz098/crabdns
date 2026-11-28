@@ -150,6 +150,7 @@ impl DnsPipeline {
         Ok(Some(resp))
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn maybe_sanitize_svcb(
         &self,
         qtype: RecordType,

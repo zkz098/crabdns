@@ -397,7 +397,7 @@ async fn test_safesearch_dns64_and_svcb_sanitization_pipeline() {
                 upstreams: Vec::new(),
                 block_mode: None,
                 safesearch_enabled: Some(false),
-                upstream_policy: Default::default(),
+                upstream_policy: crabdns_core::UpstreamPolicy::default(),
                 tags: Vec::new(),
             }],
             &[],
@@ -473,6 +473,7 @@ async fn test_acme_dns01_local_challenge_response() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_per_group_upstream_policies_split_dns_and_client_group() {
     use crabdns_core::{BlockMode, UpstreamPolicy};
     use hickory_proto::rr::rdata::opt::EdnsOption;

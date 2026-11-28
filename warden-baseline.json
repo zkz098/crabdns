@@ -1,4 +1,87 @@
 {
   "version": 1,
-  "entries": {}
+  "entries": {
+    "complexity:crates/crabdns-core/src/upstream_groups.rs:resolve_specs_pool": {
+      "rule_id": "warden/complexity",
+      "check": "complexity",
+      "file": "crates/crabdns-core/src/upstream_groups.rs",
+      "message": "crates/crabdns-core/src/upstream_groups.rs:138 - `resolve_specs_pool()` score: 30 (> 25)",
+      "max_value": 30
+    },
+    "complexity:crates/crabdns-web/src/config_api.rs:update_config": {
+      "rule_id": "warden/complexity",
+      "check": "complexity",
+      "file": "crates/crabdns-web/src/config_api.rs",
+      "message": "crates/crabdns-web/src/config_api.rs:435 - `update_config()` score: 34 (> 25)",
+      "max_value": 34
+    },
+    "dag:cycle:crates/crabdns-core/src:config,edns,security,split_dns_config,wire": {
+      "rule_id": "warden/dag/cycle",
+      "check": "dag",
+      "file": "crates/crabdns-core/src",
+      "message": "Module dependency cycle detected in crates/crabdns-core/src: config <-> edns <-> security <-> split_dns_config <-> wire"
+    },
+    "dag:cycle:crates/crabdns-core/src:pipeline_exec,split_dns_exec": {
+      "rule_id": "warden/dag/cycle",
+      "check": "dag",
+      "file": "crates/crabdns-core/src",
+      "message": "Module dependency cycle detected in crates/crabdns-core/src: pipeline_exec <-> split_dns_exec"
+    },
+    "file-length:crates/crabdns-core/src/cf_cdn.rs": {
+      "rule_id": "warden/file-length",
+      "check": "file-length",
+      "file": "crates/crabdns-core/src/cf_cdn.rs",
+      "message": "crates/crabdns-core/src/cf_cdn.rs has 1212 physical lines (> 800)",
+      "max_value": 1212
+    },
+    "file-length:crates/crabdns-core/src/dnssec.rs": {
+      "rule_id": "warden/file-length",
+      "check": "file-length",
+      "file": "crates/crabdns-core/src/dnssec.rs",
+      "message": "crates/crabdns-core/src/dnssec.rs has 917 physical lines (> 800)",
+      "max_value": 917
+    },
+    "file-length:crates/crabdns-core/src/pipeline.rs": {
+      "rule_id": "warden/file-length",
+      "check": "file-length",
+      "file": "crates/crabdns-core/src/pipeline.rs",
+      "message": "crates/crabdns-core/src/pipeline.rs has 869 physical lines (> 800)",
+      "max_value": 869
+    },
+    "file-length:crates/crabdns-core/src/pipeline_exec.rs": {
+      "rule_id": "warden/file-length",
+      "check": "file-length",
+      "file": "crates/crabdns-core/src/pipeline_exec.rs",
+      "message": "crates/crabdns-core/src/pipeline_exec.rs has 948 physical lines (> 800)",
+      "max_value": 948
+    },
+    "file-length:crates/crabdns-server/src/lib.rs": {
+      "rule_id": "warden/file-length",
+      "check": "file-length",
+      "file": "crates/crabdns-server/src/lib.rs",
+      "message": "crates/crabdns-server/src/lib.rs has 851 physical lines (> 800)",
+      "max_value": 851
+    },
+    "file-length:crates/crabdns-web/src/config_api.rs": {
+      "rule_id": "warden/file-length",
+      "check": "file-length",
+      "file": "crates/crabdns-web/src/config_api.rs",
+      "message": "crates/crabdns-web/src/config_api.rs has 976 physical lines (> 800)",
+      "max_value": 976
+    },
+    "file-length:crates/crabdns-web/src/subscriptions.rs": {
+      "rule_id": "warden/file-length",
+      "check": "file-length",
+      "file": "crates/crabdns-web/src/subscriptions.rs",
+      "message": "crates/crabdns-web/src/subscriptions.rs has 1301 physical lines (> 800)",
+      "max_value": 1301
+    },
+    "file-length:crates/crabdns-web/src/update_api.rs": {
+      "rule_id": "warden/file-length",
+      "check": "file-length",
+      "file": "crates/crabdns-web/src/update_api.rs",
+      "message": "crates/crabdns-web/src/update_api.rs has 1221 physical lines (> 800)",
+      "max_value": 1221
+    }
+  }
 }

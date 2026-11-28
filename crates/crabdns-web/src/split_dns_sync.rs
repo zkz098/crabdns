@@ -345,6 +345,7 @@ pub fn collect_split_dns_source_statuses(
 /// Conditionally downloads all unique remote split-DNS URLs using `ETag` and
 /// `If-Modified-Since`, persists updated lists & sync metadata while preserving old
 /// cached data on failure, and reloads `SplitUpstreamRouter` when content changes.
+#[allow(clippy::too_many_lines)]
 pub async fn refresh_split_dns_subscriptions_job(
     client: &reqwest::Client,
     config: &Config,

@@ -724,7 +724,7 @@ mod tests {
         let mut excl4 = RouteBitset::new(5);
         trie.collect_config_order("app.internal.cn", &mut pos, &mut excl4);
         let remaining: Vec<u32> = pos.iter_excluding(&excl4).collect();
-        assert!(remaining.is_empty());
+        assert_eq!(remaining, [] as [u32; 0]);
 
         let mut pos2 = RouteBitset::new(5);
         let mut excl5 = RouteBitset::new(5);

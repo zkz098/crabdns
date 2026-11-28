@@ -597,7 +597,7 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
             block_mode: None,
             cname_cloaking_blocking: None,
             safesearch_enabled: None,
-            upstream_policy: Default::default(),
+            upstream_policy: crabdns_core::UpstreamPolicy::default(),
         }])
         .expect("save groups");
     storage
@@ -612,7 +612,7 @@ async fn test_backup_export_import_advanced_logs_and_stats_reset() {
             upstreams: Vec::new(),
             block_mode: None,
             safesearch_enabled: None,
-            upstream_policy: Default::default(),
+            upstream_policy: crabdns_core::UpstreamPolicy::default(),
             tags: vec!["tablet".to_string()],
         }])
         .expect("save clients");
@@ -1722,6 +1722,7 @@ async fn test_split_dns_groups_and_cache_invalidation_via_config_api() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines, clippy::items_after_statements)]
 async fn test_split_dns_conditional_sync_status_and_interval() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1879,6 +1880,7 @@ async fn test_split_dns_conditional_sync_status_and_interval() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_security_headers_csrf_and_commit_confirm() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(StorageEngine::open(dir.path()).expect("open storage"));

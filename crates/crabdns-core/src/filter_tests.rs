@@ -232,7 +232,10 @@ fn test_trie_node_dedup_preserves_later_source_and_distinct_variants() {
 
     let dup_dec = engine.evaluate("dup.example.com");
     assert_eq!(dup_dec.action, FilterAction::Block);
-    assert_eq!(dup_dec.matched_rule.as_deref(), Some("127.0.0.1 dup.example.com"));
+    assert_eq!(
+        dup_dec.matched_rule.as_deref(),
+        Some("127.0.0.1 dup.example.com")
+    );
     assert_eq!(dup_dec.matched_list.as_deref(), Some("sub2"));
 
     let sub_dec = engine.evaluate("a.sub.example.com");

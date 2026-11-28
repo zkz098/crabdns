@@ -1746,7 +1746,7 @@ export default function App() {
             onLogout={handleLogout}
           />
 
-          <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 sm:pt-7 pb-24 md:pb-10">
+          <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5 sm:pt-7 pb-24 lg:pb-10">
             <Show when={tab() === "dashboard"}>
               <DashboardView
                 stats={stats()}

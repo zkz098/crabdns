@@ -502,11 +502,8 @@ pub(crate) async fn fetch_subscription_with_fallback_and_progress<F>(
 where
     F: FnMut(u64, Option<u64>, bool),
 {
-    let candidates = ordered_github_candidates(
-        url,
-        mirror_prefix,
-        crate::update_api::is_china_deployment(),
-    );
+    let candidates =
+        ordered_github_candidates(url, mirror_prefix, crate::update_api::is_china_deployment());
     let has_fallback = candidates.len() > 1;
     let mut errors = Vec::new();
 
@@ -1295,7 +1292,7 @@ mod tests {
         .expect("fetch should succeed");
 
         assert_eq!(text, body);
-        assert!(!events.is_empty());
+        assert_ne!(events.len(), 0);
         let last = events.last().copied().unwrap();
         assert_eq!(last.0, body.len() as u64);
         assert_eq!(last.1, Some(body.len() as u64));

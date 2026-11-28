@@ -332,6 +332,7 @@ impl DnsPipeline {
         }
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn apply_upstream_policy_flags(
         &self,
         mut flags: PolicyFlags,
@@ -770,7 +771,7 @@ impl DnsPipeline {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn run_singleflight_leader(
         &self,
         guard: FlightGuard<CacheKey, (Vec<u8>, String)>,

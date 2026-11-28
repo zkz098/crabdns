@@ -170,7 +170,7 @@ impl StorageEngine {
         }
     }
 
-    /// Saves synchronization metadata (ETag, Last-Modified, timestamps, error) for a remote split-DNS list URL.
+    /// Saves synchronization metadata (`ETag`, Last-Modified, timestamps, error) for a remote split-DNS list URL.
     pub fn save_split_dns_list_meta(&self, meta: &SplitDnsListMeta) -> Result<()> {
         let mut key = Vec::with_capacity(SPLIT_LIST_META_PREFIX.len() + meta.url.len());
         key.extend_from_slice(SPLIT_LIST_META_PREFIX);
